@@ -119,6 +119,26 @@ def _compile_cache_exports(root: str) -> list[str]:
     return lines
 
 
+# With compile_cache_url, torch_tpu's tier-3 roots default to that gs:// folder,
+# which torch_tpu reads and writes itself as the pod's own identity, so every
+# Job shares one set of compiled programs. The local backup compile is off with
+# it, or a cache hit still compiles.
+TIER3_BACKUP_ENV = "TORCH_TPU_INTERNAL_TIER3_COMPILATION_CACHE_LOCAL_BACKUP_TASK"
+
+
+def _tier3_cache_command(command: list[str], url: str) -> list[str]:
+    """`command`, run with torch_tpu's tier-3 roots defaulting to `url`.
+
+    Defaults only: an image or recipe that sets either spelling keeps it.
+    """
+    names = COMPILE_CACHE_ENV[1][0]
+    unset = "".join(f"${{{name}+x}}" for name in names)
+    exports = " ".join(f"{name}={shlex.quote(url)}" for name in names)
+    backup = f"{TIER3_BACKUP_ENV}=${{{TIER3_BACKUP_ENV}:-0}}"
+    line = f'if [ -z "{unset}" ]; then export {exports} {backup}; fi'
+    return ["sh", "-c", f'{line}\nexec "$@"', "sh", *command]
+
+
 def _compile_cache_command(command: list[str],
                            root: str,
                            max_age_days: int = COMPILE_CACHE_MAX_AGE_DAYS,
@@ -601,6 +621,12 @@ def job_manifest(
         # See POD_CACHE_ENV.
         container = template["spec"]["containers"][0]
         container["command"] = _pod_cache_command(container["command"])
+    if config.compile_cache_url:
+        # Outermost, so it is set before hf_cache_pvc's defaults, which
+        # then leave torch_tpu's roots to it.
+        container = template["spec"]["containers"][0]
+        container["command"] = _tier3_cache_command(container["command"],
+                                                    config.compile_cache_url)
     if shell_python:
         # Kubernetes doesn't expand `~`. The scripts do.
         template["spec"]["containers"][0].setdefault("env", []).append({

@@ -78,6 +78,9 @@ class GkeJobConfig:
     hf_cache_pvc: str | None = None
     cpu_requests: dict[str, str] = dataclasses.field(default_factory=dict)
     compile_cache_max_age_days: int = COMPILE_CACHE_MAX_AGE_DAYS
+    # A gs:// folder torch_tpu keeps its compiled programs in, shared by
+    # every Job (see manifest._tier3_cache_command).
+    compile_cache_url: str | None = None
 
     def __post_init__(self) -> None:
         # Blank means `default`. Never derived from the queue: Kueue needs
@@ -198,6 +201,17 @@ def config_from_params(params: dict[str, Any]) -> GkeJobConfig:
     if max_age is None or max_age == "":
         max_age = COMPILE_CACHE_MAX_AGE_DAYS
     max_age = positive_int("compile_cache_max_age_days", max_age, 0)
+    compile_cache_url = (params.get("compile_cache_url")
+                         or "").strip().rstrip("/")
+    # A folder, not a bucket: serve_vllm.sh appends -patch-<key> to the root,
+    # which on a bare gs://bucket would name a different bucket.
+    if compile_cache_url and not re.fullmatch(r"gs://[^/]+/.+",
+                                              compile_cache_url):
+        raise base.ComputeConfigError(
+            "Backend 'gke_job' 'compile_cache_url' must be a folder in a "
+            f"bucket, gs://<bucket>/<folder>, got {compile_cache_url!r}.",
+            error_code="INVALID_FIELD",
+        )
 
     cpu_requests = parse_requests(params.get("cpu_requests"), "cpu_requests")
     if cpu_requests and colocate_with:
@@ -248,11 +262,18 @@ def config_from_params(params: dict[str, Any]) -> GkeJobConfig:
         hf_cache_pvc=hf_cache_pvc,
         cpu_requests=cpu_requests,
         compile_cache_max_age_days=max_age,
+        compile_cache_url=compile_cache_url or None,
     )
 
 
 def add_cli_flags(parser: Any, add_cli_arg: Callable[..., None]) -> None:
     """Declare `GkeJobConfig` flags via `ComputeDriver.add_cli_arg`."""
+    add_cli_arg(
+        parser,
+        "--compile-cache-url",
+        help="gs:// folder torch_tpu keeps its compiled programs in, shared "
+        "by every Job; pods read and write it as their own identity",
+    )
     add_cli_arg(
         parser,
         "--namespace",

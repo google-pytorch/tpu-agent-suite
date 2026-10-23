@@ -41,7 +41,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from framework.compute import ComputeConfigError
 from framework.compute.drivers import base, gcs_staging, gke_job, jobs
-from framework.tests.compute.gke_job.helpers import (FakeKubectl, hello_script,
+from framework.tests.compute.gke_job.helpers import (_fake_google_auth, _KeyCreds,
+                                                     FakeKubectl, hello_script,
                                                      job_json, job_store,
                                                      make_driver,
                                                      set_up_module)
@@ -71,40 +72,7 @@ except ImportError:
     _google_auth_errors = None
 
 
-@contextlib.contextmanager
-def _fake_google_auth(creds: Any):
-    """Stand in for `google.auth` so the ambient-credential path is testable
-    with or without the SDK installed. The code under test imports it lazily;
-    `import google.auth` consults `sys.modules` for the submodule but then
-    reads it as an attribute of the `google` package, so both are patched."""
-    auth = types.ModuleType("google.auth")
-    auth.default = MagicMock(return_value=(creds, "proj"))
-    transport = types.ModuleType("google.auth.transport")
-    requests = types.ModuleType("google.auth.transport.requests")
-    requests.Request = MagicMock()
-    auth.transport = transport
-    transport.requests = requests
-    google_pkg = sys.modules.get("google") or types.ModuleType("google")
-    with patch.dict(
-            sys.modules, {
-                "google": google_pkg,
-                "google.auth": auth,
-                "google.auth.transport": transport,
-                "google.auth.transport.requests": requests,
-            }), patch.object(google_pkg, "auth", auth, create=True):
-        yield
-
-
 _DONE_POD = json.dumps({"items": [{"status": {"phase": "Succeeded"}}]})
-
-
-class _KeyCreds:
-    """Credentials with their own signer: a key or impersonation."""
-    signer_email = "sa@proj.iam.gserviceaccount.com"
-
-    def sign_bytes(self, data):
-        del data
-        return b"sig"
 
 
 class _UserCreds:

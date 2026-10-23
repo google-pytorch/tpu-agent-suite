@@ -52,6 +52,12 @@ export GKE_QUEUE="default"
 # export GKE_STAGING_BUCKET="gs://<bucket>"
 # export GKE_POD_SERVICE_ACCOUNT="<kubernetes service account in GKE_NAMESPACE>"
 
+# Optional: a gs:// folder (bucket and folder) that every pod's torch_tpu
+# compile cache defaults to, so Jobs reuse each other's compiled programs.
+# Needs GKE_POD_SERVICE_ACCOUNT, whose Workload Identity principal needs
+# roles/storage.objectUser on the bucket.
+# export GKE_COMPILE_CACHE_URL="gs://<bucket>/<folder>"
+
 # ==============================================================================
 # 3. TPU Hardware & Workload Docker Image
 # ==============================================================================

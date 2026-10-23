@@ -79,6 +79,7 @@ class TestGkeJobParams(unittest.TestCase):
             ("hf_cache_pvc", "  ", None),
             ("hf_cache_pvc", " hf-cache.shared ", "hf-cache.shared"),
             ("compile_cache_max_age_days", 0, 0),
+            ("compile_cache_url", " gs://b/xla_cache/ ", "gs://b/xla_cache"),
             ("kube_context", " ctx-a ", "ctx-a"),
             ("job_name_prefix", " ", None),
             ("job_name_prefix", "Agent_Evals", "agent-evals"),
@@ -97,6 +98,9 @@ class TestGkeJobParams(unittest.TestCase):
             ("hf_cache_pvc", "HF_Cache"),
             ("hf_cache_pvc", "a" * 254),
             ("compile_cache_max_age_days", -1),
+            ("compile_cache_url", "/cache"),
+            # A bare bucket: a patched build's -patch-<key> would name another.
+            ("compile_cache_url", "gs://b/"),
             ("job_name_prefix", "___"),
             ("job_name_prefix",
              "a" * (gke_job.profile_settings.MAX_JOB_NAME_PREFIX_LEN + 1)),
@@ -234,6 +238,29 @@ class TestGkeJobSubmit(unittest.TestCase):
                 self.assertEqual(env_behind(prologue, image_env, names), seen)
         self.assertRegex(gke_job.manifest.compile_cache_key("gcr.io/p/img:v1"),
                          r"^img-v1-[0-9a-f]{12}$")
+
+    def test_compile_cache_url_is_every_pods_tier3_root(self):
+        # Wrapped outside hf_cache_pvc's defaults, which then leave
+        # torch_tpu's roots to it; an image's own root still wins.
+        url, backup = "gs://b/xla_cache", gke_job.manifest.TIER3_BACKUP_ENV
+        fake = FakeKubectl()
+        self.submit(fake, compile_cache_url=url, hf_cache_pvc="hf-cache")
+        prologue = fake.applied_pod_spec()["containers"][0]["command"][:8]
+        names = ("VLLM_CACHE_ROOT", "TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT",
+                 backup)
+        for image_env, tier3, want_backup in (
+            ({}, url, "0"),
+            ({
+                "TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT": "/opt/tpu"
+            }, "/opt/tpu", None),
+        ):
+            with self.subTest(image_env=image_env):
+                seen = env_behind(prologue, image_env, names)
+                self.assertTrue(
+                    seen["VLLM_CACHE_ROOT"].startswith("/hf-cache/"))
+                self.assertEqual(
+                    seen["TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT"], tier3)
+                self.assertEqual(seen.get(backup), want_backup)
 
     def test_compile_cache_prune_removes_only_stale_folders(self):
         mount = self.tmp / "vol"

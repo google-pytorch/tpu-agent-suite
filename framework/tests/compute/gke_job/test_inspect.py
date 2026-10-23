@@ -21,9 +21,10 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import types
 import unittest
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # Imports below follow this sys.path setup, so the file runs directly.
 # ruff: noqa: E402
@@ -33,7 +34,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from framework.compute.drivers import (auth_utils, base, gcs_staging, gke_job,
                                        jobs)
-from framework.tests.compute.gke_job.helpers import (FakeKubectl, failed_pod,
+from framework.tests.compute.gke_job.helpers import (_fake_google_auth, _KeyCreds,
+                                                     FakeKubectl, failed_pod,
                                                      hello_script, job_store,
                                                      make_driver,
                                                      set_up_module)
@@ -322,6 +324,26 @@ class TestGkeJobInspect(unittest.TestCase):
                              list(gcs_staging.POD_UPLOAD_FIELDS))
             self._preflight({})
             staging.assert_called_once()
+
+    def test_preflight_fails_a_compile_cache_pods_cannot_reach(self):
+        # torch_tpu reaches the folder as the pod; without its own identity
+        # the pod has no credential, so the first server would 403.
+        _, checks, _ = self._preflight({}, compile_cache_url="gs://b/xla")
+        self.assertEqual(checks["compile_cache"].status, "fail")
+        self.assertIn("pod_service_account", checks["compile_cache"].fix)
+        listed = base.PreflightCheck("compile_cache", "ok", "gs://b/xla")
+        cloud = types.ModuleType("google.cloud")
+        cloud.storage = MagicMock()
+        with patch.object(gcs_staging, "bucket_check",
+                          return_value=listed) as bucket, \
+                _fake_google_auth(_KeyCreds()), \
+                patch.dict(sys.modules, {"google.cloud": cloud,
+                                         "google.cloud.storage": cloud.storage}):
+            _, checks, _ = self._preflight({},
+                                           compile_cache_url="gs://b/xla",
+                                           pod_service_account="ksa")
+        self.assertEqual(checks["compile_cache"].status, "ok")
+        self.assertEqual(bucket.call_args.args[:2], ("compile_cache", "b/xla"))
 
     def test_preflight_names_tpu_pools_without_workload_identity(self):
         _, checks, _ = self._preflight(

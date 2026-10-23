@@ -102,6 +102,8 @@ class GkeJobDriver(base.ComputeDriver):
             "overriding the chip count derived from tpu_topology",
             "shm_size_gb":
             f"a /dev/shm larger or smaller than {DEFAULT_SHM_SIZE_GB} GiB",
+            "compile_cache_url":
+            "torch_tpu's compiled programs shared across Jobs in a gs:// folder",
             "compile_cache_max_age_days":
             "keeping unused compile caches on hf_cache_pvc other than "
             f"{COMPILE_CACHE_MAX_AGE_DAYS} days (0 never removes them)",

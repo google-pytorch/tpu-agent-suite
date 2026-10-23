@@ -269,6 +269,18 @@
       "default": ""
     },
     {
+      "name": "compile_cache_url",
+      "path": "compute.params.compile_cache_url",
+      "when": {
+        "backend": [
+          "gke_job"
+        ]
+      },
+      "prompt": "gke_job only (optional): gs:// folder for torch_tpu's compile cache, shared by every Job so later servers skip compiling. The pods' own identity needs object access and storage.buckets.get on the bucket. Leave empty to compile in each pod",
+      "type": "string",
+      "default": ""
+    },
+    {
       "name": "compile_cache_max_age_days",
       "path": "compute.params.compile_cache_max_age_days",
       "when": {

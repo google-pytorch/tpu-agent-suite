@@ -95,6 +95,8 @@ agents:
     # (HOST_ADC) upload and download, so they need object access too.
     GKE_STAGING_BUCKET: ${GKE_STAGING_BUCKET:-}
     GKE_POD_SERVICE_ACCOUNT: ${GKE_POD_SERVICE_ACCOUNT:-}
+    # A gs:// folder for torch_tpu's compile cache, shared by every Job; unset, each pod compiles.
+    GKE_COMPILE_CACHE_URL: ${GKE_COMPILE_CACHE_URL:-}
     KUBECONFIG: /root/.kube/config
     CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: /root/.config/gcloud/application_default_credentials.json
 

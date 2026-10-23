@@ -541,24 +541,32 @@ def preflight_checks(
             checks.append(
                 base.PreflightCheck("staging:signing", "fail", detail.strip(),
                                     "Use one of:" + fix if fix else ""))
+    checks.append(
+        bucket_check(
+            "staging:bucket", bucket, client,
+            "Set staging_bucket to a bucket these credentials hold "
+            "roles/storage.objectAdmin on"))
+    return checks
+
+
+def bucket_check(check: str, bucket: str, client: Any,
+                 fix: str) -> base.PreflightCheck:
+    """Whether `client` can list `bucket[/folder]`, as preflight check `check`.
+
+    Listing needs only object permissions; describing the bucket would need
+    more.
+    """
     try:
-        # Listing needs only object permissions, which staging needs anyway;
-        # describing the bucket would need more.
         name, prefix = locate(bucket, "")
         next(
             iter(client.list_blobs(name, prefix=prefix or None,
                                    max_results=1)), None)
-        checks.append(
-            base.PreflightCheck("staging:bucket", "ok", f"gs://{bucket}"))
+        return base.PreflightCheck(check, "ok", f"gs://{bucket}")
     except Exception as exc:  # noqa: BLE001 - reported, never raised
         code = getattr(exc, "code", None)
-        checks.append(
-            base.PreflightCheck(
-                "staging:bucket", "warn" if code == 403 else "fail",
-                f"gs://{bucket}: {str(exc).splitlines()[0]}",
-                "Set staging_bucket to a bucket these credentials hold "
-                "roles/storage.objectAdmin on"))
-    return checks
+        return base.PreflightCheck(
+            check, "warn" if code == 403 else "fail",
+            f"gs://{bucket}: {str(exc).splitlines()[0]}", fix)
 
 
 def generate_v4_signed_url(

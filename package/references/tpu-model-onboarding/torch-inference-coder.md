@@ -425,7 +425,9 @@ If the vLLM engine is requested:
     `/hf-cache/compile-cache/<accelerator>-<topology>/<image key>/{vllm,torch_tpu}`
     (or the pod's /dev/shm when the volume is 90% full), so a restart on the
     same image skips most of compiling; image folders unused for
-    `compile_cache_max_age_days` (default 14) are removed. A build patched
+    `compile_cache_max_age_days` (default 14) are removed. When the profile
+    sets `compile_cache_url`, both torch_tpu roots point at that `gs://`
+    folder instead, shared by every Job. A build patched
     with `apply_vllm_patch.sh` keeps the image key, so `serve_vllm.sh` moves
     those caches to sibling `-patch-<key>` folders by itself; don't set them
     in `launch_vllm.sh`. It also raises vLLM's GPU-sized timeouts for TPU

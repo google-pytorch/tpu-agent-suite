@@ -75,6 +75,8 @@ def collect_task_environment_answers(
             env_lookup.get("GKE_STAGING_BUCKET", ""),
             "pod_service_account":
             env_lookup.get("GKE_POD_SERVICE_ACCOUNT", ""),
+            "compile_cache_url":
+            env_lookup.get("GKE_COMPILE_CACHE_URL", ""),
         })
 
     raw_extra_answers = env_lookup.get("COMPUTE_ANSWERS_JSON", "").strip()

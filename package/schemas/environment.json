@@ -117,6 +117,11 @@
                 "type": "string",
                 "description": "gke_job backend (optional): name of a ReadWriteMany PersistentVolumeClaim, created by a cluster admin in the Job's namespace, mounted at /hf-cache in every pod with HF_HUB_CACHE pointing at it, so model weights download once and later Jobs read them from disk. Leave unset to download into each pod's /dev/shm (shm_size_gb)."
               },
+              "compile_cache_url": {
+                "type": "string",
+                "pattern": "^gs://[^/]+/.+",
+                "description": "gke_job backend (optional): gs:// folder (e.g. gs://my-bucket/xla_cache) that every pod's torch_tpu tier-3 compile cache defaults to, so Jobs reuse each other's compiled programs. torch_tpu reads and writes it as the pod's own identity, which needs object access and storage.buckets.get on the bucket."
+              },
               "compile_cache_max_age_days": {
                 "type": "integer",
                 "minimum": 0,

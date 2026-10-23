@@ -328,7 +328,44 @@ def target_checks(kube: Kubectl, config: GkeJobConfig,
                 checks.append(pull)
     if config.staging_bucket:
         checks.extend(staging_checks(config))
+    if config.compile_cache_url:
+        checks.append(compile_cache_check(config))
     return reachable
+
+
+def compile_cache_check(config: GkeJobConfig) -> base.PreflightCheck:
+    """Whether pods can reach `compile_cache_url`.
+
+    torch_tpu reaches it as the pod's own identity: without a
+    pod_service_account the pod has no credential for it at all. The listing
+    is made as this host, which only shows that the folder is there.
+    """
+    url = config.compile_cache_url or ""
+    grant = (
+        "grant pod_service_account's Workload Identity principal "
+        f"roles/storage.objectUser on gs://{gcs_staging.locate(url, '')[0]}"
+        " (setup step 4 in docs/install.md)")
+    if not config.pod_service_account:
+        return base.PreflightCheck(
+            "compile_cache", "fail",
+            f"compile_cache_url {url} is set but pod_service_account is "
+            "not, so pods have no credential for it",
+            f"Set pod_service_account and {grant}, or unset "
+            "compile_cache_url")
+    try:
+        import google.auth  # noqa: PLC0415 - optional dependency
+        from google.cloud import storage  # noqa: PLC0415
+        credentials, project = google.auth.default()
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        return base.PreflightCheck(
+            "compile_cache", "warn",
+            f"could not check {url} from this host: {exc}",
+            f"Make sure to {grant}")
+    return gcs_staging.bucket_check(
+        "compile_cache", gcs_staging.clean_bucket_name(url),
+        storage.Client(project=project, credentials=credentials),
+        f"Point compile_cache_url at a folder in an existing bucket and "
+        f"{grant}")
 
 
 def staging_checks(config: GkeJobConfig) -> list[base.PreflightCheck]:
