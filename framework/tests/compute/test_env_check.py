@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-_SCRIPT = Path(__file__).resolve().parents[1] / "compute" / "env_check.py"
+_SCRIPT = Path(__file__).resolve().parents[2] / "compute" / "env_check.py"
 _spec = importlib.util.spec_from_file_location("env_check", _SCRIPT)
 env_check = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(env_check)

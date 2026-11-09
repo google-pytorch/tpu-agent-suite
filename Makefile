@@ -77,7 +77,7 @@ lint:
 
 coverage:
 	@rm -f .coverage
-	-@$(PYTHON) -m coverage run --rcfile=$(COVERAGE_RC) -m unittest discover -s framework/tests
+	-@$(PYTHON) -m coverage run --rcfile=$(COVERAGE_RC) -m unittest discover -s framework/tests -t .
 	-@$(PYTHON) -m coverage run --rcfile=$(COVERAGE_RC) --append -m unittest discover -s package/tests
 	@$(PYTHON) -m coverage report --rcfile=$(COVERAGE_RC)
 
@@ -89,14 +89,14 @@ coverage-html: coverage
 # Needs full git history: a shallow clone cannot diff against main.
 coverage-diff:
 	@rm -f .coverage coverage.xml
-	-@$(PYTHON) -m coverage run --rcfile=$(COVERAGE_RC) -m unittest discover -s framework/tests
+	-@$(PYTHON) -m coverage run --rcfile=$(COVERAGE_RC) -m unittest discover -s framework/tests -t .
 	-@$(PYTHON) -m coverage run --rcfile=$(COVERAGE_RC) --append -m unittest discover -s package/tests
 	@$(PYTHON) -m coverage xml --rcfile=$(COVERAGE_RC)
 	@$(PYTHON) -m diff_cover.diff_cover_tool coverage.xml \
 		--compare-branch=$(DIFF_BASE) --fail-under=$(DIFF_COVERAGE_MIN)
 
 test-framework:
-	$(PYTHON) -m unittest discover -s framework/tests -v
+	$(PYTHON) -m unittest discover -s framework/tests -t . -v
 
 test-package:
 	$(PYTHON) -m unittest discover -s package/tests -v

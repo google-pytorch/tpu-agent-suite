@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-_repo_root = pathlib.Path(__file__).resolve().parents[2]
+_repo_root = pathlib.Path(__file__).resolve().parents[3]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
