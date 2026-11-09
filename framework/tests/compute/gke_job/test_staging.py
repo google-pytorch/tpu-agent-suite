@@ -41,10 +41,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from framework.compute import ComputeConfigError
 from framework.compute.drivers import base, gcs_staging, gke_job, jobs
-from framework.tests.compute.gke_job.helpers import (_fake_google_auth, _KeyCreds,
-                                                     FakeKubectl, hello_script,
-                                                     job_json, job_store,
-                                                     make_driver,
+from framework.tests.compute.gke_job.helpers import (FakeKubectl, KeyCreds,
+                                                     fake_google_auth,
+                                                     hello_script, job_json,
+                                                     job_store, make_driver,
                                                      set_up_module)
 
 Path = pathlib.Path
@@ -70,7 +70,6 @@ try:
     from google.auth import exceptions as _google_auth_errors
 except ImportError:
     _google_auth_errors = None
-
 
 _DONE_POD = json.dumps({"items": [{"status": {"phase": "Succeeded"}}]})
 
@@ -114,7 +113,7 @@ class TestGkeJobStaging(unittest.TestCase):
         client, blob = self._client_with(creds)
         blob.generate_signed_url.side_effect = Exception(
             "403 Forbidden: Permission denied")
-        with _fake_google_auth(creds), \
+        with fake_google_auth(creds), \
                 self.assertRaises(ComputeConfigError) as ctx:
             gcs_staging.generate_v4_signed_url("my-bucket",
                                                "in/data.txt",
@@ -134,7 +133,7 @@ class TestGkeJobStaging(unittest.TestCase):
         storage.Client = MagicMock(return_value=client)
         cloud = types.ModuleType("google.cloud")
         cloud.storage = storage
-        with _fake_google_auth(creds), patch.dict(
+        with fake_google_auth(creds), patch.dict(
                 sys.modules, {
                     "google.cloud": cloud,
                     "google.cloud.storage": storage
@@ -142,7 +141,7 @@ class TestGkeJobStaging(unittest.TestCase):
             yield client, blob
 
     def test_preflight_signs_and_lists_the_bucket(self):
-        with self._fake_storage(_KeyCreds()) as (client, blob):
+        with self._fake_storage(KeyCreds()) as (client, blob):
             checks = gcs_staging.preflight_checks("b")
         self.assertEqual([(c.name, c.status) for c in checks],
                          [("staging:credentials", "ok"),
@@ -153,17 +152,17 @@ class TestGkeJobStaging(unittest.TestCase):
                                                   max_results=1)
         # A folder in the bucket is listed as one, not as a bucket name. A
         # staging credential is used as given, never swapped for ADC.
-        with self._fake_storage(_KeyCreds()) as (client, _):
+        with self._fake_storage(KeyCreds()) as (client, _):
             storage = sys.modules["google.cloud.storage"]
             with patch("google.auth.default") as default:
                 checks = gcs_staging.preflight_checks("gs://b/runs/",
-                                                      credentials=_KeyCreds())
+                                                      credentials=KeyCreds())
         client.list_blobs.assert_called_once_with("b",
                                                   prefix="runs/",
                                                   max_results=1)
         default.assert_not_called()
         self.assertIsInstance(storage.Client.call_args.kwargs["credentials"],
-                              _KeyCreds)
+                              KeyCreds)
         self.assertEqual(checks[0].status, "ok")
 
     def test_preflight_does_not_ask_a_pod_token_setup_to_sign(self):

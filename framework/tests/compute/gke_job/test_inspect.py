@@ -34,11 +34,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from framework.compute.drivers import (auth_utils, base, gcs_staging, gke_job,
                                        jobs)
-from framework.tests.compute.gke_job.helpers import (_fake_google_auth, _KeyCreds,
-                                                     FakeKubectl, failed_pod,
-                                                     hello_script, job_store,
-                                                     make_driver,
-                                                     set_up_module)
+
+from framework.tests.compute.gke_job.helpers import (  # isort: skip
+    FakeKubectl, KeyCreds, failed_pod, fake_google_auth, hello_script,
+    job_store, make_driver, set_up_module)
 
 
 def setUpModule():  # pylint: disable=invalid-name
@@ -336,7 +335,7 @@ class TestGkeJobInspect(unittest.TestCase):
         cloud.storage = MagicMock()
         with patch.object(gcs_staging, "bucket_check",
                           return_value=listed) as bucket, \
-                _fake_google_auth(_KeyCreds()), \
+                fake_google_auth(KeyCreds()), \
                 patch.dict(sys.modules, {"google.cloud": cloud,
                                          "google.cloud.storage": cloud.storage}):
             _, checks, _ = self._preflight({},

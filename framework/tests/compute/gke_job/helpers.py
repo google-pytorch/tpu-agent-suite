@@ -190,7 +190,7 @@ class GkeJobLifecycleBase(unittest.TestCase):
 
 
 @contextlib.contextmanager
-def _fake_google_auth(creds: Any):
+def fake_google_auth(creds: Any):
     """Stand in for `google.auth` so the ambient-credential path is testable
     with or without the SDK installed. The code under test imports it lazily;
     `import google.auth` consults `sys.modules` for the submodule but then
@@ -213,8 +213,7 @@ def _fake_google_auth(creds: Any):
         yield
 
 
-
-class _KeyCreds:
+class KeyCreds:
     """Credentials with their own signer: a key or impersonation."""
     signer_email = "sa@proj.iam.gserviceaccount.com"
 
