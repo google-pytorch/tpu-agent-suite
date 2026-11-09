@@ -25,6 +25,9 @@ on:
         description: 'Append .dev<YYYYMMDDHHMM> to the manifest version'
         type: boolean
         default: false
+    secrets:
+      INTERNAL_DENYLIST_B64:
+        required: false
     outputs:
       version:
         description: 'Resolved release version string'
@@ -89,8 +92,10 @@ jobs:
           python3 framework/compiler.py archive --dist-dir dist --output dist/archives
 
       - name: Scan compiled dist/ against denylist when present
+        env:
+          INTERNAL_DENYLIST_B64: ${{ secrets.INTERNAL_DENYLIST_B64 }}
         run: |
-          if [ -f google/denylist.yaml ]; then
+          if [ -f google/denylist.yaml ] || [ -n "${INTERNAL_DENYLIST_B64:-}" ]; then
             python3 scripts/check_denylist.py --paths dist/ --output-format github
           fi
 

@@ -101,12 +101,15 @@ jobs:
   release:
     needs: check-ref
     uses: ./.github/workflows/release-archives.yml
+    secrets:
+      INTERNAL_DENYLIST_B64: ${{ secrets.INTERNAL_DENYLIST_B64 }}
 
   publish-release:
     name: publish-release
     needs: [check-ref, release]
     if: inputs.publish_release
     runs-on: ubuntu-latest
+    environment: public-sync
     permissions:
       contents: write
     env:
