@@ -97,6 +97,19 @@ class ImageProbeTest(unittest.TestCase):
     def test_image_without_torch_tpu(self):
         report = self._probe({"torch": "2.9.0"}, {"torch"}, check_device=False)
         self.assertFalse(report["torch_tpu_present"])
+        self.assertFalse(report["sglang_present"])
+
+    def test_sglang_image_reported(self):
+        report = self._probe(
+            {
+                "torch": "2.9.0",
+                "sglang": "0.5.3",
+                "sgl-kernel": "0.1.0"
+            }, {"torch", "torch_tpu", "sglang"},
+            check_device=False)
+        self.assertTrue(report["sglang_present"])
+        self.assertEqual(report["distributions"]["sglang"], "0.5.3")
+        self.assertEqual(report["distributions"]["sgl-kernel"], "0.1.0")
 
     def test_modules_are_never_imported(self):
         # Importing torch_tpu would initialise the TPU runtime; only
@@ -115,6 +128,15 @@ class ImageProbeTest(unittest.TestCase):
         self.assertFalse(
             self._probe({}, full - {"transformers"},
                         check_device=False)["preflight_runnable"])
+
+    def test_custom_fastapi_runnable_needs_fastapi_pydantic_and_uvicorn(self):
+        full = {"fastapi", "pydantic", "uvicorn"}
+        report = self._probe({}, full, check_device=False)
+        self.assertTrue(report["custom_fastapi_runnable"])
+        for missing in full:
+            report = self._probe({}, full - {missing}, check_device=False)
+            self.assertFalse(report["custom_fastapi_runnable"])
+            self.assertFalse(report["modules"][missing])
 
     def test_tpu_env_reported(self):
         with mock.patch.dict(os.environ, {
@@ -265,7 +287,8 @@ class ImageProbeTest(unittest.TestCase):
                 written = json.load(f)
         self.assertEqual(written, json.loads(out.getvalue()))
         for key in ("distributions", "modules", "torch_tpu_present",
-                    "preflight_runnable", "vllm_platform", "dependencies",
+                    "sglang_present", "preflight_runnable",
+                    "custom_fastapi_runnable", "vllm_platform", "dependencies",
                     "device"):
             self.assertIn(key, written)
 

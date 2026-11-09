@@ -39,7 +39,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from framework import compiler, utils  # noqa: E402
+from framework import jsonio, utils  # noqa: E402
+from framework.builder import package_discovery  # noqa: E402
+from framework.builder import package_loader  # noqa: E402
+from framework.builder import dist_assets, translators  # noqa: E402
 
 Path = pathlib.Path
 PACKAGE_DIR = REPO_ROOT / "package"
@@ -52,7 +55,7 @@ EXPECTED_AGENT_COUNT = 8
 
 # Imported, not restated: `copy_asset` hands exactly these patterns to
 # `shutil.ignore_patterns`, so the exclusion and its test cannot drift apart.
-FORBIDDEN_NAME_PATTERNS = compiler.DIST_EXCLUDED_NAMES
+FORBIDDEN_NAME_PATTERNS = package_discovery.DIST_EXCLUDED_NAMES
 
 # Top-level directories every translator emits regardless of package content.
 # Hard-coded on purpose: these come from `translate`, not from package.release.json, so
@@ -60,6 +63,7 @@ FORBIDDEN_NAME_PATTERNS = compiler.DIST_EXCLUDED_NAMES
 # directories are derived instead -- see `expected_top_dirs`.
 FRAMEWORK_TOP_DIRS = frozenset({
     "agents",
+    "docs",
     "environment",
     "framework",
     "schemas",
@@ -93,15 +97,15 @@ class TranslationParityBase:
         cls.temp_dir = Path(
             tempfile.mkdtemp(prefix=f"torchtpu_test_{cls.HARNESS}_"))
         cls.dist_dir = cls.temp_dir / f"dist_{cls.HARNESS}"
-        compiler.translate(
+        translators.translate(
             package_dir=PACKAGE_DIR,
             harness=cls.HARNESS,
             output=cls.dist_dir,
             include_internal=False,
         )
-        cls.raw_manifest = utils.load_json(PACKAGE_DIR /
-                                           "package.release.json")
-        cls.manifest = compiler.resolve_manifest_composition(
+        cls.raw_manifest = jsonio.load_json(PACKAGE_DIR /
+                                            "package.release.json")
+        cls.manifest = package_loader.resolve_manifest_composition(
             PACKAGE_DIR, cls.raw_manifest)
         cls.pkg_name = cls.manifest["name"]
         cls.pkg_tag = f"{cls.pkg_name}@{cls.manifest.get('version', '')}"
@@ -162,7 +166,7 @@ class TranslationParityBase:
 
     def test_build_metadata(self):
         """tpu-agent-suite-build.json pins the framework, source, and harness target."""
-        build = utils.load_json(self.dist_dir / "tpu-agent-suite-build.json")
+        build = jsonio.load_json(self.dist_dir / "tpu-agent-suite-build.json")
         self.assertEqual(build["version"], utils.TPU_AGENT_SUITE_VERSION)
         self.assertEqual(build["source"], self.manifest["name"])
         self.assertEqual(build["harness"], self.HARNESS)
@@ -173,7 +177,7 @@ class TranslationParityBase:
 
     def test_install_plan_skeleton(self):
         """The install plan names this harness, its version gate, and its copies."""
-        plan = utils.load_json(self.dist_dir / "tpu-agent-suite-install.json")
+        plan = jsonio.load_json(self.dist_dir / "tpu-agent-suite-install.json")
         self.assertEqual(plan["harness"], self.HARNESS)
         self.assertEqual(plan["version_range"], self.VERSION_RANGE)
         self.assertEqual(plan.get("version_command"), self.VERSION_COMMAND)
@@ -193,6 +197,7 @@ class TranslationParityBase:
                 # framework/ holds the installer too, so an install can be
                 # removed without its distribution.
             ("framework", "central"),
+            ("docs", "central"),
             ("schemas", "central"),
             ("tpu-agent-suite-build.json", "central"),
         ):
@@ -201,8 +206,18 @@ class TranslationParityBase:
         for entry in plan["copies"]:
             self.assertIn(entry["store"], ("workspace", "central"))
 
+    def test_every_memory_block_opens_with_the_scope_preamble(self):
+        """A memory block loads in every session, so each one first says it
+        applies only inside the package's skills."""
+        plan = jsonio.load_json(self.dist_dir / "tpu-agent-suite-install.json")
+        preamble = dist_assets.memory_scope_preamble(self.manifest)
+        for block in plan["markdown_merges"]:
+            with self.subTest(marker=block["marker"]):
+                self.assertTrue(block["content"].startswith(preamble + "\n\n"))
+                self.assertEqual(block["content"].count(preamble), 1)
+
     def test_skill_present_and_compiled(self):
-        """Skill documents exist and carry no build-time marker."""
+        """Skill documents exist and carry the installed package contract."""
         for path in self.skill_files():
             self.assertTrue(path.is_file(), f"Missing skill doc {path}")
             content = path.read_text(encoding="utf-8")
@@ -210,7 +225,6 @@ class TranslationParityBase:
                 content.startswith(f"---\nname: {self.entry_name}\n"),
                 f"{path} is missing its name frontmatter",
             )
-            self.assertNotIn(utils.GENERATED_MARKER, content)
             self.assertIn("## Installed package contract", content)
 
     def test_every_agent_is_emitted(self):
@@ -225,7 +239,6 @@ class TranslationParityBase:
                 self.assertTrue(path.is_file(),
                                 f"Missing agent artifact {path}")
                 content = path.read_text(encoding="utf-8")
-                self.assertNotIn(utils.GENERATED_MARKER, content)
                 if path.suffix == ".toml" and tomllib is not None:
                     # TOML escapes quotes, so compare the parsed value.
                     content = tomllib.loads(content).get("description", "")
@@ -249,7 +262,7 @@ class TranslationParityBase:
             self.assertTrue(schema_file.is_file(),
                             f"Missing bundled schema {schema_rel}")
             errors = utils.validate_schema_definition(
-                utils.load_json(schema_file))
+                jsonio.load_json(schema_file))
             self.assertEqual(errors, [],
                              f"Invalid bundled schema {schema_rel}: {errors}")
 
@@ -283,9 +296,9 @@ class TranslationParityBase:
         self.assertTrue((self.dist_dir / "framework" / "utils.py").is_file(),
                         "Missing framework/utils.py")
         # The build tooling stays in the repository.
-        for build_only in ("compiler.py", "lint.py", "frontmatter.py",
-                           "definitions", "templates", "tests",
-                           "schemas/package-manifest.schema.json",
+        for build_only in ("compiler.py", "builder", "lint.py",
+                           "frontmatter.py", "definitions", "templates",
+                           "tests", "schemas/package-manifest.schema.json",
                            "schemas/agent-frontmatter.schema.json"):
             self.assertFalse(
                 (self.dist_dir / "framework" / build_only).exists(),
@@ -326,6 +339,17 @@ class TranslationParityBase:
         self.assertIn("`data/tpu-knowledge-base/pages/`", readme)
         self.assertTrue(
             (self.dist_dir / "data" / "tpu-knowledge-base" / "pages").is_dir())
+
+    def test_docs_named_by_the_readme_are_shipped(self):
+        """Each doc the README names is in docs/, byte-for-byte the repo copy."""
+        readme = (self.dist_dir / "README.md").read_text(encoding="utf-8")
+        repo_docs = PACKAGE_DIR.parent / "docs"
+        for doc in dist_assets.DISTRIBUTION_DOCS:
+            self.assertIn(f"`docs/{doc}`", readme)
+            shipped = self.dist_dir / "docs" / doc
+            self.assertTrue(shipped.is_file(), f"docs/{doc} missing")
+            self.assertEqual(shipped.read_bytes(),
+                             (repo_docs / doc).read_bytes())
 
     def test_requirements_carry_the_declared_dependencies(self):
         """The shipped catalogs are trimmed to what the built units declare in

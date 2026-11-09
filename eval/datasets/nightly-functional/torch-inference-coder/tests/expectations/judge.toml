@@ -13,20 +13,14 @@
 # limitations under the License.
 
 [judge]
-judge = "vertex_ai/gemini-3.5-flash"
+judge = "vertex_ai/gemini-3.8-flash"
 atif-trajectory = "/logs/agent/trajectory.json"
 timeout = 600
 
 [[criterion]]
-description = "Synthesizes inference.py for Causal LM model with TPU device initialization."
+description = "Synthesizes fastapi_server.py for a Causal LM model with TPU device initialization following the torch-inference-coder reference guide."
 type = "binary"
 weight = 1.0
-
-[[criterion]]
-description = "Routes the request from tpu-agent to tpu-model-onboarding to synthesize the inference script."
-type = "binary"
-weight = 1.0
-
 
 [scoring]
 aggregation = "weighted_mean"

@@ -67,6 +67,8 @@ def check_agent_utilized(workspace: Path) -> bool:
         return False
 
     target_agent = _load_verifier_params().get("target_agent")
+    if isinstance(target_agent, str):
+        target_agent = [target_agent]
 
     for call in _collect_tool_calls(traj):
         tool_name = (call.get("function_name") or call.get("name")

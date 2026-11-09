@@ -1,0 +1,53 @@
+{
+ "status": "reported",
+ "summary": "Decode attention (the batched RPA kernel) is the largest cost of the 8k/1k decode step at 128 users (48%); tensor-parallel all-reduces take 41% of the prefill step.",
+ "run_id": "seeded",
+ "traces": [
+  {
+   "path": "/workspace/profile/baseline-8k1k-c128",
+   "label": "baseline 8k1k c128",
+   "captured": true,
+   "levers": [
+    {
+     "kind": "kernel-block",
+     "summary": "Batched ragged paged attention decode kernel",
+     "share_pct": 48.0,
+     "source_tool": "xprof op_profile",
+     "phase": "decode",
+     "trace_name": "RPAd-snh-p128-b8-q1-k1280",
+     "source_file": "/workspace/kernel/batched_rpa_decode.py",
+     "next_step": "Write a faster decode attention kernel for these call shapes."
+    },
+    {
+     "kind": "exposed-collective",
+     "summary": "Tensor-parallel all-reduces in prefill, not overlapped with compute",
+     "share_pct": 41.0,
+     "source_tool": "xprof op_profile",
+     "phase": "prefill",
+     "next_step": "Fewer TP ranks with more replicas for long-prompt traffic."
+    }
+   ],
+   "hot_ops": [
+    {
+     "hlo_op": "RPAd-snh-p128-b8-q1-k1280",
+     "trace_name": "RPAd-snh-p128-b8-q1-k1280",
+     "source_file": "/workspace/kernel/batched_rpa_decode.py",
+     "fusion": null,
+     "fused_with": [],
+     "per_call_us": 341.5,
+     "call_shapes": {
+      "operands": [
+       "bf16[64,8,128]",
+       "bf16[2048,128,8,128]",
+       "s32[64,64]",
+       "s32[64]"
+      ],
+      "outputs": [
+       "bf16[64,8,128]"
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

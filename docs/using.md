@@ -23,7 +23,7 @@ The following list can be used to help you build your prompt:
   - Benchmarking on TPUs
   - Checking that compute is set up correctly
   - Querying information about the model or environment
-- Environment configuration: users are responsible for configuring the environment that their model needs on the compute backend (where the TPUs are provisioned). If your compute profile names a container image, it is used automatically. Otherwise, a good starting point is the python dependencies in `package/requirements-tpu.txt`. You could also choose to build a custom docker container, as exemplified in `eval`.
+- Environment configuration: users are responsible for configuring the environment that their model needs on the compute backend (where the TPUs are provisioned). If your compute profile names a container image, it is used automatically. Otherwise, a good starting point is the python dependencies in the distribution's `requirements-tpu.txt`. You could also choose to build a custom docker container, as exemplified in [`eval`](https://github.com/google-pytorch/tpu-agent-suite/tree/main/eval).
 - Resource limits: You can specify the maximum number of profiling runs, optimization attempts, etc.
 - Output: You can specify the format in which you want the output to be delivered (e.g. markdown, json, etc.). By default, the output is placed in the artifacts directory of the current run, under `~/.tpu-agent-suite/runs/<run_id>/artifacts/`. However, you can manually specify wherever you like.
 
@@ -31,11 +31,11 @@ The following list can be used to help you build your prompt:
 
 #### Detailed Prompts
 
-We recommend prompts that are as detailed as possible to ensure that the agent performs the task in the way that you want. A good strategy for detailed prompts is to write the prompt in a text or markdown file and reference it in the model's chat box when starting the task. Some detailed prompts that have been shown to work well can be found in `eval/datasets`, for example:
+We recommend prompts that are as detailed as possible to ensure that the agent performs the task in the way that you want. A good strategy for detailed prompts is to write the prompt in a text or markdown file and reference it in the model's chat box when starting the task. Some detailed prompts that have been shown to work well can be found in [`eval/datasets`](https://github.com/google-pytorch/tpu-agent-suite/tree/main/eval/datasets), for example:
 
-- Onboarding: [`eval/datasets/onboarding/gemma-3-27b-it/instruction.md`](../eval/datasets/onboarding/gemma-3-27b-it/instruction.md)
-- Kernel Optimization: [`eval/datasets/nightly-functional/jaxbench-8p-gemm/instruction.md`](../eval/datasets/nightly-functional/jaxbench-8p-gemm/instruction.md)
-- Onboarding + Benchmarking: [`eval/datasets/nightly-functional/e2e-torch-tpu-benchmark/instruction.md`](../eval/datasets/nightly-functional/e2e-torch-tpu-benchmark/instruction.md)
+- Onboarding: [`eval/datasets/onboarding/gemma-3-27b-it/instruction.md`](https://github.com/google-pytorch/tpu-agent-suite/blob/main/eval/datasets/onboarding/gemma-3-27b-it/instruction.md)
+- Kernel Optimization: [`eval/datasets/nightly-functional/jaxbench-8p-gemm/instruction.md`](https://github.com/google-pytorch/tpu-agent-suite/blob/main/eval/datasets/nightly-functional/jaxbench-8p-gemm/instruction.md)
+- Onboarding + Benchmarking: [`eval/datasets/nightly-functional/torch-tpu-benchmark/instruction.md`](https://github.com/google-pytorch/tpu-agent-suite/blob/main/eval/datasets/nightly-functional/torch-tpu-benchmark/instruction.md)
 
 #### Simple Prompts
 
@@ -53,7 +53,7 @@ While we recommend more descriptive prompts, using a simpler style of prompt can
 **Request a specific type of optimization**
 > The attention layer in my model at `<path/to/model>` is the hot spot in my model and it is slower than I think it should be. Make it faster on the TPU, and show me the measurements that justify what you changed.
 
-You can find more example prompts in the `eval/datasets/` directory.
+You can find more example prompts in the [`eval/datasets/`](https://github.com/google-pytorch/tpu-agent-suite/tree/main/eval/datasets) directory.
 
 ### Prompting Tips
 - If the agent requires authorization on HuggingFace, make sure your environment exports `HF_TOKEN` before launching the prompt.
@@ -73,7 +73,7 @@ You can find more example prompts in the `eval/datasets/` directory.
 ## Where things run
 
 Workloads run on the compute backend of the run's compute profile (`local`,
-`gce_tpu_vm`, `gke_pod`, `gke_job`, or `gke_xpk`), kept in
+`gce_tpu_vm`, `gke_pod`, or `gke_job`), kept in
 `.tpu-agent-suite/environment.json`. Don't edit that file by
 hand: the agent sets profiles up with you through `compute setup`, and
 `config show` / `config use` list and switch them. Each session starts by
@@ -112,7 +112,6 @@ are not downloaded again. Whether the cache survives depends on the backend:
 | `local`, `gce_tpu_vm` | `~/.cache/huggingface/hub` on that machine, for the user the job runs as | Yes. Nothing to set up. |
 | `gke_pod` | The pod's own filesystem | While that pod lives; lost when it restarts. |
 | `gke_job` | Empty in every Job | Only with a shared cache claim (`hf_cache_pvc`). |
-| `gke_xpk` | Up to the workload's image | Not managed by the agents. |
 
 **What you need to do.**
 
@@ -159,7 +158,7 @@ cancel`, or clear the whole run with `compute job reap --include-serving`
 (cluster-level admission bounds like Kueue `declared_duration_minutes` still
 apply on top). To cancel or inspect a job manually, use the compute CLI
 documented in
-[`framework/compute/README.md`](../framework/compute/README.md#command-reference).
+[`framework/compute/README.md`](https://github.com/google-pytorch/tpu-agent-suite/blob/main/framework/compute/README.md#command-reference).
 
 ---
 
@@ -201,7 +200,7 @@ Nothing is sent to Google. Sharing is off until you turn it on: the first
 time you export, the agent asks whether and where to share, and saves your
 answer. If you decline, nothing is exported, and it doesn't ask again unless
 you ask it to share. See
-[install.md](install.md#4-environment-configuration) for the settings.
+[install.md](install.md#3-environment-configuration) for the settings.
 
 ### Two things it will ask you about
 
@@ -230,6 +229,7 @@ installed read-only under
 `~/.tpu-agent-suite/packages/tpu-agent-suite@<version>/data/tpu-knowledge-base/pages/`.
 
 The curated knowledge base (hardware specs, parallelism concepts, onboarding
-playbooks) is kept in the repository under `package/data/knowledgebase/`
+playbooks) is kept in the repository under
+[`package/data/knowledgebase/`](https://github.com/google-pytorch/tpu-agent-suite/tree/main/package/data/knowledgebase)
 and is not installed. To add a source, see
-[developing.md](developing.md#5-contributing-a-tpu-knowledge-base-source).
+[developing.md](https://github.com/google-pytorch/tpu-agent-suite/blob/main/docs/developing.md#5-contributing-a-tpu-knowledge-base-source).

@@ -125,6 +125,40 @@ class XprofSplit(unittest.TestCase):
         })
         self.assertEqual(len(sp["layers"]), 3)
 
+    def test_top_ops_leave_out_a_kind_that_takes_no_time(self):
+        # The top ops say where a segment's time went. copy-start records 0 ns,
+        # so it is not listed, even in a segment with fewer than five kinds that
+        # took time (listing it raised KeyError: it has no longest instance).
+        from core import xprof_steps as xs
+        start = ("%copy-start.3 = (s32[64]{0}, s32[64]{0}, u32[]) "
+                 "copy-start(s32[64]{0} %p)")
+        work = "%work.1 = s32[64]{0:T(128)} fusion(s32[64]{0} %p)"
+        ops, t = [], 1000
+        for i in range(3):
+            ops += [(t, 0, start), (t + 10, 200000, work)]
+            t += 1000000
+            ops.append(_ar(t, i))
+            t += 1000
+        step = {
+            "module": "tt_jit_x(1)",
+            "t0": 0,
+            "t1": t + 1000,
+            "ops": ops,
+            "draft_ns": 0,
+            "draft_modules": 0
+        }
+        sp = xs.split(step, 3, {
+            "embed_all_reduces": 0,
+            "all_reduces_per_layer": 1
+        })
+        self.assertEqual(len(sp["layers"]), 3)
+        for layer in sp["layers"]:
+            # the boundary all-reduce (100 ns) took time too, so it stays listed
+            self.assertEqual([row[0] for row in layer["top"]],
+                             ["work", "all-reduce"])
+            self.assertEqual(layer["top"][0],
+                             ["work", 0.2, "s32[64]", ["s32[64]"]])
+
     def test_shapes_ignores_layouts(self):
         from core.xprof_steps import _shapes
         out, ins = _shapes(
@@ -138,6 +172,74 @@ class XprofSplit(unittest.TestCase):
             "s32[8388608]{0} %b), kind=kCustom")
         self.assertEqual((out, ins),
                          ("s32[8388608]", ["s32[4096,8]", "s32[8388608]"]))
+
+    def test_default_boundary_matches_sync_and_async_call_done_only(self):
+        from core import xprof_steps as xs
+        rx = xs._boundary(None)
+        self.assertIsNotNone(rx.match("all-reduce.12"))
+        self.assertIsNotNone(rx.match("all-reduce.12.cloned.1.call-done"))
+        self.assertIsNotNone(
+            rx.match("all-reduce.15.cloned.1.call-done.refs_0_.refs_1_"))
+        self.assertIsNone(rx.match("all-reduce.12.cloned.1.call-start"))
+        self.assertIsNone(
+            rx.match("all-reduce.12.cloned.1.call-start.refs_0_"))
+        self.assertIsNone(rx.match("all-reduce.12.cloned.1.call-update"))
+        self.assertEqual(
+            xs._kind("all-reduce.15.cloned.1.call-done.refs_0_.refs_1_"),
+            "all-reduce")
+        self.assertEqual(xs._kind("fusion.34.refs_1_"), "fusion")
+
+    def test_glm_boundary_matches_pallas_small_all_reduce_not_reduce_scatter(
+            self):
+        from core import xprof_steps as xs
+        t = _glm_trace()
+        rx = xs._boundary(t)
+        for ok in ("all-reduce.12", "all-reduce.12.cloned.1.call-done",
+                   "all-reduce.15.cloned.1.call-done.refs_0_.refs_1_",
+                   "small_all_reduce_oneshot_r8",
+                   "small_all_reduce_twoshot_r4.2",
+                   "fp8_oproj_all_reduce_w_m4_k1024_n6144.3"):
+            with self.subTest(ok=ok):
+                self.assertIsNotNone(rx.match(ok))
+        for bad in ("all-reduce.12.cloned.1.call-start",
+                    "all-reduce.12.cloned.1.call-start.refs_0_",
+                    "small_reduce_scatter_r8", "small_all_gather_n8_l8192.2"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(rx.match(bad))
+        # Also verify split() works end-to-end when boundaries mix sync, async+.refs_, Pallas, and fused oproj ARs.
+        step = _synthetic_step(self.GOOD)
+        replacements = [
+            "%small_all_reduce_twoshot_r4.2 = bf16[4,6144]{1,0} custom-call()",
+            "%fp8_oproj_all_reduce_w_m4_k1024_n6144.3 = bf16[4,6144]{1,0} custom-call()",
+            "%all-reduce.15.cloned.1.call-done.refs_0_.refs_1_ = bf16[8192,6144]{1,0} async-done()",
+        ]
+        ar_idx = 0
+        mixed_ops = []
+        for s_ns, d_ns, name in step["ops"]:
+            if name.startswith("%all-reduce.") and ar_idx < len(replacements):
+                if ar_idx == 2:
+                    mixed_ops.append((
+                        s_ns - 50, 10,
+                        "%all-reduce.15.cloned.1.call-start.refs_0_ = (bf16[8192,6144]) async-start()"
+                    ))
+                mixed_ops.append((s_ns, d_ns, replacements[ar_idx]))
+                ar_idx += 1
+            else:
+                mixed_ops.append((s_ns, d_ns, name))
+        # Add non-boundary small_all_gather / reduce-scatter ops to verify they are ignored.
+        mixed_ops.insert(
+            2, (1500, 40,
+                "%small_reduce_scatter_r8 = bf16[8,3072]{1,0} custom-call()"))
+        mixed_ops.insert(
+            3,
+            (1550, 35,
+             "%small_all_gather_n8_l8192.2 = bf16[8,6144]{1,0} custom-call()"))
+        step["ops"] = sorted(mixed_ops)
+        sp = xs.split(step, 3, t)
+        self.assertEqual(sp["all_reduces"], 7)
+        self.assertEqual(len(sp["layers"]), 3)
+        self.assertTrue(
+            all(c["ok"] for c in xs.census_check(sp, self.KINDS, t["census"])))
 
 
 def _qwen_trace():

@@ -1,17 +1,18 @@
 # Connectivity Verification
 
-Before executing diagnostics, perform a connectivity check to ensure the
-target compute (local, GCE TPU VM, or GKE) is operational.
+Before sizing, check that a compute target (local, GCE TPU VM, or GKE) is
+configured.
 
 ## Instructions
 
-Connectivity and accelerator health are checked via `{{runtime}} compute inspect`:
+Read the compute configuration; do not run `compute inspect`:
 
-1. Run the inspection:
+1. Run:
 
    ```bash
-   {{runtime}} compute inspect --json
+   {{runtime}} config show --json --package {{package_tag}}
    ```
 
-2. If the command fails or reports status not healthy, do not proceed. Report the
-   connectivity blocker and exit.
+2. If it names no active profile, do not proceed. Report
+   `COMPUTE_NOT_CONFIGURED` and exit. A connectivity error from the first job
+   is reported the same way.

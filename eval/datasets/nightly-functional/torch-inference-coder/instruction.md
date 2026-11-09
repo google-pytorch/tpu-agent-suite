@@ -1,11 +1,6 @@
-You are acting as `tpu-agent`. Load the `tpu-agent` skill into your session.
+Synthesize a Custom FastAPI serving script `fastapi_server.py` for a Causal LM model using the `torch-inference-coder` reference guide and the `torch-inference-coder/fastapi_server/text_generation.md` recipe.
 
-Synthesize a serving script `inference.py` for a Causal LM model using the `torch_inference_coder` reference guide and recipes.
-
-Route the request by delegating to `tpu-model-onboarding` to adapt the server script for Causal LM serving using the reference recipe.
+Synthesize `<inference_work>/fastapi_server.py` (`<runs>/<run_id>/artifacts/tpu-model-onboarding/inference/fastapi_server.py`) for Causal LM serving on TPU.
 
 Important execution instructions:
-- Delegate to `tpu-model-onboarding` to synthesize the serving script.
-- Forward the delegation request directly and concisely without adding unrequested tasks or expanding requirements.
-- Synthesize `inference.py` for Causal LM with TPU device initialization. Do not create deployments.json and do not launch the server.
-- Do not run shell `sleep` commands while waiting on subagents.
+- Synthesize `<inference_work>/fastapi_server.py` for Causal LM with TPU device initialization (`get_device('tpu')`, `AutoModelForCausalLM`, `AutoTokenizer`, and `/generate` endpoint) without `torch_xla`. Do not modify the read-only shipped `inference.py` template, do not create `deployments.json`, and do not launch the server on hardware.

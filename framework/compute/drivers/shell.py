@@ -197,18 +197,6 @@ class RemoteShellDriver(base.ComputeDriver):
         """Copy one file from the target to a local path."""
         raise NotImplementedError
 
-    def _runner_for(self, path: Path, python_interpreter: str | None) -> str:
-        """Pick the program that executes a recipe, by file extension.
-
-        A shell recipe gets the configured Python as `TPU_AGENT_SUITE_PYTHON`, which
-        is how it finds tools installed beside it (e.g. a venv's `vllm`).
-        Unquoted, like the Python runner, so `~` expands on the target.
-        """
-        python = python_interpreter or self.python_interpreter or "python3"
-        if path.suffix == ".sh":
-            return f"TPU_AGENT_SUITE_PYTHON={python} bash"
-        return python
-
     def _remote_profile(self, timeout: int = 60) -> base.HardwareProfile:
         """Run the shared probe on the target and parse its profile."""
         interpreter = self.python_interpreter or "python3"
@@ -355,7 +343,7 @@ class RemoteShellDriver(base.ComputeDriver):
             dest.parent.mkdir(parents=True, exist_ok=True)
             out = self._copy_out_file(f"{run_dir}/{staged.remote}", dest)
             if out.returncode != 0 or not dest.is_file():
-                result = _missing_output(result, staged, out.stderr or "")
+                result = missing_output(result, staged, out.stderr or "")
         return result
 
     def _terminate_remote_run(self, pidfile: str) -> str:
@@ -598,9 +586,9 @@ def _copy_failure(target: str,
     )
 
 
-def _missing_output(result: base.SynchronousExecutionResult,
-                    staged: base.StagedFile,
-                    detail: str) -> base.SynchronousExecutionResult:
+def missing_output(result: base.SynchronousExecutionResult,
+                   staged: base.StagedFile,
+                   detail: str) -> base.SynchronousExecutionResult:
     """Record that an `--output` file the caller asked for was never produced.
 
     Adds a line to stderr naming the missing file. If the script itself

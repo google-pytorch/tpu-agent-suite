@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the Antigravity CLI version pin in eval/adapter/sitecustomize.py."""
+"""Tests for the harness CLI pins in .ci/ and how the eval adapter applies them."""
 
 from __future__ import annotations
 
@@ -60,22 +60,26 @@ class TestPinRequested(unittest.TestCase):
                 self.assertFalse(_ADAPTER.antigravity_cli_pin_requested())
 
     def test_pin_is_a_full_release(self) -> None:
-        pin = _ADAPTER.ANTIGRAVITY_CLI_PIN
-        self.assertRegex(pin["version"], r"^\d+\.\d+\.\d+$")
-        self.assertIn(f"/{pin['version']}-", pin["url"])
-        self.assertTrue(pin["url"].startswith("https://"))
-        self.assertRegex(pin["sha512"], r"^[0-9a-f]{128}$")
-        self.assertRegex(pin["patch_before"], r"^[0-9a-f]+$")
-        self.assertRegex(pin["patch_after"], r"^[0-9a-f]+$")
+        pins = _ADAPTER.read_harness_pins()
+        self.assertRegex(pins["AGY_VERSION"], r"^\d+\.\d+\.\d+$")
+        self.assertIn(f"/{pins['AGY_VERSION']}-", pins["AGY_URL"])
+        self.assertTrue(pins["AGY_URL"].startswith("https://"))
+        self.assertRegex(pins["AGY_SHA512"], r"^[0-9a-f]{128}$")
+        self.assertRegex(pins["AGY_PATCH_BEFORE"], r"^[0-9a-f]+$")
+        self.assertRegex(pins["AGY_PATCH_AFTER"], r"^[0-9a-f]+$")
         self.assertEqual(
-            len(bytes.fromhex(pin["patch_before"])),
-            len(bytes.fromhex(pin["patch_after"])),
+            len(bytes.fromhex(pins["AGY_PATCH_BEFORE"])),
+            len(bytes.fromhex(pins["AGY_PATCH_AFTER"])),
         )
-        self.assertNotEqual(pin["patch_before"], pin["patch_after"])
+        self.assertNotEqual(pins["AGY_PATCH_BEFORE"], pins["AGY_PATCH_AFTER"])
 
 
-class TestInstallCommand(unittest.TestCase):
-    """Runs the generated script against a local fake release."""
+class TestInstallScript(unittest.TestCase):
+    """Runs .ci/install-agy.sh against a local fake release.
+
+    The script text runs under `bash -c` with the pin in the environment, as
+    it does inside a trial container, so the real pins.conf is never sourced.
+    """
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -90,17 +94,19 @@ class TestInstallCommand(unittest.TestCase):
         curl.write_text('#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done\n'
                         f'cp "{self.release}" "$2"\n')
         curl.chmod(0o755)
+        self.script = _ADAPTER.ANTIGRAVITY_CLI_INSTALL_SCRIPT.read_text(
+            encoding="utf-8")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
     def _run(self, pin: dict[str, str]) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["bash", "-c",
-             _ADAPTER.antigravity_cli_install_command(pin)],
+            ["bash", "-c", self.script],
             env={
                 "HOME": str(self.home),
-                "PATH": f"{self.bin}:{os.environ['PATH']}"
+                "PATH": f"{self.bin}:{os.environ['PATH']}",
+                **pin,
             },
             capture_output=True,
             text=True,
@@ -111,9 +117,9 @@ class TestInstallCommand(unittest.TestCase):
         data = _fake_release(served)
         self.release.write_bytes(data)
         return {
-            "version": expected,
-            "url": f"https://example.invalid/{expected}-1/cli.tar.gz",
-            "sha512": hashlib.sha512(data).hexdigest(),
+            "AGY_VERSION": expected,
+            "AGY_URL": f"https://example.invalid/{expected}-1/cli.tar.gz",
+            "AGY_SHA512": hashlib.sha512(data).hexdigest(),
         }
 
     def test_installs_the_pinned_release(self) -> None:
@@ -125,9 +131,9 @@ class TestInstallCommand(unittest.TestCase):
 
     def test_patches_binary_in_place(self) -> None:
         pin = self._pin("9.9.9", "9.9.9")
-        pin["patch_before"] = b"9.9.9".hex()
-        pin["patch_after"] = b"9.9.0".hex()
-        pin["version"] = "9.9.0"
+        pin["AGY_PATCH_BEFORE"] = b"9.9.9".hex()
+        pin["AGY_PATCH_AFTER"] = b"9.9.0".hex()
+        pin["AGY_VERSION"] = "9.9.0"
         result = self._run(pin)
         self.assertEqual(result.returncode, 0, result.stderr)
         installed = self.home / ".local" / "bin" / "agy"
@@ -136,15 +142,15 @@ class TestInstallCommand(unittest.TestCase):
 
     def test_missing_patch_target_installs_nothing(self) -> None:
         pin = self._pin("9.9.9", "9.9.9")
-        pin["patch_before"] = "deadbeef"
-        pin["patch_after"] = "cafebabe"
+        pin["AGY_PATCH_BEFORE"] = "deadbeef"
+        pin["AGY_PATCH_AFTER"] = "cafebabe"
         result = self._run(pin)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.home / ".local" / "bin" / "agy").exists())
 
     def test_a_checksum_mismatch_installs_nothing(self) -> None:
         pin = self._pin("9.9.9", "9.9.9")
-        pin["sha512"] = "0" * 128
+        pin["AGY_SHA512"] = "0" * 128
         result = self._run(pin)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.home / ".local" / "bin" / "agy").exists())
@@ -174,10 +180,11 @@ class TestPatchedInstall(unittest.TestCase):
         env = {_ADAPTER.ANTIGRAVITY_CLI_VERSION_ENV: ""}
         agent = self._install(env)
         command = agent.exec_as_agent.call_args.kwargs["command"]
+        pins = _ADAPTER.read_harness_pins()
         self.assertTrue(command.startswith("bash -c "))
-        self.assertIn(_ADAPTER.ANTIGRAVITY_CLI_PIN["sha512"], command)
-        self.assertIn(_ADAPTER.ANTIGRAVITY_CLI_PIN["patch_before"], command)
-        self.assertIn(_ADAPTER.ANTIGRAVITY_CLI_PIN["patch_after"], command)
+        self.assertIn(pins["AGY_SHA512"], command)
+        self.assertIn(pins["AGY_PATCH_BEFORE"], command)
+        self.assertIn(pins["AGY_PATCH_AFTER"], command)
         self.assertNotIn("install.sh", command)
 
     def test_validate_reasoning_effort_allows_medium_for_gemini_4(

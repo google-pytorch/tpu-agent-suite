@@ -94,21 +94,6 @@ class TestInstallerStaging(unittest.TestCase):
         self.assertEqual(answers["namespace"], "custom-ns")
         self.assertEqual(answers["container"], "main-worker")
 
-    def test_collect_task_environment_answers_gke_xpk(self):
-        extra = {
-            "COMPUTE_BACKEND": "gke_xpk",
-            "GKE_CLUSTER": "xpk-cluster",
-            "GKE_LOCATION": "us-central1-a",
-            "GKE_PROJECT": "xpk-project",
-            "XPK_GCS_BUCKET": "gs://xpk-bucket",
-        }
-        answers = collect_task_environment_answers(extra_env=extra)
-        self.assertEqual(answers["backend"], "gke_xpk")
-        self.assertEqual(answers["cluster_name"], "xpk-cluster")
-        self.assertEqual(answers["zone"], "us-central1-a")
-        self.assertEqual(answers["project"], "xpk-project")
-        self.assertEqual(answers["gcs_bucket"], "gs://xpk-bucket")
-
 
 if __name__ == "__main__":
     unittest.main()

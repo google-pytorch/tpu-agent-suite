@@ -57,14 +57,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _COLL = re.compile(
     r"^(all-reduce|all-gather|reduce-scatter|all-to-all|collective-permute|"
     r"distributed_\w+)")
-_SYNC_AR = re.compile(r"^all-reduce\.\d+$")
+_SYNC_AR = re.compile(
+    r"^all-reduce\.\d+(?:\.cloned\.\d+\.call-done)?(?:\.refs_\d+_)*$")
 
 
 def _boundary(trace: dict | None) -> re.Pattern:
     """The layer-boundary all-reduce: the model's `boundary_regex` (TRACE) if it names one, else
-    a plain synchronous `all-reduce.N`. Large steps can lower the same all-reduce to an async
-    `all-reduce.N.cloned.1.call-start/-update/-done` triple; a model that does so matches the
-    `call-done`, whose end is where the layer's output is complete."""
+    either a synchronous `all-reduce.N` or the `call-done` of an async
+    `all-reduce.N.cloned.M.call-start/-update/-done` triple (including XLA `.refs_k_` suffixes),
+    whose end is where the layer's output is complete."""
     rx = (trace or {}).get("boundary_regex")
     return re.compile(rx) if rx else _SYNC_AR
 
@@ -74,8 +75,9 @@ def _short(name: str) -> str:
 
 
 def _kind(short: str) -> str:
-    """Group key: drop instance numbers and clone suffixes."""
-    s = re.sub(r"\.cloned.*$", "", short)
+    """Group key: drop buffer-donor `.refs_k_`, clone suffixes, and instance numbers."""
+    s = re.sub(r"(?:\.refs_\d+_)+$", "", short)
+    s = re.sub(r"\.cloned.*$", "", s)
     return re.sub(r"(\.\d+)+$", "", s)
 
 
@@ -310,7 +312,8 @@ def split(step: dict, n_layers: int, trace: dict | None) -> dict:
         coll = []
         for s, d, n in ops:
             sh = _short(n)
-            if _COLL.match(sh) and not sh.endswith(
+            sh_base = re.sub(r"(?:\.refs_\d+_)+$", "", sh)
+            if _COLL.match(sh_base) and not sh_base.endswith(
                 ("call-start", "call-update")):
                 coll.append({
                     "t_ms": round((s - t0) / 1e6, 2),
@@ -324,9 +327,12 @@ def split(step: dict, n_layers: int, trace: dict | None) -> dict:
             # device busy: the union of the segment's op intervals (no idle inside)
             "busy_ms":
             round(_busy_ns(ops) / 1e6, 4),
-            # [kind, ms, output shape, operand shapes] of the longest instance
+            # [kind, ms, output shape, operand shapes] of the longest instance, for the
+            # kinds that took time: a kind whose instances all take 0 ns (copy-start) is
+            # not where the segment's time went, and has no longest instance
             "top": [[k, round(v / 1e6, 3), *_shapes(big[k][1])]
-                    for k, v in sorted(by.items(), key=lambda kv: -kv[1])[:5]],
+                    for k, v in sorted(by.items(), key=lambda kv: -kv[1])[:5]
+                    if v > 0],
             "collectives":
             coll,
             # the model's per-step ops inside this segment (counted once, not x n_kind)

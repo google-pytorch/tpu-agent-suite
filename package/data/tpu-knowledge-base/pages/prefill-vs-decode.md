@@ -32,7 +32,8 @@ parallelism. Latency (TTFT, per-token) joins throughput as an objective
 — attention term always bandwidth-bound, MLP term compute-bound above `B_crit`. Small-batch
 latency floor: `(params + B·KV) / total HBM bandwidth`; throughput ceiling:
 `B · W_hbm / (B·KV + params)` (scaling-book, Part 7 (`index.py get scaling-book-inference`)).
-Weight-load floor alone: 16 GB HBM per v5e ÷ 8.2e11 ≈ 19 ms per step when the cache fills
+Weight-load floor alone: 16 GiB (~1.7e10 B) HBM per v5e ÷ 8.2e11 B/s ≈ 21 ms per step (the book,
+taking 16 GB as 1.6e10 B, gets ≈ 19 ms) when the cache fills
 HBM; LLaMA 3-70B int8 on a v5e 4×2 at BS 32, 8k context: ~17 ms, ~235 tokens/s/chip
 (scaling-book, Part 8 (`index.py get scaling-book-applied-inference`)). Doubling the topology halves
 latency but not per-chip throughput, and a bigger slice can *raise* throughput when it

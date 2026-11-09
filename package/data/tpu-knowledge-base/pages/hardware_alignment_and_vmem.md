@@ -180,7 +180,7 @@ TPU generations exhibit significant architectural evolution in on-chip memory si
 | Hardware Specification | TPU v6e | TPU v7 (Ironwood) | Architectural Shift |
 | :--- | :--- | :--- | :--- |
 | **On-Chip Vector Memory (VMEM)** | 128 MiB | **64 MiB** | **50% Reduction in on-chip VMEM** |
-| **High Bandwidth Memory (HBM3e)** | 32 GB | **192 GiB** | **6× Increase in HBM Capacity** |
+| **High Bandwidth Memory (HBM3e)** | 32 GiB | **192 GiB** | **6× Increase in HBM Capacity** |
 | **HBM Memory Bandwidth** | 1.6 TB/s | **7.4 TB/s** (chip) / **~3.7 TB/s** (device) | **4.5× Bandwidth Expansion** per chip |
 
 ### The Pallas Scoped VMEM Limit & Double Buffering Tax
@@ -188,7 +188,7 @@ TPU generations exhibit significant architectural evolution in on-chip memory si
 When writing custom Pallas kernels or configuring manual tiling:
 
 <aside class="caution">
-<b>Scoped VMEM is a default, not a wall:</b> Physical VMEM on TPU v7 is 64 MiB per TensorCore, and no kernel can exceed it (e.g. <code>Used 64.01M of 63.94M vmem. Exceeded vmem capacity by 72.0K.</code>). Below that, each kernel is held to a <b>scoped VMEM limit</b>: its own <code>vmem_limit_bytes</code> (Pallas compiler params) if it passes one, otherwise the libtpu flag <code>--xla_tpu_scoped_vmem_limit_kib</code>, otherwise a default of 32 MiB. The kernel value wins over the flag, even when lower, and a value above capacity is clamped to 63.94 MiB without an error. This was measured on TPU7x (tpu7x-8) with libtpu 0.0.44 and 0.0.44.1 (<a href="https://github.com/google-pytorch/torchtpu-agents/issues/400#issuecomment-5927027288">#400</a>), and differs from the JAX <code>pallas/mosaic/core.py</code> docstring, which says the kernel value must be paired with a larger flag; check your own build before relying on a number. A kernel over its scoped limit fails at compile time with <code>CompileTimeScopedVmemOom</code>.
+<b>Scoped VMEM is a default, not a wall:</b> Physical VMEM on TPU v7 is 64 MiB per TensorCore, and no kernel can exceed it (e.g. <code>Used 64.01M of 63.94M vmem. Exceeded vmem capacity by 72.0K.</code>). Below that, each kernel is held to a <b>scoped VMEM limit</b>: its own <code>vmem_limit_bytes</code> (Pallas compiler params) if it passes one, otherwise the libtpu flag <code>--xla_tpu_scoped_vmem_limit_kib</code>, otherwise a default of 32 MiB. The kernel value wins over the flag, even when lower, and a value above capacity is clamped to 63.94 MiB without an error. This was measured on TPU7x (tpu7x-8) with libtpu 0.0.44 and 0.0.44.1, and differs from the JAX <code>pallas/mosaic/core.py</code> docstring, which says the kernel value must be paired with a larger flag; check your own build before relying on a number. A kernel over its scoped limit fails at compile time with <code>CompileTimeScopedVmemOom</code>.
 </aside>
 
 This is XLA error E1001 (`index.py get e1001`).

@@ -51,14 +51,13 @@ is a control arm and installs nothing.
 - **`HF_TOKEN`** -- required for the gated models, ignored by the rest. The
   gated tasks declare `required_env = ["HF_TOKEN"]` under `[metadata]`. When
   it is unset *or empty* on the host, `run.py` drops those tasks from a
-  dataset run (announced on stderr and in the GitHub step summary) so the
-  rest still run, and refuses a task named alone with `--task`. A missing CI
-  secret arrives as `""`, which `${HF_TOKEN:-}` forwards unchanged, and the
+  dataset run (announced on stderr) so the rest still run, and refuses a task
+  named alone with `--task`. A missing CI secret arrives as `""`, which `${HF_TOKEN:-}` forwards unchanged, and the
   trial would otherwise end at the first 401 inside the pod.
 - The image is built from each task's `environment/Dockerfile`: the
-  `torchtpu-vllm-dev` nightly plus node, git and tokamax. Harbor's GKE path
-  never reads `task.toml`'s `docker_image` (`run.py:286`), so no image is
-  pinned there.
+  `vllm-on-host` image (`eval/images/vllm-on-host`, which includes tokamax),
+  pinned by digest. Harbor's GKE path never reads `task.toml`'s
+  `docker_image` (`run.py:286`), so no image is pinned there.
 - The tasks need a real v7 slice. Export the `GKE_*` variables for the
   shared cluster before running; `run.py` does not read a `.env` file.
 

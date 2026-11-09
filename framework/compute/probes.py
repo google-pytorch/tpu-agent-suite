@@ -27,18 +27,17 @@ import concurrent.futures
 import itertools
 import json
 import os
-import re
 import shutil
 from typing import Any, Callable
 
-from .drivers import base, probe
-from .drivers.gke_job import ACCELERATOR_LABEL, TOPOLOGY_LABEL, TPU_RESOURCE
+from .drivers import base, probe, registry
+from .drivers.base import ACCELERATOR_LABEL, TOPOLOGY_LABEL, TPU_RESOURCE
 
 # Seconds each probe may take.
 PROBE_TIMEOUT_SEC = 10
 
 # The probes that can tell which backend to use (see `_backend`).
-_BACKEND_PROBES = ("tpu_nodes", "tpu_pods", "tpu_vms")
+_BACKEND_PROBES = ("context", "tpu_nodes", "tpu_pods", "tpu_vms")
 
 # Most values a probe offers as choices when none is clearly meant.
 MAX_CHOICES = 10
@@ -116,19 +115,6 @@ def _tpu_vm(out: str) -> dict[str, Any]:
     return found
 
 
-def _gke_context(out: str, project: str | None) -> dict[str, str]:
-    """The project, cluster and location of a GKE kubectl context.
-
-    GKE names contexts `gke_<project>_<location>_<cluster>`.
-
-    Nothing if the context isn't GKE or is in another project.
-    """
-    m = re.fullmatch(r"gke_([^_]+)_([^_]+)_(.+)", out)
-    if not m or project not in (None, m[1]):
-        return {}
-    return {"project": m[1], "cluster_name": m[3], "zone": m[2]}
-
-
 def _tpu_pod(out: str) -> dict[str, str]:
     """The first Running pod with a container that requests TPU chips."""
     try:
@@ -163,17 +149,12 @@ def _probes(
     # Last, so `_source` still names the subcommand.
     kube = base.kubectl_prefix(known.get("kubeconfig"),
                                known.get("kube_context"))[1:]
-    # On gke_xpk, project, cluster and zone all come from the kubectl
-    # context, so they match; the context is listed first so it wins.
-    # Elsewhere the context itself is suggested, for a profile to pin.
-    xpk = known.get("backend") == "gke_xpk"
+    # The context itself is suggested, for a profile to pin.
     probes = {
         "context":
         # `current-context` ignores --context, so only the kubeconfig.
         (["kubectl", "config", "current-context"] +
-         base.kubectl_prefix(known.get("kubeconfig"))[1:],
-         ("project", "cluster_name", "zone") if xpk else ("kube_context", ),
-         (lambda out: _gke_context(out, known.get("project"))) if xpk else
+         base.kubectl_prefix(known.get("kubeconfig"))[1:], ("kube_context", ),
          (lambda out: {
              "kube_context": out
          } if out else {})),
@@ -184,7 +165,7 @@ def _probes(
         "tpu_vms": ([
             "gcloud", "compute", "tpus", "tpu-vm", "list", "--zone=-",
             "--format=value(name.basename(),name.segment(-3))"
-        ] + project, ("tpu_name", ) if xpk else ("tpu_name", "zone"), _tpu_vm),
+        ] + project, ("tpu_name", "zone"), _tpu_vm),
         "namespace": ([
             "kubectl", "config", "view", "--minify", "-o",
             "jsonpath={..namespace}"
@@ -214,8 +195,13 @@ def _backend(found: dict[str, dict[str, Any]], vms: str,
              backends: list[str]) -> tuple[str, str] | None:
     """The backend the probes point to, in the order the design doc gives."""
     accel, vfio = probe.list_devices()
+    if (accel or vfio) and "local" in backends:
+        return "local", "TPU devices on this host"
+    for name in backends:
+        drv = registry.get_driver(name)
+        if drv is not None and (source := drv.suggest_backend(found)):
+            return name, source
     for backend, hit, source in (
-        ("local", accel + vfio, "TPU devices on this host"),
         ("gke_job", found.get("tpu_nodes"),
          "TPU nodes in the kubectl context"),
         ("gke_pod", found.get("tpu_pods"), "running pods that request TPUs"),

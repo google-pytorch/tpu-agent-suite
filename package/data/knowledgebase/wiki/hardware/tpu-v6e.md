@@ -4,9 +4,9 @@ type: hardware
 tags: [hardware]
 aliases: [Trillium]
 created: 2026-08-22
-updated: 2026-09-04
-sources: 2
-human_reviewed: true
+updated: 2026-10-27
+sources: 3
+human_reviewed: false
 ---
 
 Sixth-generation efficiency chip (codename Trillium; "v6e" on all technical
@@ -19,7 +19,7 @@ text-to-image, and CNN training/fine-tuning/serving. Specs from
 | Spec | Value |
 |---|---|
 | Peak compute / chip | 918 TFLOPs bf16; 1836 TOPs int8 (2×) |
-| HBM | 32 GB, 1638 GBps |
+| HBM | 32 GiB, 1638 GBps |
 | TensorCores / chip | **1** — not megacore; 2 [MXUs](../concepts/mxu.md) (256×256) |
 | [SparseCores](../concepts/sparsecore.md) / chip | 2 |
 | [ICI](../concepts/ici.md) | 800 GBps bidi per chip, 4 ports; 2D torus |
@@ -47,3 +47,4 @@ Note: the 256×256 MXU means tensor dims below 256 under-fill the array — see
 
 - [Google Cloud TPU v6e documentation](../sources/2026-08-cloud-tpu-v6e-docs.md)
 - MXU array size (256×256): [scaling-book](../sources/2025-scaling-book-tpus.md)
+- HBM capacity unit (GiB): [tpu_info chip table](../sources/2026-10-tpu-info-chip-table.md)

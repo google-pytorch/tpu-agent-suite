@@ -82,7 +82,7 @@ compute-bound thresholds per generation: [Critical batch size](wiki/concepts/cri
 ### Onboarding (CUDA → TorchTPU)
 
 - [TPU Distributed & Environment Hygiene](wiki/playbooks/tpu-distributed-and-env-hygiene.md) — Switches nccl to tpu_dist and prevents destructive uv sync clobbering.
-- [Static Shapes & Tracing](wiki/playbooks/static-shapes-and-tracing.md) — Enforces static shapes (dynamic=False) and mark_step boundaries for >97% cache hits.
+- [Static Shapes & Tracing](wiki/playbooks/static-shapes-and-tracing.md) — Enforces static shapes (dynamic=False) and step synchronization barriers for >97% cache hits.
 
 ### Pallas Kernels (tpu-kernel-development)
 
@@ -132,6 +132,7 @@ compute-bound thresholds per generation: [Critical batch size](wiki/concepts/cri
 - [Cloud TPU v5p docs](wiki/sources/2026-08-cloud-tpu-v5p-docs.md) — v5p spec sheet; cubes/wraparounds, ICI resiliency.
 - [Cloud TPU v6e docs](wiki/sources/2026-08-cloud-tpu-v6e-docs.md) — v6e spec sheet; single-TensorCore (megacore contradiction).
 - [Cloud TPU7x docs](wiki/sources/2026-08-cloud-tpu-7x-docs.md) — TPU7x spec sheet; dual-chiplet model, tunable VMEM.
+- [tpu_info chip table](wiki/sources/2026-10-tpu-info-chip-table.md) — HBM per chip in GiB and devices per chip, the table `compute inspect` sizes from.
 - [Google blog: 8th-gen TPUs](wiki/sources/2026-google-blog-tpu-8th-gen.md) — TPU 8t/8i announcement; vendor claims only.
 - [tokamax repo snapshot (2026-10)](wiki/sources/2026-10-tokamax-repo.md) - provenance record of the tokamax ingest at 3a0a3a34: pin, license, indexing, what was produced, docs-vs-code gaps and possible upstream defects.
 - [torch_tpu repo snapshot (2026-09)](wiki/sources/2026-09-torch-tpu-repo.md) — provenance record of the torch_tpu ingest at 4c0c7c57: pin, indexing, what was produced, gaps and caveats.

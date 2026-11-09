@@ -31,7 +31,7 @@ runs that on every install.
 
     python3 env_check.py --host --requirements requirements-client.txt
 
-With `--image` the target is a container (gke_job, gke_pod, gke_xpk), where a
+With `--image` the target is a container (gke_job, gke_pod), where a
 `pip install` lasts only as long as the pod, so each fix names the image
 rather than a command to run in it.
 
@@ -74,8 +74,14 @@ VERSIONS_PREFIX = "Versions: "
 # Where setting up each machine is documented, so a fix points there rather
 # than repeating commands that change.
 HOST_DOC = "docs/install.md#1-host-prerequisites"
-TARGET_DOC = "docs/install.md#6-set-up-the-compute-target"
-IMAGE_DOC = "docs/install.md#container-image-gke_job-gke_pod-gke_xpk"
+TARGET_DOC = "docs/install.md#5-set-up-the-compute-target"
+IMAGE_DOC = "docs/install.md#container-image-gke_job-gke_pod"
+# Maps a requirement to the distributions that conflict with it. Two
+# distributions conflict when both install the same import package. pip
+# treats them as unrelated, so it reports no conflict, and the distribution
+# installed last owns the shared files. The requirement's version check can
+# then pass on files that the other distribution wrote.
+CONFLICTS = {"xprof": ("xprof-nightly", )}
 
 
 def version_of(name: str) -> str | None:
@@ -101,32 +107,80 @@ def satisfies(version: str, specifier: str) -> bool | None:
         return None
 
 
+def parse_requirement(requirement: str) -> tuple[str, str] | None:
+    """(name, specifier) for a requirements-file line; None for a pip option,
+    URL or path. Environment markers are dropped, not evaluated."""
+    match = re.fullmatch(
+        r"([A-Za-z0-9][\w.-]*)\s*(?:\[[^\]]*\])?\s*([<>=!~][^@]*)?",
+        requirement.split(";", 1)[0].strip())
+    return (match[1], (match[2] or "").strip()) if match else None
+
+
+def installed_conflicts(name: str) -> list[str]:
+    """The distributions `CONFLICTS` lists for `name` that are installed."""
+    return [other for other in CONFLICTS.get(name, ()) if version_of(other)]
+
+
+def fix_command(requirements: list[str], python: str | None = None) -> str:
+    """The pip command that makes `requirements` pass: it uninstalls a
+    conflicting distribution together with the requirement it shares files
+    with, then installs the requirements. It runs `python` (default: this
+    interpreter) as `-m pip`, so it changes the environment that was
+    checked rather than whichever `pip` is first on PATH."""
+    pip = f"{python or sys.executable} -m pip"
+    remove = []
+    for line in requirements:
+        parsed = parse_requirement(line)
+        if parsed is None:
+            continue
+        others = installed_conflicts(parsed[0])
+        if others:
+            remove += others + ([parsed[0]] if version_of(parsed[0]) else [])
+    install = f"{pip} install " + " ".join(f"'{line}'"
+                                           for line in requirements)
+    if remove:
+        return f"{pip} uninstall -y {' '.join(remove)} && {install}"
+    return install
+
+
 def check_requirement(requirement: str,
                       image: bool = False) -> tuple[str, str, str, str] | None:
     """(name, status, detail, fix) for one requirements-file line.
 
     None for a line that names no package to check: pip options (`-r`, `-e`,
-    `--index-url`), and URLs or paths. `image` says the target is a container
-    image, which a fix has to replace rather than install into.
+    `--index-url`), and URLs or paths. A requirement also fails when a
+    distribution `CONFLICTS` lists for it is installed. `image` says the
+    target is a container image, which a fix has to replace rather than
+    install into.
     """
-    # Environment markers (`; python_version < "3.13"`) are not evaluated.
-    match = re.fullmatch(
-        r"([A-Za-z0-9][\w.-]*)\s*(?:\[[^\]]*\])?\s*([<>=!~][^@]*)?",
-        requirement.split(";", 1)[0].strip())
-    if not match:
+    parsed = parse_requirement(requirement)
+    if parsed is None:
         return None
-    name, spec = match[1], (match[2] or "").strip()
+    name, spec = parsed
     version = version_of(name)
+    others = installed_conflicts(name)
     # torch comes with torch_tpu, pinned to the ABI torch_tpu was built
     # against; installing it on its own is how the two drift apart.
-    if image:
-        fix = (f"use an image whose torch_tpu brings a matching torch; see "
-               f"{IMAGE_DOC}" if name == "torch" else
-               f"use an image with '{requirement}'; see {IMAGE_DOC}")
+    if image and name == "torch":
+        fix = ("use an image whose torch_tpu brings a matching torch; see "
+               f"{IMAGE_DOC}")
+    elif image and others:
+        fix = f"use an image without {', '.join(others)}; see {IMAGE_DOC}"
+    elif image:
+        fix = f"use an image with '{requirement}'; see {IMAGE_DOC}"
+    elif name == "torch":
+        fix = ("reinstall torch_tpu, which brings a matching torch; see "
+               f"{TARGET_DOC}")
     else:
-        fix = (f"reinstall torch_tpu, which brings a matching torch; see "
-               f"{TARGET_DOC}"
-               if name == "torch" else f"pip install '{requirement}'")
+        fix = fix_command([requirement])
+    if others:
+        installed = ", ".join(f"{other} {version_of(other)}"
+                              for other in others)
+        found = (f"{version} installed next to {installed}"
+                 if version else f"not installed, but {installed} is")
+        return (name, "fail",
+                f"{found}. Both install the same import package, and pip "
+                "does not report that as a conflict", fix)
     if version is None:
         return name, "fail", f"not installed; needs {spec or 'any'}", fix
     ok = satisfies(version, spec) if spec else True
@@ -162,7 +216,13 @@ def run_checks(requirements: list[str],
     if version_of("torch_xla"):
         checks.append(("torch_xla", "warn", "installed; deprecated, use "
                        "torch_tpu", "pip uninstall -y torch_xla"))
-    devices = sorted(glob.glob("/dev/accel*") or glob.glob("/dev/vfio/[0-9]*"))
+    sys_accel = "/sys/class/accel"
+    has_sys_accel = os.path.isdir(sys_accel)
+    devices = sorted(
+        glob.glob("/dev/vfio/[0-9]*") or [
+            d for d in glob.glob("/dev/accel[0-9]*") if not has_sys_accel
+            or os.path.exists(os.path.join(sys_accel, os.path.basename(d)))
+        ])
     checks.append(("tpu_devices", "ok", f"{len(devices)} device(s)",
                    "") if devices else (
                        "tpu_devices", "fail", "no /dev/accel* or /dev/vfio/N",
@@ -179,7 +239,8 @@ def read_requirements(path: str) -> list[str]:
 
 def failing_requirements(requirements: list[str]) -> list[str]:
     """The lines of `requirements` this interpreter doesn't meet: not
-    installed, or installed at a version outside the bound."""
+    installed, installed at a version outside the bound, or installed next
+    to a distribution that `CONFLICTS` lists for it."""
     failing = []
     for line in requirements:
         check = check_requirement(line)
@@ -207,8 +268,9 @@ def ask_to_install(requirements: list[str], python: str | None = None) -> str:
     would have told them instead.
     """
     quoted = " ".join(f"'{line}'" for line in requirements)
-    noun, is_ = (("this package", "it is") if len(requirements) == 1 else
-                 ("these packages", "they are"))
+    noun, is_, unmet = (("this package", "it is",
+                         "this requirement") if len(requirements) == 1 else
+                        ("these packages", "they are", "these requirements"))
     if python is None and externally_managed():
         # The hooks run on the python3 first on PATH when the harness
         # started: often the system's, when the user installed into a venv
@@ -234,11 +296,11 @@ def ask_to_install(requirements: list[str], python: str | None = None) -> str:
     python = python or sys.executable
     # The instruction comes first: with it mid-sentence, agents on Claude
     # Code and Antigravity quoted the note and then started other work.
-    return (f"Before anything else, ask the user to install {noun}, which "
-            f"{python} is missing or has too old: {', '.join(requirements)}. "
-            f"The command is `{python} -m pip install {quoted}`. Don't start "
-            f"other work, or look up or measure what {noun} would have told "
-            f"you, until {is_} installed.")
+    return (f"Before anything else, ask the user to run "
+            f"`{fix_command(requirements, python)}`. {python} does not meet "
+            f"{unmet}: {', '.join(requirements)}. Don't start other work, or "
+            f"look up or measure what {noun} would have told you, until the "
+            "user has run it.")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -92,7 +92,11 @@ class _FakeExecStream:
     def returncode(self) -> int | None:
         if self._error_channel is None:
             return None
-        return 0 if self._error_channel == _SUCCESS else 2
+        if self._error_channel == _SUCCESS:
+            return 0
+        if self._error_channel == b"exit1":
+            return 1
+        return 2
 
     def close(self) -> None:
         self.closed = True
@@ -204,6 +208,82 @@ class TestGkeDownloadAdapter(unittest.TestCase):
                 asyncio.run(env.download_dir("/missing", self.temp_dir))
         self.assertEqual(m.call_count, 1)
 
+    def test_tar_exit_1_with_nonempty_stdout_is_kept(self) -> None:
+        # GNU tar exits 1 when a live log or SQLite WAL file is appended to
+        # while reading; the archive on stdout must still be extracted.
+        data, _ = _agent_dir_tar()
+        env = _make_env()
+        with patch.object(_ADAPTER,
+                          "stream",
+                          return_value=_FakeExecStream(
+                              [data], b"exit1")) as mock_stream:
+            asyncio.run(env.download_dir("/logs/agent", self.temp_dir))
+        self.assertEqual(mock_stream.call_count, 1)
+        self.assertTrue((self.temp_dir / "session_supervisor.log").is_file())
+        self.assertTrue(
+            (self.temp_dir / "sessions/projects/-workspace/s.jsonl").is_file())
+
+    def test_tar_exit_1_with_truncated_stdout_is_retried(self) -> None:
+        data, _ = _agent_dir_tar()
+        truncated = _FakeExecStream([data[:len(data) // 2]], b"exit1")
+        complete = _FakeExecStream([data], _SUCCESS)
+        env = _make_env()
+        with patch.object(_ADAPTER, "stream",
+                          side_effect=[truncated, complete]) as mock_stream, \
+                patch.object(_ADAPTER.asyncio, "sleep") as mock_sleep:
+            mock_sleep.return_value = None
+            asyncio.run(env.download_dir("/logs/agent", self.temp_dir))
+        self.assertEqual(mock_stream.call_count, 2)
+        self.assertTrue(
+            (self.temp_dir / "sessions/projects/-workspace/s.jsonl").is_file())
+
+    def test_truncated_tar_reported_as_success_is_retried(self) -> None:
+        # When konnectivity-agent/apiserver drops an exec stream mid-transfer,
+        # the apiserver can report status: Success on ERROR_CHANNEL even though
+        # stdout was cut mid-member.
+        data, _ = _agent_dir_tar()
+        truncated = _FakeExecStream([data[:len(data) // 2]], _SUCCESS)
+        complete = _FakeExecStream([data], _SUCCESS)
+        env = _make_env()
+        with patch.object(_ADAPTER, "stream",
+                          side_effect=[truncated, complete]) as mock_stream, \
+                patch.object(_ADAPTER.asyncio, "sleep") as mock_sleep:
+            mock_sleep.return_value = None
+            asyncio.run(env.download_dir("/logs/agent", self.temp_dir))
+        self.assertEqual(mock_stream.call_count, 2)
+        self.assertTrue(
+            (self.temp_dir / "sessions/projects/-workspace/s.jsonl").is_file())
+
+    def test_tar_cut_on_member_boundary_without_eof_blocks_is_retried(
+            self) -> None:
+        data, _ = _agent_dir_tar()
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
+            first = tar.getmembers()[0]
+        first_end = first.offset_data + ((first.size + 511) // 512) * 512
+        cut_between = _FakeExecStream([data[:first_end]], _SUCCESS)
+        complete = _FakeExecStream([data], _SUCCESS)
+        env = _make_env()
+        with patch.object(_ADAPTER,
+                          "stream",
+                          side_effect=[cut_between, complete]) as mock_stream, \
+                patch.object(_ADAPTER.asyncio, "sleep") as mock_sleep:
+            mock_sleep.return_value = None
+            asyncio.run(env.download_dir("/logs/agent", self.temp_dir))
+        self.assertEqual(mock_stream.call_count, 2)
+        self.assertTrue(
+            (self.temp_dir / "sessions/projects/-workspace/s.jsonl").is_file())
+
+    def test_download_dir_quotes_source_dir(self) -> None:
+        data, _ = _agent_dir_tar()
+        env = _make_env()
+        with patch.object(_ADAPTER,
+                          "stream",
+                          return_value=_FakeExecStream(
+                              [data], _SUCCESS)) as mock_stream:
+            asyncio.run(env.download_dir("/logs/agent dir", self.temp_dir))
+        cmd = mock_stream.call_args.kwargs["command"]
+        self.assertIn("'/logs/agent dir'", cmd[2])
+
     def test_download_file_reads_bytes(self) -> None:
         payload = "progress █ done\n".encode()
         buf = io.BytesIO()
@@ -274,6 +354,32 @@ class TestGkeDownloadAdapter(unittest.TestCase):
 
         self.assertEqual(mock_stream.call_count, 2)
         self.assertGreater(len(complete.written_chunks), 1)
+
+    def test_upload_dir_retries_when_readiness_check_fails(self) -> None:
+        src_dir = self.temp_dir / "src"
+        src_dir.mkdir()
+        (src_dir / "trajectory.json").write_text('{"steps":[]}',
+                                                 encoding="utf-8")
+
+        complete = _FakeExecStream([], _SUCCESS)
+        env = _make_env()
+        attempts = 0
+
+        async def _flaky_ready():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError(51, "Network is unreachable")
+
+        env._wait_for_container_exec_ready = _flaky_ready
+        with patch.object(_ADAPTER, "stream",
+                          return_value=complete) as mock_stream, \
+                patch.object(_ADAPTER.asyncio, "sleep") as mock_sleep:
+            mock_sleep.return_value = None
+            asyncio.run(env.upload_dir(src_dir, "/logs/agent"))
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(mock_stream.call_count, 1)
 
     def test_upload_dir_tar_failure_is_not_retried(self) -> None:
         src_dir = self.temp_dir / "src"
@@ -456,6 +562,17 @@ class TestGkeDurableExecAdapter(unittest.TestCase):
         time.sleep(3)
         self.assertFalse(marker.exists())
 
+    def test_timeout_waits_for_sigterm_cleanup_trap(self) -> None:
+        # Mirrors the pod command shape (`... | tee ...`) where a child traps
+        # SIGTERM to flush partial trajectories after the outer shell dies.
+        flushed = self.temp_dir / "flushed"
+        script = (f"(trap 'sleep 1; echo done > {flushed}; exit 0' TERM;"
+                  " while :; do sleep 0.2; done) | cat")
+        result = self._exec(_LocalPodExec(), script, timeout_sec=1)
+        self.assertEqual(result.return_code, 124)
+        self.assertTrue(flushed.is_file())
+        self.assertEqual(flushed.read_text(), "done\n")
+
     def test_killed_without_status_reports_255(self) -> None:
         # kill -9 of the recording shell: nothing is left to write a status.
         result = self._exec(_LocalPodExec(), "kill -9 $PPID; sleep 5")
@@ -630,6 +747,355 @@ class TestKubeGateAdapter(unittest.TestCase):
         t.task.config.agent.user = "custom-user"
         asyncio.run(t._prepare())
         self.assertEqual(t.task.config.agent.user, "custom-user")
+
+    def test_patch_trial_agent_user_propagates_task_agent_persona(
+            self) -> None:
+
+        class _DummyTrial:
+
+            async def _prepare(self) -> None:
+                pass
+
+        _ADAPTER._patch_trial_agent_user(_DummyTrial)
+        t = _DummyTrial()
+        t.task = MagicMock()
+        t.task.config.agent.user = None
+        t.task.config.environment.env = {
+            "TASK_AGENT_PERSONA": "tpu-model-onboarding"
+        }
+        t.agent = MagicMock()
+        t.agent.extra_env = {"AGENT_PERSONA": "tpu-agent"}
+        asyncio.run(t._prepare())
+        self.assertEqual(
+            t.agent.extra_env.get("TASK_AGENT_PERSONA"),
+            "tpu-model-onboarding",
+        )
+
+        # Baseline arm without AGENT_PERSONA in extra_env is untouched
+        t.agent.extra_env = {}
+        asyncio.run(t._prepare())
+        self.assertNotIn("TASK_AGENT_PERSONA", t.agent.extra_env)
+
+
+class TestFallbackTrajectoryAdapter(unittest.TestCase):
+    """Unit tests for RC5 (early CLI crash) and RC6 (pre-agent setup failure) fallback trajectories."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.logs_dir = self.tmp / "agent"
+        self.logs_dir.mkdir(parents=True)
+
+    def _make_trial(self, agent_name: str = "antigravity-cli"):
+        trial = MagicMock()
+        trial.task.instruction = "Optimize 8p-gemm kernel on TPU v6e."
+        trial.paths.agent_dir = self.logs_dir
+        trial.paths.exception_message_path = self.tmp / "exception.txt"
+        trial.user_agent = None
+        trial.agent.logs_dir = self.logs_dir
+        trial.agent.name.return_value = agent_name
+        trial.agent.version.return_value = "1.3.2"
+        trial.agent.model_name = "google/gemini-3-flash"
+        trial.agent.session_id = "test-session-123"
+        trial.result.id = "trial-id-123"
+        trial.result.exception_info = None
+        return trial
+
+    def test_agy_early_crash_stages_step_transcript_from_stream_and_err(
+            self) -> None:
+        import json
+
+        (self.logs_dir / "antigravity-stream.jsonl").write_text(
+            '{"event":"result","result":{"conversation_id":"","status":"ERROR",'
+            '"response":"","error":"authentication failed or timed out"}}\n',
+            encoding="utf-8",
+        )
+        (self.logs_dir / "antigravity-cli.err").write_text(
+            "Error: authentication required. Run 'agy-real' to log in.\n",
+            encoding="utf-8",
+        )
+
+        trial = self._make_trial("antigravity-cli")
+        _ADAPTER._stage_native_fallback_inputs(trial, self.logs_dir)
+
+        staged = self.logs_dir / "antigravity-cli.trajectory.jsonl"
+        self.assertTrue(staged.is_file())
+        records = [
+            json.loads(line)
+            for line in staged.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["type"], "USER_INPUT")
+        self.assertIn("Optimize 8p-gemm", records[0]["content"])
+        self.assertEqual(records[1]["type"], "SYSTEM_ERROR")
+        self.assertIn("authentication failed or timed out",
+                      records[1]["content"])
+        self.assertIn("authentication required", records[1]["content"])
+
+    def test_claude_early_crash_removes_zero_byte_jsonl_and_stages_fallback(
+            self) -> None:
+        import json
+
+        proj_dir = self.logs_dir / "sessions" / "projects" / "-workspace"
+        proj_dir.mkdir(parents=True)
+        zero_file = proj_dir / "empty-session.jsonl"
+        zero_file.write_text("", encoding="utf-8")
+        (self.logs_dir / "claude-code.txt").write_text(
+            "Error: Vertex AI quota exceeded for claude-opus-4-6\n",
+            encoding="utf-8",
+        )
+
+        trial = self._make_trial("claude-code")
+        _ADAPTER._stage_native_fallback_inputs(trial, self.logs_dir)
+
+        self.assertFalse(zero_file.exists())
+        fallback = proj_dir / "fallback-session.jsonl"
+        self.assertTrue(fallback.is_file())
+        records = [
+            json.loads(line)
+            for line in fallback.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(records[0]["type"], "user")
+        self.assertEqual(records[1]["type"], "assistant")
+        self.assertIn(
+            "Vertex AI quota exceeded",
+            records[1]["message"]["content"][0]["text"],
+        )
+
+    def test_agy_non_step_checkpoint_transcript_is_replaced_by_fallback(
+            self) -> None:
+        import json
+
+        staged = self.logs_dir / "antigravity-cli.trajectory.jsonl"
+        staged.write_text(
+            '{"step_index":0,"type":"CHECKPOINT","created_at":"2026-10-20T00:00:00Z"}\n',
+            encoding="utf-8",
+        )
+        (self.logs_dir / "antigravity-stream.jsonl").write_text(
+            '{"event":"result","result":{"conversation_id":"","status":"ERROR",'
+            '"response":"Model gemini-invalid not found","error":""}}\n',
+            encoding="utf-8",
+        )
+
+        trial = self._make_trial("antigravity-cli")
+        _ADAPTER._stage_native_fallback_inputs(trial, self.logs_dir)
+
+        records = [
+            json.loads(line)
+            for line in staged.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["type"], "USER_INPUT")
+        self.assertEqual(records[1]["type"], "SYSTEM_ERROR")
+        self.assertIn("Model gemini-invalid not found", records[1]["content"])
+
+    def test_claude_assistant_only_session_prepends_user_step(self) -> None:
+        import json
+
+        proj_dir = self.logs_dir / "sessions" / "projects" / "-workspace"
+        proj_dir.mkdir(parents=True)
+        session_file = proj_dir / "8161b680-cf5b-480d-bb2f-5e40d7af3a99.jsonl"
+        session_file.write_text(
+            '{"type":"system","session_id":"8161b680-cf5b-480d-bb2f-5e40d7af3a99"}\n'
+            '{"type":"assistant","sessionId":"8161b680-cf5b-480d-bb2f-5e40d7af3a99",'
+            '"message":{"role":"assistant","content":[{"type":"text","text":'
+            '"[Depth 0] [Early CLI Crash / Error Output]\\nAPI Error: 401"}]}}\n',
+            encoding="utf-8",
+        )
+
+        trial = self._make_trial("claude-code")
+        _ADAPTER._stage_native_fallback_inputs(trial, self.logs_dir)
+
+        records = [
+            json.loads(line)
+            for line in session_file.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(records[0]["type"], "user")
+        self.assertIn("Optimize 8p-gemm", records[0]["message"]["content"])
+        assistant_records = [
+            r for r in records if r.get("type") == "assistant"
+        ]
+        self.assertEqual(len(assistant_records), 1)
+
+    def test_pre_agent_setup_failure_initializes_agent_result_and_writes_atif_trajectory(
+            self) -> None:
+        import json
+
+        class _DummyTrial:
+
+            async def _sync_agent_output(self, target) -> None:
+                self._populate_agent_context(target.agent_result)
+
+            def _populate_agent_context(self, agent_result) -> None:
+                pass
+
+        _ADAPTER._patch_trial_fallback_trajectory(_DummyTrial)
+        t = _DummyTrial()
+        base = self._make_trial("claude-code")
+        t.task = base.task
+        t.paths = base.paths
+        t.user_agent = None
+        t.agent = base.agent
+        t.result = MagicMock()
+        t.result.id = "trial-rc6"
+        t.result.agent_result = None
+        t.result.exception_info = MagicMock(
+            exception_type="EnvironmentStartTimeoutError",
+            exception_message="Pod failed to start within 900s",
+        )
+        setup_dir = self.logs_dir / "setup"
+        setup_dir.mkdir(parents=True)
+        (setup_dir / "stderr.txt").write_text(
+            "Back-off pulling image us-central2-docker.pkg.dev/...\n",
+            encoding="utf-8",
+        )
+        cmd_dir = self.logs_dir / "command-0"
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "stderr.txt").write_text(
+            "Fatal CLI startup error in command-0\n",
+            encoding="utf-8",
+        )
+
+        asyncio.run(t._sync_agent_output(t.result))
+
+        self.assertIsNotNone(t.result.agent_result)
+        traj_path = self.logs_dir / "trajectory.json"
+        self.assertTrue(traj_path.is_file())
+        traj = json.loads(traj_path.read_text(encoding="utf-8"))
+        self.assertEqual(traj["schema_version"], "ATIF-v1.7")
+        self.assertEqual(traj["agent"]["name"], "claude-code")
+        self.assertEqual(len(traj["steps"]), 2)
+        self.assertEqual(traj["steps"][0]["source"], "user")
+        self.assertIn("Optimize 8p-gemm", traj["steps"][0]["message"])
+        self.assertEqual(traj["steps"][1]["source"], "system")
+        self.assertIn("EnvironmentStartTimeoutError",
+                      traj["steps"][1]["message"])
+        self.assertIn("[setup/stderr.txt]", traj["steps"][1]["message"])
+        self.assertIn("Back-off pulling image", traj["steps"][1]["message"])
+        self.assertIn("[command-0/stderr.txt]", traj["steps"][1]["message"])
+        self.assertIn("Fatal CLI startup error", traj["steps"][1]["message"])
+
+    def test_uncaught_agent_exception_and_placeholder_refresh(self) -> None:
+        import json
+
+        trial = self._make_trial("antigravity-cli")
+        # 1. Active exception via sys.exc_info() when trial.result.exception_info is still None
+        try:
+            raise ValueError("Unsupported model identifier")
+        except ValueError:
+            _ADAPTER._write_fallback_atif_trajectory(trial, self.logs_dir)
+
+        traj_path = self.logs_dir / "trajectory.json"
+        traj = json.loads(traj_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            traj["steps"][1]["extra"]["exception_type"],
+            "ValueError",
+        )
+        self.assertIn("ValueError: Unsupported model identifier",
+                      traj["steps"][1]["message"])
+
+        # 2. Placeholder fallback (exception_type=None) is refreshed when exception_info arrives later
+        traj_path.unlink()
+        _ADAPTER._write_fallback_atif_trajectory(trial, self.logs_dir)
+        placeholder = json.loads(traj_path.read_text(encoding="utf-8"))
+        self.assertIsNone(placeholder["steps"][1]["extra"]["exception_type"])
+
+        trial.result.exception_info = MagicMock(
+            exception_type="VerifierTimeoutError",
+            exception_message="Verifier timed out after 600s",
+        )
+        _ADAPTER._write_fallback_atif_trajectory(trial, self.logs_dir)
+        refreshed = json.loads(traj_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            refreshed["steps"][1]["extra"]["exception_type"],
+            "VerifierTimeoutError",
+        )
+        self.assertIn("VerifierTimeoutError: Verifier timed out",
+                      refreshed["steps"][1]["message"])
+
+    def test_existing_trajectory_json_is_never_overwritten(self) -> None:
+        traj_path = self.logs_dir / "trajectory.json"
+        original = '{"schema_version": "ATIF-v1.7", "existing": true}\n'
+        traj_path.write_text(original, encoding="utf-8")
+
+        trial = self._make_trial("antigravity-cli")
+        trial.result.exception_info = MagicMock(
+            exception_type="RuntimeError",
+            exception_message="Should not overwrite real trajectory",
+        )
+        _ADAPTER._write_fallback_atif_trajectory(trial, self.logs_dir)
+        self.assertEqual(traj_path.read_text(encoding="utf-8"), original)
+
+    def test_bridged_trial_populates_coding_agent_trajectory(self) -> None:
+        import json
+
+        class _DummyBridgedTrial:
+
+            async def _sync_agent_output(self, target) -> None:
+                self._populate_agent_context(target.agent_result)
+
+            def _populate_agent_context(self, agent_result) -> None:
+                running = self.user_agent or self.agent
+                running.populate_context_post_run(agent_result)
+
+        _ADAPTER._patch_trial_fallback_trajectory(_DummyBridgedTrial)
+        user_dir = Path(self.tmp.name) / "user-agent"
+        agent_dir = Path(self.tmp.name) / "coding-agent"
+        user_dir.mkdir(parents=True)
+        agent_dir.mkdir(parents=True)
+
+        t = _DummyBridgedTrial()
+        base = self._make_trial("claude-code")
+        t.task = base.task
+        t.paths = MagicMock(agent_dir=agent_dir)
+        t.result = MagicMock(id="trial-bridged", exception_info=None)
+
+        t.user_agent = MagicMock()
+        t.user_agent.logs_dir = user_dir
+        t.user_agent.name.return_value = "claude-code"
+        t.user_agent.version.return_value = "1.0"
+        t.user_agent.populate_context_post_run.side_effect = (
+            lambda _ctx: (user_dir / "trajectory.json").write_text(
+                '{"schema_version": "ATIF-v1.7", "steps": [{"step_id": 1}]}',
+                encoding="utf-8",
+            ))
+
+        t.agent = MagicMock()
+        t.agent.logs_dir = agent_dir
+        t.agent.name.return_value = "claude-code"
+        t.agent.version.return_value = "1.0"
+        t.agent.populate_context_post_run.side_effect = (lambda _ctx: (
+            agent_dir / "trajectory.json"
+        ).write_text(
+            '{"schema_version": "ATIF-v1.7", "steps": [{"step_id": 1}, {"step_id": 2}]}',
+            encoding="utf-8",
+        ))
+
+        proj_dir = agent_dir / "sessions" / "projects" / "-workspace"
+        proj_dir.mkdir(parents=True)
+        probe_jsonl = proj_dir / "probe-crash.jsonl"
+        probe_jsonl.write_text(
+            '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "[Early CLI Crash / Error Output]"}]}}\n',
+            encoding="utf-8",
+        )
+        real_jsonl = proj_dir / "real-session.jsonl"
+        real_jsonl.write_text(
+            '{"type": "user", "message": {"role": "user", "content": "Run the task"}}\n'
+            '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Done"}]}}\n',
+            encoding="utf-8",
+        )
+
+        t._populate_agent_context(MagicMock())
+
+        t.user_agent.populate_context_post_run.assert_called_once()
+        t.agent.populate_context_post_run.assert_called_once()
+        self.assertFalse(probe_jsonl.exists())
+        self.assertTrue(real_jsonl.is_file())
+        self.assertTrue((user_dir / "trajectory.json").is_file())
+        self.assertTrue((agent_dir / "trajectory.json").is_file())
+        coding_traj = json.loads(
+            (agent_dir / "trajectory.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(coding_traj["steps"]), 2)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,17 @@
+# Onboarding efficiency reference statistics (derived from Harbor Hub trial
+# distributions for the same type of tasks).
+# Used by trajectory_score.py to normalize / score agent runtime, token
+# consumption, and turn count.
+# Note: Ceiling values are set to approximately the observed max + 5%.
+
+# Agent execution runtime (in minutes)
+agent_runtime_median = 120   # minutes
+agent_runtime_ceiling = 750  # minutes
+
+# Total tokens: input + output (in millions of tokens, 1e6)
+total_tokens_median = 12     # millions of tokens
+total_tokens_ceiling = 220   # millions of tokens
+
+# Agent turns: model steps in trajectory (count)
+agent_turns_median = 125     # turns
+agent_turns_ceiling = 1500   # turns

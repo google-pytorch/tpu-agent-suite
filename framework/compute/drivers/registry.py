@@ -30,6 +30,13 @@ REGISTERED_DRIVER_CLI_FLAGS: set[str] = set()
 # the user is told only that their backend is "invalid".
 DISCOVERY_ERRORS: dict[str, str] = {}
 
+# Backends registered by driver files loaded from outside the package (see
+# `external.py`), mapped to the file or directory each one came from. Built-in
+# backends are not listed here. The setup schema check accepts these backend
+# names and their setup fields, which the package schema cannot list because
+# it does not know them.
+EXTERNAL_DRIVERS: dict[str, str] = {}
+
 # Option strings each backend declared, keyed by backend name. Lets generated
 # documentation list a backend's real flags instead of a hand-maintained copy
 # that drifts as drivers come and go.

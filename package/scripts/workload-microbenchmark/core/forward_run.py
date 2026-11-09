@@ -40,11 +40,16 @@ The profile window is one mixed step + one decode step per point, in plan order,
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
+import re
 import shutil
+import signal
 import statistics
+import subprocess
 import sys
+import threading
 import time
 
 T0 = time.time()
@@ -56,6 +61,324 @@ def mark(name: str, since: float) -> float:
     TIMES[name] = dt
     print(f"[t+{time.time() - T0:7.1f}s] {name}: {dt:.1f} s", flush=True)
     return dt
+
+
+#: Engine start-up lasts from the line that starts with ENGINE_START_LINE to the line
+#: that contains ENGINE_READY_MARK.
+ENGINE_START_LINE = "ENGINE ARGS:"
+ENGINE_READY_MARK = "engine init"
+#: Messages that vLLM logs (in vllm/v1/engine and vllm/v1/executor) when engine
+#: start-up fails.
+STARTUP_ERRORS = ("EngineCore failed to start", "WorkerProc failed to start",
+                  "Worker failed with error",
+                  "Engine core initialization failed")
+#: Matches a Python exception or a failed native check. The first match is usually the
+#: root cause; the STARTUP_ERRORS come later.
+CAUSE_RE = r"\b[A-Z]\w*(?:Error|Exception): |Check failed: "
+#: The exit code of `supervise` when it stops the run.
+STOPPED_RC = 3
+
+
+def _proc_state(pid: int) -> str | None:
+    """Reads the state of a process from /proc.
+
+    Args:
+        pid: The process ID.
+
+    Returns:
+        The one-letter state from /proc/<pid>/stat, such as "R" or "Z", or None if the
+        process no longer exists.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def _descendants(pid: int) -> list[int]:
+    """Lists the descendants of a process.
+
+    The function reads the parent ID of every process from /proc. For forward_run.py,
+    the descendants are vLLM's engine process and its worker processes.
+
+    Args:
+        pid: The ID of the top process.
+
+    Returns:
+        The IDs of the children of `pid`, of their children, and so on.
+    """
+    children: dict[int, list[int]] = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/stat") as f:
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(ppid, []).append(int(d))
+    found, stack = [], [pid]
+    while stack:
+        for c in children.get(stack.pop(), []):
+            found.append(c)
+            stack.append(c)
+    return found
+
+
+def _stop_tree(proc, wait_s: float = 10.0) -> None:
+    """Stops a process and all of its descendants.
+
+    The function sends SIGTERM, and then SIGKILL to any process that is still running
+    after `wait_s` seconds. It lists the descendants before it sends any signal,
+    because a process whose parent has exited can no longer be found from `proc`.
+
+    Args:
+        proc: The `subprocess.Popen` object of the top process. The process must have
+            been started in a new session, so that it leads its own process group.
+        wait_s: How many seconds to wait after each signal.
+    """
+    pids = [proc.pid] + _descendants(proc.pid)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            # Signal the whole process group. The top process leads the group,
+            # because it was started in a new session.
+            os.killpg(proc.pid, sig)
+        except OSError:
+            pass
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            proc.poll()  # Reap the top process.
+            if all(_proc_state(p) in (None, "Z") for p in pids):
+                return
+            time.sleep(0.2)
+
+
+def _exit_on_signal(signum, frame) -> None:
+    """Raises SystemExit(128 + signum), so that `finally` blocks run on a signal.
+
+    Args:
+        signum: The number of the signal.
+        frame: The stack frame that the signal interrupted. Unused.
+    """
+    del frame
+    raise SystemExit(128 + signum)
+
+
+def supervise(args: list[str],
+              out: str,
+              start_timeout_s: float,
+              grace_s: float = 60.0,
+              cmd: list[str] | None = None) -> int:
+    """Runs forward_run.py and stops it if vLLM's engine fails but does not exit.
+
+    The run is forward_run.py together with the vLLM processes that it starts. The
+    engine is vLLM's engine process. An engine can log a fatal error during start-up
+    and keep running. vLLM's own wait for the engine does not cover every stage of
+    start-up, so such an engine can hold the TPUs until someone cancels the job.
+
+    Engine start-up lasts from ENGINE_START_LINE to ENGINE_READY_MARK. During
+    start-up, this function stops the run in two cases: vLLM logs one of the
+    STARTUP_ERRORS and the run is still running `grace_s` seconds later, or start-up
+    lasts longer than `start_timeout_s` seconds. A compile that cannot reuse cached
+    results can print nothing for many minutes, so silence alone does not stop the
+    run. After start-up, this function sets no time limit.
+
+    The standard output and the standard error of the run share one pipe, and the run
+    has PYTHONUNBUFFERED set, so this function reads the lines in the order in which
+    they were written. It copies them to its own standard output.
+
+    If the run ends without result.json, this function writes failure.json to `out`.
+    failure.json contains these fields:
+
+    - stage: "before engine start-up", "engine start-up" or "after engine start-up".
+    - reason: "start_up_error" or "start_up_timeout" if this function stopped the
+      run, and "exited" otherwise.
+    - detail: the first line that matches CAUSE_RE. If no line matches, it is the
+      first line that contains one of the STARTUP_ERRORS, or else the exit code. After
+      a timeout, it states the time limit. When the engine becomes ready, this
+      function forgets the earlier lines, because they did not stop start-up.
+    - cause_context: the detail line and the four lines that follow it. The list is
+      empty if no line matched, and after a timeout.
+    - exit_code: the exit code that this function returns.
+    - start_up_s: how long engine start-up lasted, or had lasted when the run ended.
+      It is None if start-up never began.
+    - start_up_limit_s: the start-up limit that this function applied.
+    - log_tail: the last 60 lines of the output of the run.
+
+    The run leads its own process group, so `compute job cancel` does not signal it.
+    On SIGTERM or SIGINT, this function stops the run, writes no failure.json, and
+    exits with code 128 plus the signal number.
+
+    Args:
+        args: The command-line arguments for forward_run.py.
+        out: The output directory of forward_run.py, which is the value of its
+            `--out` argument.
+        start_timeout_s: The longest time that engine start-up may last, in seconds.
+        grace_s: How long the run may take to exit by itself after vLLM logs one of
+            the STARTUP_ERRORS, in seconds.
+        cmd: A command to run instead of forward_run.py. Tests use it.
+
+    Returns:
+        The exit code of forward_run.py, or STOPPED_RC if this function stopped the
+        run.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    lock = threading.Lock()
+    tail: collections.deque[str] = collections.deque(maxlen=60)
+    st: dict = {
+        "phase": "before engine start-up",
+        "start": None,
+        "error": None,
+        "error_at": None,
+        "cause": None,
+        "cause_context": [],
+        "ready_at": None
+    }
+
+    def update_state_from_line(text: str) -> None:
+        # The function looks for a cause in every phase, so that a run that fails
+        # before, during or after engine start-up reports a cause. It looks for the
+        # STARTUP_ERRORS at any time before the engine is ready, because they can
+        # make this function stop the run.
+        with lock:
+            tail.append(text)
+            if st["phase"] == "before engine start-up" and text.startswith(
+                    ENGINE_START_LINE):
+                st["phase"], st["start"] = "engine start-up", time.time()
+            elif (st["phase"] == "engine start-up"
+                  and f"] {ENGINE_READY_MARK} (" in text):
+                # The engine became ready even though vLLM may have logged errors, so
+                # those errors did not stop start-up and are unlikely to explain a
+                # later failure. Forget them, so that the run is not stopped, and so
+                # that a later failure reports its own cause.
+                st.update(phase="after engine start-up",
+                          ready_at=time.time(),
+                          error=None,
+                          error_at=None,
+                          cause=None,
+                          cause_context=[])
+            else:
+                if (st["phase"] != "after engine start-up"
+                        and st["error"] is None
+                        and any(e in text for e in STARTUP_ERRORS)):
+                    st["error"], st["error_at"] = text, time.time()
+                if st["cause"] is None and re.search(CAUSE_RE, text):
+                    st["cause"] = text
+                # Keep the cause line and the four lines that follow it, because a
+                # cause can continue onto the next lines. For example, the line after
+                # an XLA compile error names the operation that failed.
+                if st["cause"] is not None and len(st["cause_context"]) < 5:
+                    st["cause_context"].append(text)
+
+    def copy_output(src) -> None:
+        dst = sys.stdout.buffer
+        for raw in iter(src.readline, b""):
+            dst.write(raw)
+            dst.flush()
+            update_state_from_line(raw.decode(errors="replace").rstrip("\n"))
+
+    # Install the handlers before the run starts, so that no signal can arrive
+    # between the start of the run and the installation. Python can install signal
+    # handlers only in the main thread.
+    signals = (signal.SIGTERM, signal.SIGINT)
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {s: signal.signal(s, _exit_on_signal) for s in signals}
+    proc = None
+    reason = None
+    try:
+        proc = subprocess.Popen(
+            cmd
+            or [sys.executable,
+                os.path.join(here, "forward_run.py"), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=dict(os.environ, PYTHONUNBUFFERED="1"),
+            start_new_session=True)
+        reader = threading.Thread(target=copy_output,
+                                  args=(proc.stdout, ),
+                                  daemon=True)
+        reader.start()
+        while True:
+            # wait() returns as soon as the run exits. Otherwise, check the limits
+            # every 0.1 seconds.
+            try:
+                proc.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            with lock:
+                now = time.time()
+                if (st["error_at"] is not None
+                        and now - st["error_at"] > grace_s):
+                    reason = "start_up_error"
+                elif (st["phase"] == "engine start-up"
+                      and now - st["start"] > start_timeout_s):
+                    reason = "start_up_timeout"
+            if reason:
+                _stop_tree(proc)
+                break
+        proc.wait()
+    finally:
+        if previous:
+            # Ignore further signals while the run stops, so that a second SIGTERM
+            # cannot interrupt _stop_tree.
+            for s in signals:
+                signal.signal(s, signal.SIG_IGN)
+        try:
+            if proc is not None and proc.poll() is None:
+                _stop_tree(proc)
+        finally:
+            for s, handler in previous.items():
+                if handler is not None:
+                    signal.signal(s, handler)
+    reader.join(timeout=5)
+    rc = STOPPED_RC if reason else proc.returncode
+    if rc != 0 and not os.path.exists(os.path.join(out, "result.json")):
+        with lock:
+            start = st["start"]
+            failure = {
+                "stage":
+                st["phase"],
+                "reason":
+                reason or "exited",
+                # The detail is the first line that matches CAUSE_RE. If no line
+                # matches, it is the first vLLM error message or the exit code.
+                "detail":
+                (f"no engine after {start_timeout_s:.0f} s of start-up"
+                 if reason == "start_up_timeout" else st["cause"]
+                 or st["error"] or f"exit code {rc}"),
+                # After a timeout, a line that matched CAUSE_RE can be many minutes
+                # old. Leave cause_context empty, so that `collect` prints the end
+                # of log_tail, which shows where start-up stopped.
+                "cause_context":
+                [] if reason == "start_up_timeout" else st["cause_context"],
+                "exit_code":
+                rc,
+                "start_up_s":
+                round((st["ready_at"] or time.time()) -
+                      start, 1) if start else None,
+                "start_up_limit_s":
+                start_timeout_s,
+                "log_tail":
+                list(tail)
+            }
+        os.makedirs(out, exist_ok=True)
+        json.dump(failure,
+                  open(os.path.join(out, "failure.json"), "w"),
+                  indent=1)
+        print(
+            f"WMB FAILED during {failure['stage']}. Reason: "
+            f"{failure['reason']}. Cause: {failure['detail']}",
+            file=sys.stderr,
+            flush=True)
+    return rc
 
 
 HARNESS_SALT = "dummy-kv-scale-sentinel-1"
@@ -1280,9 +1603,29 @@ PARTS = 16  # parallel gzip streams (the image has no pigz/zstd; pods have many 
 
 
 def _save_parts(cache_dir: str, out: str) -> None:
-    """One file for cachelocal/forward-cmd, filled in parallel: a plain tar of PARTS gzip -1
-    tarballs, files spread over the parts by size (a single `tar | gzip` stream is much slower)."""
+    """Packs the compile cache into one file, compressing it in parallel.
+
+    The output file is a plain tar archive that holds PARTS gzip archives.
+    The function spreads the cache files over the parts by size, so the parts
+    compress at the same time. One `tar | gzip` stream is much slower.
+    `cachelocal.py` and the forward-cmd recipe read the output file, and
+    `_restore_parts` unpacks it.
+
+    Args:
+        cache_dir: The compile cache directory to pack.
+        out: The output file. A relative path is relative to the current
+            working directory.
+
+    Raises:
+        RuntimeError: A tar command failed, so the output file is missing or
+            incomplete.
+    """
     import subprocess
+    import tempfile
+
+    # The final tar runs in the temporary directory, so resolve a relative
+    # output path against the caller's working directory first.
+    out = os.path.abspath(out)
     files = []
     for root, _, names in os.walk(cache_dir):
         for n in names:
@@ -1294,41 +1637,55 @@ def _save_parts(cache_dir: str, out: str) -> None:
         g = min(groups, key=lambda x: x[0])
         g[0] += size
         g[1].append(rel)
-    tmp = "/tmp/wmb_parts_out"
-    os.system(f"rm -rf {tmp} && mkdir -p {tmp}")
-    procs = []
-    for i, (_, rels) in enumerate(groups):
-        if not rels:
-            continue
-        lst = os.path.join(tmp, f"list{i}")
-        open(lst, "w").write("\n".join(rels) + "\n")
-        procs.append(
-            subprocess.Popen([
-                "tar", "-I", "gzip -1", "-cf",
-                os.path.join(tmp, f"part{i}.tgz"), "-C", cache_dir, "-T", lst
-            ]))
-    for p in procs:
-        p.wait()
-    os.system(f"cd {tmp} && tar -cf {out} part*.tgz")
+    # A private directory per call: a fixed /tmp path fails with
+    # PermissionError when another user on a shared VM already owns it.
+    with tempfile.TemporaryDirectory(prefix="wmb_parts_out_") as tmp:
+        procs, parts = [], []
+        for i, (_, rels) in enumerate(groups):
+            if not rels:
+                continue
+            lst = os.path.join(tmp, f"list{i}")
+            with open(lst, "w") as f:
+                f.write("\n".join(rels) + "\n")
+            parts.append(f"part{i}.tgz")
+            procs.append(
+                subprocess.Popen([
+                    "tar", "-I", "gzip -1", "-cf",
+                    os.path.join(tmp, parts[-1]), "-C", cache_dir, "-T", lst
+                ]))
+        failed = [p.args for p in procs if p.wait() != 0]
+        # GNU tar refuses to create an empty archive from an empty file list,
+        # so an empty cache reads its list from /dev/null instead.
+        members = parts or ["-T", os.devnull]
+        if not failed and subprocess.run(
+            ["tar", "-cf", out, "-C", tmp, *members],
+                check=False).returncode != 0:
+            failed.append(["tar", "-cf", out])
+    if failed:
+        raise RuntimeError(
+            f"could not save the compile cache to {out}. These tar commands "
+            f"failed: {failed}")
 
 
 def _restore_parts(src: str, cache_dir: str) -> None:
     """Undo `_save_parts` in parallel; a plain gzip tarball (older entries) still works."""
     import subprocess
+    import tempfile
+
     if open(src, "rb").read(2) == b"\x1f\x8b":
         os.system(f"tar -xzf {src} -C {cache_dir}")
         return
-    tmp = "/tmp/wmb_parts_in"
-    os.system(f"rm -rf {tmp} && mkdir -p {tmp} && tar -xf {src} -C {tmp}")
-    procs = [
-        subprocess.Popen(
-            ["tar", "-xzf",
-             os.path.join(tmp, f), "-C", cache_dir])
-        for f in sorted(os.listdir(tmp)) if f.endswith(".tgz")
-    ]
-    for p in procs:
-        p.wait()
-    os.system(f"rm -rf {tmp}")
+    # A private directory per call, for the same reason as in `_save_parts`.
+    with tempfile.TemporaryDirectory(prefix="wmb_parts_in_") as tmp:
+        subprocess.run(["tar", "-xf", src, "-C", tmp], check=False)
+        procs = [
+            subprocess.Popen(
+                ["tar", "-xzf",
+                 os.path.join(tmp, f), "-C", cache_dir])
+            for f in sorted(os.listdir(tmp)) if f.endswith(".tgz")
+        ]
+        for p in procs:
+            p.wait()
 
 
 MANIFEST = "wmb_manifest.json"  # torch.compile dir -> "cold" | "restored" (the boot that made it)
@@ -1668,13 +2025,14 @@ def main() -> int:
         "env"]  # part of the compile-cache key (cachelocal)
     ns = parser.parse_args(argv)
     ns.model = ns.model_tag
-    print("ENGINE ARGS:", " ".join(argv), flush=True)
+    print(ENGINE_START_LINE, " ".join(argv), flush=True)
     result["engine_argv"] = plan_argv
     result["engine_argv_run"] = argv
     t = time.time()
     engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(ns))
     result["boot_s"] = mark(
-        f"engine init (weights + KV + compile of buckets {buckets})", t)
+        f"{ENGINE_READY_MARK} (weights + KV + compile of buckets {buckets})",
+        t)
     t = time.time()
     router = twin.get("router")
     result["router_tensors_reset"] = (engine.collective_rpc(
@@ -1750,9 +2108,16 @@ def main() -> int:
             restored_dirs,
             restored=bool(a.cache_in) and used is not None,
             used=used)
-        _save_parts(cache_dir, f"{a.out}/compile_cache.tgz")
-        result["compile_cache_bytes"] = os.path.getsize(
-            f"{a.out}/compile_cache.tgz")
+        # The measurements are already in `result`. A failed cache save is
+        # recorded there, so that it does not stop result.json from being
+        # written.
+        try:
+            _save_parts(cache_dir, f"{a.out}/compile_cache.tgz")
+            result["compile_cache_bytes"] = os.path.getsize(
+                f"{a.out}/compile_cache.tgz")
+        except (OSError, RuntimeError) as e:
+            result["compile_cache_error"] = repr(e)[:500]
+            print("save compile cache failed:", e, flush=True)
         mark("save compile cache", t)
     result["times_s"] = TIMES
     result["total_s"] = round(time.time() - T0, 1)

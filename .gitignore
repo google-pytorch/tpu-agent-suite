@@ -36,5 +36,6 @@ eval/*/jobs/
 # Staged evaluation packages for Harbor agents
 .eval_staging/
 
-# Local temporary test directories
+# Local temporary test directories and untracked local configs
 tmp/
+google/

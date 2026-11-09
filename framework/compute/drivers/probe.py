@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import sys
 import urllib.request
@@ -80,12 +81,6 @@ def generation_for_name(accel_type: str) -> str | None:
     return None
 
 
-def generation_for_pci_id(pci_id: str) -> str | None:
-    """Resolve a canonical generation name from a PCI device id."""
-    chip = _tpu_device().TpuChip.from_pci_device_id((pci_id or "").lower(), "")
-    return generation_for_name(chip.value.name) if chip else None
-
-
 def spec_for(generation: str | None) -> dict[str, Any]:
     """Return the hardware spec for a generation."""
     if generation:
@@ -106,6 +101,14 @@ def topology_for(chips: int, generation: str | None = None) -> str:
         return "none"
     table = _TOPOLOGY_2D if generation in ("v5e", "v6e") else _TOPOLOGY_3D
     return table.get(chips, "unknown")
+
+
+def product(text: str, sep: str = "x") -> int:
+    """Product of the positive integers in `text` split on `sep`, or 0."""
+    try:
+        return max(0, math.prod(int(d) for d in text.lower().split(sep)))
+    except (AttributeError, ValueError):
+        return 0
 
 
 def read_metadata() -> dict[str, str]:
@@ -154,8 +157,16 @@ def scan_pci() -> tuple[int, str | None]:
 
 def list_devices() -> tuple[list[str], list[str]]:
     """Return (accel devices, vfio devices) present on this host."""
-    return sorted(glob.glob("/dev/accel*")), sorted(
-        d for d in glob.glob("/dev/vfio/[0-9]*") if not d.endswith("/vfio"))
+    vfio = sorted(d for d in glob.glob("/dev/vfio/[0-9]*")
+                  if not d.endswith("/vfio"))
+    if vfio:
+        return [], vfio
+    sys_accel = "/sys/class/accel"
+    has_sys_accel = os.path.isdir(sys_accel)
+    accel = sorted(
+        d for d in glob.glob("/dev/accel[0-9]*") if not has_sys_accel
+        or os.path.exists(os.path.join(sys_accel, os.path.basename(d))))
+    return accel, vfio
 
 
 def scan_holders() -> tuple[list[str], set[str], set[str]]:

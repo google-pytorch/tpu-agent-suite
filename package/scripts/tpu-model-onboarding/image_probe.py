@@ -17,7 +17,8 @@ Preflight judges a model against the image the workload will run in, not
 against what a config comment says it contains. This answers the questions
 that judgement depends on: which runtime libraries are installed and at which
 version, whether torch_tpu is present, whether the image can run the full
-preflight check, whether vLLM will serve on TorchTPU, whether its vLLM stack
+preflight check, whether it can serve on the custom_fastapi engine, whether
+vLLM will serve on TorchTPU, whether its vLLM stack
 is one a published image was tested with, what `pip check` finds, and -- with
 --touch_device -- whether a TPU device can actually be allocated.
 
@@ -53,18 +54,29 @@ DISTRIBUTIONS = (
     "vllm",
     "vllm_torchtpu",
     "tpu-inference",
+    "sglang",
+    "sglang-router",
+    "sgl-kernel",
     "jax",
     "jaxlib",
     "libtpu",
     "libtpu-nightly",
+    "fastapi",
+    "pydantic",
+    "uvicorn",
 )
 
 # Modules preflight_check.py imports; all present means the full check can run
 # in this image.
 PREFLIGHT_MODULES = ("absl", "huggingface_hub", "transformers", "yaml")
 
+# Modules the custom_fastapi server template (inference.py) imports beyond
+# torch; all present means the image can serve on that engine.
+CUSTOM_FASTAPI_MODULES = ("fastapi", "pydantic", "uvicorn")
+
 # Modules whose presence matters even when no distribution metadata names them.
-MODULES = ("torch", "torch_tpu", "vllm", "vllm_torchtpu") + PREFLIGHT_MODULES
+MODULES = (("torch", "torch_tpu", "vllm", "vllm_torchtpu", "sglang") +
+           PREFLIGHT_MODULES + CUSTOM_FASTAPI_MODULES)
 
 # How vLLM finds an out-of-tree platform, and the package the TorchTPU one is.
 VLLM_PLATFORM_PLUGINS = "vllm.platform_plugins"
@@ -614,7 +626,10 @@ def probe(check_device: bool, registry_path: str | None = None) -> dict:
         "distributions": versions,
         "modules": modules,
         "torch_tpu_present": modules["torch_tpu"],
+        "sglang_present": modules["sglang"],
         "preflight_runnable": all(modules[m] for m in PREFLIGHT_MODULES),
+        "custom_fastapi_runnable":
+        all(modules[m] for m in CUSTOM_FASTAPI_MODULES),
         "vllm_platform": vllm_platform(load=check_device),
         "vllm_timeout_envs": vllm_timeout_envs(),
         "vllm_patches": vllm_patches(versions, registry_path=registry_path),

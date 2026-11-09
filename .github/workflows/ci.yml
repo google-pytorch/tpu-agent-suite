@@ -14,6 +14,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
@@ -55,9 +56,11 @@ jobs:
               f.startsWith('framework/') ||
               f.startsWith('package/') ||
               f.startsWith('eval/') ||
+              f.startsWith('scripts/') ||
               f === 'Makefile' ||
               f === 'cicd-requirements.txt' ||
               f === '.coveragerc' ||
+              f.startsWith('.ci/') ||
               f.startsWith('.github/workflows/ci.yml')
             );
 
@@ -201,9 +204,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Gating job: this is the single status check to require in GitHub Rulesets.
-  # It enforces that verify, test, build, coverage, and lint must pass.
-  # Non-code/package PRs pass cleanly and immediately.
+  # Gating job: single status check enforcing verify, test, build, coverage, and lint.
   ci-gate:
     name: ci-gate
     runs-on: ubuntu-latest
@@ -229,13 +230,13 @@ jobs:
             exit 1
           fi
 
-          # 2. If no relevant files modified, pass immediately
+          # 2. If no code/package files modified, pass immediately
           if [[ "$CI_MODIFIED" != "true" ]]; then
-            echo "No relevant files modified. CI gate passed."
+            echo "No additional code/package files modified. CI gate passed."
             exit 0
           fi
 
-          # 3. Ensure all required checks succeeded
+          # 3. Ensure all remaining required checks succeeded
           FAILED=()
           for job in verify test build coverage lint; do
             result=""
@@ -262,13 +263,3 @@ jobs:
           fi
 
           echo "All required CI checks passed successfully"
-
-  # Temporary alias job for zero-downtime transition while GitHub Ruleset 20877680
-  # is updated from nexus-gate to ci-gate. Remove once ruleset requires ci-gate.
-  nexus-gate:
-    name: nexus-gate
-    runs-on: ubuntu-latest
-    needs: [ci-gate]
-    if: always()
-    steps:
-      - run: test "${{ needs.ci-gate.result }}" = "success"

@@ -1,0 +1,52 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Hand-written, like the baseline it mirrors. The check reads the result file
+# the agent writes and the conversation it had, which is not a shape rewardkit
+# criteria express.
+schema_version = "1.4"
+
+[task]
+name = "torchtpu/tpu-hello-world-cpu-batch"
+version = "1.0.0"
+description = "tpu-hello-world on the CPU with one field left out: the batch size, which must be a constant or a range and is the user's to choose. The agent has to ask and use the answer -- picking a default, inferring one, or running both fails however good the numbers are. It is the round trip this exercises: only the TPU agent suite holds the ask tool, so a specialist that reaches this point returns needs_input and its caller asks and re-delegates. Runnable anywhere, since nothing here needs an accelerator."
+authors = [{ name = "TorchTPU Team" }]
+keywords = ["hello_world", "torchtpu", "cpu", "smoke", "ask-user", "needs-input"]
+
+[environment]
+os = "linux"
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+workdir = "/workspace"
+# No `docker_image`: a pin here wins over `environment/Dockerfile` and the
+# Dockerfile is never built, so the CPU-only PyTorch layer on top of the
+# pinned `nexus-host` base image would silently not be there.
+
+[agent]
+# Longer than the plain CPU task, because a round trip through the user is
+# part of the work here: the agent asks, waits for an answer, and only then
+# runs. Still nowhere near the baseline's two hours -- nothing pulls a TPU
+# image or negotiates with a scheduler.
+timeout_sec = 1800.0
+# "public", not "no-network": the work needs no network, but the agent
+# does -- a model call from inside the trial dies as ECONNRESET
+# otherwise, and with a simulated user the conversation never starts.
+network_mode = "public"
+
+[verifier]
+timeout_sec = 60.0
+
+[metadata]
+category = "evaluation"

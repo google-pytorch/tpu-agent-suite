@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Put a Hugging Face model's checkpoint in a GCS bucket once, and find it there.
+"""Put a Hugging Face or local model's checkpoint in a GCS bucket once, and find it there.
 
 Runs on the host, with the user's own credentials: the only place that
 writes to the checkpoints folder. Jobs then read it with
@@ -202,6 +202,54 @@ def hub_fetch(model: str, commit: str, name: str, folder: str) -> str:
                                                local_dir=folder)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         raise _hub_problem(model, exc) from exc
+
+
+def local_plan(model_dir: str, revision: str | None = None) -> Plan:
+    """The files a server loads, with sizes and sha256 digests, from a local directory."""
+    del revision
+    root = pathlib.Path(model_dir).resolve()
+    if not root.is_dir():
+        raise StageError(f"{model_dir} is not a local directory")
+    sizes: dict[str, int] = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        sizes[rel.as_posix()] = p.stat().st_size
+
+    def read_index(name: str) -> list[str]:
+        with open(root / name, encoding="utf-8") as f:
+            return list(json.load(f).get("weight_map", {}).values())
+
+    try:
+        selection = fetch_weights.select_files(sizes, read_index)
+    except ValueError as exc:
+        raise StageError(f"{model_dir}: {exc}") from exc
+    config = (root /
+              "config.json").read_bytes() if "config.json" in sizes else None
+    files: dict[str, FileSpec] = {}
+    tree = hashlib.sha256()
+    for name in sorted(selection.files):
+        if not _loaded(name):
+            continue
+        digest = file_digest(str(root / name), "sha256")
+        files[name] = FileSpec(size=sizes[name], digest=digest)
+        tree.update(f"{name}\0{sizes[name]}\0{digest}\n".encode("utf-8"))
+    repo = f"local/{root.name or 'checkpoint'}"
+    return Plan(repo=repo, commit=tree.hexdigest(), files=files, config=config)
+
+
+def local_fetch(model_dir: str) -> Callable[[str, str, str, str], str]:
+    """Returns a fetch callable that reads files directly from `model_dir`."""
+    root = pathlib.Path(model_dir).resolve()
+
+    def _fetch(repo: str, commit: str, name: str, folder: str) -> str:
+        del repo, commit, folder
+        return str(root / name)
+
+    return _fetch
 
 
 def staged_prefix(folder: str, model: str, commit: str) -> str:
@@ -435,7 +483,9 @@ def _upload(bucket, prefix: str, plan: Plan, fetch: Callable[..., str],
             }
             blob.upload_from_filename(local)
             crcs[name] = blob.crc32c
-            os.remove(local)
+            if pathlib.Path(local).resolve().is_relative_to(
+                    pathlib.Path(tmp).resolve()):
+                os.remove(local)
             count, size = count + 1, size + spec.size
             progress.upload_from_string(json.dumps({
                 "repo": plan.repo,
@@ -489,11 +539,16 @@ def stage(bucket,
     """Finds `model`'s checkpoint in `bucket`'s checkpoints folder, or
     stages it there; returns the result described in the module docstring.
     """
+    if plan is hub_plan and fetch is hub_fetch and os.path.isdir(model):
+        plan = local_plan
+        fetch = local_fetch(model)
     want = plan(model, revision)
     if not want.files:
-        raise StageError(f"the hub lists no files a server loads for {model}")
+        raise StageError(
+            f"no files a server loads found in {model}" if os.path.isdir(model)
+            else f"the hub lists no files a server loads for {model}")
     root = folder.strip("/") + "/" if folder.strip("/") else ""
-    dest = staged_prefix(folder, model, want.commit)
+    dest = staged_prefix(folder, want.repo, want.commit)
     url = f"gs://{bucket.name}/"
 
     def result(path: str,
@@ -505,7 +560,7 @@ def stage(bucket,
             "checkpoint": url + path,
             "reused": reused,
             "verified": verified,
-            "repo": model,
+            "repo": want.repo,
             "revision": want.commit,
             "files": len(want.files),
             "bytes": sum(s.size for s in want.files.values()),
@@ -519,7 +574,8 @@ def stage(bucket,
     listing = _listing(bucket, root)
     tried: list[dict[str, str]] = []
     trusted = None
-    for prefix in sorted(_candidates(listing, model), key=lambda p: p != dest):
+    for prefix in sorted(_candidates(listing, want.repo),
+                         key=lambda p: p != dest):
         why = verify_copy(bucket, prefix, want, listing)
         if why is None:
             return result(prefix, True, True, tried)
@@ -561,7 +617,7 @@ def stage(bucket,
         if verify_copy(bucket, dest, want, here) is None:
             return result(dest, True, True, tried)
         _say(
-            f"STAGE {model}@{want.commit[:12]}: {len(want.files)} files, "
+            f"STAGE {want.repo}@{want.commit[:12]}: {len(want.files)} files, "
             f"{sum(s.size for s in want.files.values()) / fetch_weights.GB:.1f}"
             f" GB to {url}{dest}")
         crcs, count, size = _upload(bucket, dest, want, fetch, here)
@@ -587,7 +643,10 @@ def _client_bucket(url: str):
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("model", help="Hugging Face repo id, e.g. Qwen/Qwen3-8B")
+    ap.add_argument(
+        "model",
+        help="Hugging Face repo id (e.g. Qwen/Qwen3-8B) or local checkpoint"
+        " directory")
     ap.add_argument("--bucket",
                     required=True,
                     help="gs://<bucket>; only the bucket is used")
@@ -607,13 +666,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds to wait for another session staging the "
                     "same model")
     args = ap.parse_args(argv)
+    extra = ({
+        "plan": local_plan,
+        "fetch": local_fetch(args.model)
+    } if os.path.isdir(args.model) else {})
     try:
         out = stage(_client_bucket(args.bucket),
                     args.model,
                     args.revision,
                     args.folder,
                     trust_unverified=args.trust_unverified,
-                    wait_sec=args.wait)
+                    wait_sec=args.wait,
+                    **extra)
     except (StageError, ValueError) as exc:
         _say(f"STAGE FAILED: {exc}")
         return 1

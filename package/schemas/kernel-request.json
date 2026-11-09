@@ -6,9 +6,26 @@
   "additionalProperties": false,
   "required": [
     "prompt",
-    "run_id",
-    "base_kernel_path"
+    "run_id"
   ],
+  "oneOf": [
+    {
+      "required": [
+        "base_kernel_path"
+      ]
+    },
+    {
+      "required": [
+        "base_kernel_source",
+        "input_language"
+      ]
+    }
+  ],
+  "dependentRequired": {
+    "serving_config": [
+      "serving_round"
+    ]
+  },
   "properties": {
     "prompt": {
       "type": "string",
@@ -22,7 +39,12 @@
     "base_kernel_path": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to the input this run is derived from -- a JAX or PyTorch source, or, when `input_language` is `specification`, a written description of the computation to build. A CUDA file is not one of them; it belongs in `reference_paths`. Required, whichever of those it is: a request that names no file is one the loop cannot act on, and it is better refused here than discovered three stages later when planning has nothing to read. Optimizing a file the caller did not name is worse than refusing, because the speedup reported would be real and about something no one asked for. A path rather than an artifact descriptor because the input comes from outside the run -- it is the caller's file, not something the run produced, and the only caller holds `read` alone and so cannot compute a digest or register an artifact."
+      "description": "Path to the input this run is derived from -- a JAX or PyTorch source, or, when `input_language` is `specification`, a written description of the computation to build. A CUDA file is not one of them; it belongs in `reference_paths`. Exactly one of this and `base_kernel_source` is required: a request with neither is one the loop cannot act on, and it is better refused here than discovered three stages later when planning has nothing to read. Optimizing a file the caller did not name is worse than refusing, because the speedup reported would be real and about something no one asked for. A path rather than an artifact descriptor because the input comes from outside the run -- it is the caller's file, not something the run produced, and the only caller holds `read` alone and so cannot compute a digest or register an artifact. Use this whenever the input exists on disk; `base_kernel_source` is for input that does not."
+    },
+    "base_kernel_source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The input this run is derived from, carried inline because it exists nowhere on disk: the user pasted it into the conversation, and the caller holds `read` alone and cannot write it out. Mutually exclusive with `base_kernel_path`. `input_language` is required with it, because there is no extension for the classifier to read: the loop writes the text to disk as `base_kernel.py` (`base_kernel.md` for `specification`) and from then on treats it exactly as a `base_kernel_path`: the label picks the extension only, and the kernel-worker classifies the content -- same gates, same refusal of CUDA. Pass the text verbatim: no reformatting, no reconstructed comments, no fixes. It is the file the run is scored against, and a transcription error here is one no downstream gate can catch; if it does not run, the baseline gate says so and the user corrects their own code. Send it once: the result names the file it was written to in `base_kernel_path`, and later requests about that kernel pass that path with `slot`, like any file."
     },
     "input_language": {
       "type": "string",
@@ -32,7 +54,7 @@
         "pytorch",
         "specification"
       ],
-      "description": "What the file at `base_kernel_path` is. Supply it when the caller knows; omit it and the loop classifies the input deterministically rather than guessing. `jax` is the path the loop has always taken -- the file becomes the baseline unchanged. `pallas` names an existing Pallas kernel to make faster; a Pallas kernel is already JAX, so it takes the `jax` path and the run records it as `jax`. `pytorch` and `specification` each add a front-end phase that produces the baseline and a gate that checks it. `specification` means the file is prose describing the computation rather than code: the loop synthesizes a baseline from it and then STOPS for the user to approve that baseline, because an agent writing the file the run is scored against is the one case no downstream gate can catch. `cuda` is deliberately absent: CUDA is accepted only through `reference_paths`, never as the primary -- see that field."
+      "description": "What the primary input is -- the file at `base_kernel_path`, or the text in `base_kernel_source`. For a path, supply it when the caller knows; omit it and the loop classifies the input deterministically rather than guessing. For inline source it is required: it decides the extension the text is persisted under, which is what the classifier reads. `jax` is the path the loop has always taken -- the file becomes the baseline unchanged. `pallas` names an existing Pallas kernel to make faster; a Pallas kernel is already JAX, so it takes the `jax` path and the run records it as `jax`. `pytorch` and `specification` each add a front-end phase that produces the baseline and a gate that checks it. `specification` means the input is prose describing the computation rather than code: the loop synthesizes a baseline from it and then STOPS for the user to approve that baseline, because an agent writing the file the run is scored against is the one case no downstream gate can catch. `cuda` is deliberately absent: CUDA is accepted only through `reference_paths`, never as the primary -- see that field."
     },
     "reference_paths": {
       "type": "array",
@@ -41,14 +63,6 @@
         "type": "string",
         "minLength": 1
       }
-    },
-    "reference_mode": {
-      "type": "string",
-      "enum": [
-        "torchax",
-        "llm_port"
-      ],
-      "description": "How the JAX reference is obtained from a PyTorch primary. `torchax` converts the module mechanically, so there is no mistranslation risk, but it needs a torch/torchax pin this package's TPU requirements deliberately do not carry. `llm_port` has an agent write the port and gates it against captured golden values; it is the default, because it needs no extra dependency."
     },
     "target_op": {
       "type": "string",
@@ -242,6 +256,41 @@
         }
       }
     },
+    "serving_round": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "description": "What the optimization-heuristics round -- the serving-change round tpu-agent runs on the baseline's traces before any kernel work when the ask is to optimize a vLLM server -- concluded, as tpu-agent recorded it. Required with `serving_config`, so a kernel for a served model is never tuned without that round having run or a stated reason why not: in a held-out A/B the orchestrator skipped the round on two of three models, once without a word, by treating a required kernel as a frozen layout. The loop does not act on it beyond recording it with the run.",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "kept_candidate",
+            "kept_baseline",
+            "nothing_to_propose",
+            "not_run"
+          ],
+          "description": "`kept_candidate`: the round measured its candidates and kept one; the kernel work builds on it, re-profiled, and its gain is measured against that configuration. `kept_baseline`: it measured candidates and none won; the kernel work builds on the baseline. `nothing_to_propose`: its rules returned no candidate. `not_run`: the round did not run, for the `reason` given."
+        },
+        "candidates_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The `candidates_path` tpu-diagnostics returned for the round, when it ran."
+        },
+        "deployments_json": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The deployments manifest of the configuration the kernel work runs on, when the round measured candidates."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "With `not_run`: the ask is not to optimize, the server is not vLLM, or the user declined the round, in their words. A required kernel, a fixed harness or a server near its time limit is not a reason."
+        }
+      }
+    },
     "max_iterations": {
       "type": "integer",
       "minimum": 1,
@@ -272,6 +321,15 @@
       "rtol": 0.01
     },
     {
+      "prompt": "Faster Pallas implementation of this grouped top-k expert selection for TPU7x. Preserve the function signature, input layouts and output ordering.",
+      "run_id": "20260914T120000Z-000000000000",
+      "base_kernel_source": "import jax\nimport jax.numpy as jnp\n\ndef get_inputs():\n    k1, k2 = jax.random.split(jax.random.key(42))\n    router_logits = jax.nn.sigmoid(jax.random.normal(k1, (4096, 384), dtype=jnp.float32))\n    correction_bias = 0.05 * jax.random.normal(k2, (384,), dtype=jnp.float32)\n    return [router_logits, correction_bias], []\n\ndef computation(router_logits, correction_bias):\n    scores = router_logits + correction_bias[None, :]\n    topk_ids = jax.lax.top_k(scores, k=8)[1]\n    topk_weights = jnp.take_along_axis(router_logits, topk_ids, axis=1)\n    return topk_weights, topk_ids\n",
+      "input_language": "jax",
+      "target_op": "biased top-k expert selection",
+      "atol": 1e-06,
+      "rtol": 1e-05
+    },
+    {
       "prompt": "Make vLLM's head_dim-64 ragged paged attention kernel faster for gpt-oss-20b serving on TPU7x.",
       "run_id": "20260914T120000Z-000000000000",
       "base_kernel_path": "work/kernel_hd64.py",
@@ -280,6 +338,11 @@
       "serving_config": {
         "deployments_json": "/runs/20260914T120000Z-000000000000/artifacts/tpu-model-onboarding/inference/deployments.json",
         "launch_recipe": "/runs/20260914T120000Z-000000000000/artifacts/tpu-model-onboarding/inference/launch_vllm.sh"
+      },
+      "serving_round": {
+        "status": "kept_baseline",
+        "candidates_path": "/runs/20260914T120000Z-000000000000/artifacts/tpu-diagnostics/optimization-heuristics/candidates.json",
+        "deployments_json": "/runs/20260914T120000Z-000000000000/artifacts/tpu-model-onboarding/inference/deployments.json"
       },
       "fusion_context": {
         "fusion": null,

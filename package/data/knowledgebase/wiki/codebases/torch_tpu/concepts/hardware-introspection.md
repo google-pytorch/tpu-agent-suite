@@ -129,7 +129,7 @@ Legend:
 > per rank; size activation memory against the per-device HBM; when a model misbehaves on TPU, run
 > it under the op tracer on CPU and TPU and diff the op counts, or under `ActivationTracer` to find
 > the first diverging module, without touching runtime internals. To silence or escalate the stage
-> warnings in a test suite, filter on the `<TorchTpu/ApiStage/` message prefix.
+> warnings in a test suite, filter on the `//TorchTpu/ApiStage/` message prefix.
 
 ## Entry points
 - [`experimental`](https://github.com/google-pytorch/torch_tpu/blob/6d2a45754bdb52743883f75fbf753408345f6d1b/src/torch_tpu/_internal/utils/annotations.py#L339 "src/torch_tpu/_internal/utils/annotations#experimental"), [`stable`](https://github.com/google-pytorch/torch_tpu/blob/6d2a45754bdb52743883f75fbf753408345f6d1b/src/torch_tpu/_internal/utils/annotations.py#L362 "src/torch_tpu/_internal/utils/annotations#stable"), [`deprecated`](https://github.com/google-pytorch/torch_tpu/blob/6d2a45754bdb52743883f75fbf753408345f6d1b/src/torch_tpu/_internal/utils/annotations.py#L380 "src/torch_tpu/_internal/utils/annotations#deprecated"), [`internal_or_experimental`](https://github.com/google-pytorch/torch_tpu/blob/6d2a45754bdb52743883f75fbf753408345f6d1b/src/torch_tpu/_internal/utils/annotations.py#L406 "src/torch_tpu/_internal/utils/annotations#internal_or_experimental"): decorators applied

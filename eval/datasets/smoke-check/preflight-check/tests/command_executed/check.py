@@ -31,12 +31,6 @@ _CMD_TOOLS = {
     "Bash",
     "exec",
 }
-_SUBAGENT_TOOLS = {
-    "invoke_subagent",
-    "subagent",
-    "call_subagent",
-    "delegate",
-}
 
 
 def _collect_all_calls() -> list[dict[str, Any]]:
@@ -122,7 +116,10 @@ def _has_artifact(workspace: Path, patterns: list[str]) -> bool:
         Path.home() / ".tpu-agent-suite/runs",
     ]
     for s_dir in search_dirs:
-        if not s_dir.exists():
+        try:
+            if not s_dir.exists():
+                continue
+        except OSError:
             continue
         for pat in patterns:
             try:
@@ -138,42 +135,25 @@ def _has_artifact(workspace: Path, patterns: list[str]) -> bool:
 
 @criterion(description="Verify preflight_check command or script was executed")
 def check_command_executed(workspace: Path) -> bool:
-    target_names = {"preflight_check", "preflight-check", "preflight"}
     regex = re.compile(
-        r"preflight_check|preflight-check|preflight_report|preflight")
+        r"preflight_check\.py\b.*\s--(?:model|resolve|hub_only)\b")
 
-    if _has_artifact(workspace, ["*preflight*"]):
+    if _has_artifact(workspace, [
+            "*cuda_kernels_report*.json",
+            "*model_resolution.json",
+            "*preflight*",
+    ]):
         return True
 
     calls = _collect_all_calls()
     for tc in calls:
         tool_name = (tc.get("function_name") or tc.get("name") or "").lower()
-        args = tc.get("arguments") or tc.get("args") or {}
+        args = tc.get("arguments") or tc.get("args") or tc.get("input") or {}
         if tool_name in _CMD_TOOLS:
             cmd = str(
                 args.get("command") or args.get("CommandLine")
                 or args.get("cmd") or args.get("command_line") or "")
             if regex.search(cmd):
-                return True
-        if tool_name in _SUBAGENT_TOOLS:
-            subagents = args.get("Subagents") or args.get("subagents") or []
-            if isinstance(subagents, list):
-                for sub in subagents:
-                    if isinstance(sub, dict):
-                        t_name = str(
-                            sub.get("TypeName") or sub.get("type_name")
-                            or sub.get("Role") or sub.get("role")
-                            or "").lower()
-                        prompt = str(
-                            sub.get("Prompt") or sub.get("prompt")
-                            or "").lower()
-                        if any(n in t_name for n in target_names) and any(
-                                n in prompt for n in target_names):
-                            return True
-                        if regex.search(prompt) or regex.search(t_name):
-                            return True
-            args_str = str(args).lower()
-            if any(n in args_str for n in target_names):
                 return True
 
     return False

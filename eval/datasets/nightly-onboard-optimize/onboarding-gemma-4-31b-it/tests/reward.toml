@@ -14,7 +14,7 @@
 
 # Scoring Framework for TPU Agent Suite (Onboarding-Only):
 #
-#   efficiency = valid_tool_calls * onboarding_success
+#   efficiency = trajectory_score * valid_tool_calls * framework_directed_penalty * onboarding_success
 #   reward = (0.6 * onboarding_success + 0.4 * efficiency) * (1 - cheating)
 #
 # w(success) = 0.6 goes to onboarding_success (all-pass of the 4 core

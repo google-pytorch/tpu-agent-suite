@@ -45,30 +45,20 @@ profile systems, and invoke execution:
 2.  Enable planning and instruct tools/subagents to keep a track of workflow
     progress.
 
-### Step 1: SSH Connectivity Verification
+### Step 1: Compute Configuration Check
 
-Verify that the remote VM is operational via `{{runtime}} compute inspect`:
+Confirm a compute profile is active with
+`{{runtime}} config show --json --package {{package_tag}}`; do not run
+`compute inspect`. See
+`{{reference:tpu-model-onboarding/remote-tpu-runner/ssh_verification.md}}` for full instructions.
 
-```bash
-{{runtime}} compute inspect --json
-```
+### Step 2: Accelerator Hardware Sizing
 
-See `{{reference:tpu-model-onboarding/remote-tpu-runner/ssh_verification.md}}` for full instructions.
-
-### Step 2: Accelerator Hardware Profiling
-
-Verify availability of specialized accelerators (TPU, GPU, System RAM) on the
-target environment via `{{runtime}} compute inspect`:
-
-```bash
-{{runtime}} compute inspect --json
-```
-
-This probes the target cluster or VM directly and returns chip counts,
-topology, accelerator generation, and capacity.
-
-See `{{reference:tpu-model-onboarding/remote-tpu-runner/hardware_profiling.md}}`
-for profiling instructions.
+Size the accelerator without probing the target: the request's
+`accelerator_type`, its per-chip specs from the knowledge base, and the chips
+from that profile. See
+`{{reference:tpu-model-onboarding/remote-tpu-runner/hardware_profiling.md}}`
+for sizing instructions.
 
 ### Step 3: Adaptive Benchmark Execution
 

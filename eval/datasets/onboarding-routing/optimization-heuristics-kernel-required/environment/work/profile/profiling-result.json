@@ -1,0 +1,37 @@
+{
+ "status": "reported",
+ "summary": "The ragged paged attention prefill kernel is the largest single cost at 8k/1k with 128 users (45% of the prefill step); tensor-parallel all-reduces take 25%.",
+ "run_id": "seeded",
+ "traces": [
+  {
+   "path": "/workspace/profile/prefill-8k1k-c128",
+   "label": "baseline prefill 8k1k c128",
+   "captured": true,
+   "levers": [
+    {
+     "kind": "kernel-block",
+     "summary": "Ragged paged attention prefill kernel",
+     "share_pct": 45.0,
+     "source_tool": "xprof op_profile",
+     "phase": "prefill",
+     "trace_name": "RPAm",
+     "next_step": "Write a faster attention kernel for this shape."
+    },
+    {
+     "kind": "exposed-collective",
+     "summary": "Tensor-parallel all-reduces in prefill, not overlapped with compute",
+     "share_pct": 25.0,
+     "source_tool": "xprof op_profile",
+     "phase": "prefill",
+     "next_step": "Fewer TP ranks with more replicas for long-prompt traffic."
+    }
+   ],
+   "tool_outputs": [
+    {
+     "tool": "create_events_db",
+     "artifact": "/workspace/profile/events/prefill-8k1k-c128.parquet"
+    }
+   ]
+  }
+ ]
+}

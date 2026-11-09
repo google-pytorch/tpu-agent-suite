@@ -27,7 +27,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from framework import compiler  # noqa: E402
+from framework.builder import translate  # noqa: E402
 
 Path = pathlib.Path
 PACKAGE_DIR = REPO_ROOT / "package"
@@ -45,10 +45,10 @@ class TestCursorTranslationParity(unittest.TestCase):
         super().setUpClass()
         cls.temp_dir = Path(tempfile.mkdtemp(prefix="torchtpu_test_cursor_"))
         cls.dist_dir = cls.temp_dir / "dist_cursor"
-        compiler.translate(PACKAGE_DIR,
-                           cls.HARNESS,
-                           cls.dist_dir,
-                           include_internal=True)
+        translate(PACKAGE_DIR,
+                  cls.HARNESS,
+                  cls.dist_dir,
+                  include_internal=True)
 
     @classmethod
     def tearDownClass(cls):

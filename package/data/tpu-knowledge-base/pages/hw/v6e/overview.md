@@ -11,6 +11,7 @@ source_ids:
 - xla-scoped-vmem
 - openxla-tiled-layout
 - openxla-sparsecore
+- tpu-info-chips
 generation_recipe: overview.recipe.json
 ---
 
@@ -34,7 +35,7 @@ Vendor-stated peak compute throughputs per chip are:
 
 The memory subsystem on TPU v6e is divided into high-bandwidth memory (HBM), on-chip scratchpad memory for TensorCores, scratchpad memory for SparseCores, and host-attached main memory [^cloud-tpu-v6e] [^openxla-sparsecore]:
 
-* **High-Bandwidth Memory (HBM):** Each v6e chip integrates 32 GB in the v6e specification; the comparison table labels it 32 GiB of HBM providing 1638 GBps of memory bandwidth [^cloud-tpu-v6e] [^cloud-tpu-7x] [^openxla-sparsecore]. HBM accommodates dense model weights, communication stack allocations, dynamically prefetched host data, and embedding tables [^openxla-sparsecore].
+* **High-Bandwidth Memory (HBM):** Each v6e chip integrates 32 GiB of HBM providing 1638 GBps of memory bandwidth [^cloud-tpu-v6e] [^cloud-tpu-7x] [^openxla-sparsecore] [^tpu-info-chips]. *(knowledge base note: the v6e specification writes 32 GB; the comparison table and the tpu_info chip table give 32 GiB.)* HBM accommodates dense model weights, communication stack allocations, dynamically prefetched host data, and embedding tables [^openxla-sparsecore].
 * **Vector Memory (VMEM):** VMEM serves as the local scratchpad memory used exclusively by the TensorCore [^xla-scoped-vmem]. While physical SRAM capacity is not stated, XLA enforces a usable instruction-scoped VMEM allocation ceiling of 131,008 KiB or 134,152,192 bytes (127.9375 MiB, derived; the source labels this approximately 127.9 MB) [^xla-scoped-vmem]. This scoped allocation limit can be tuned globally via compiler flags or per kernel in frameworks like Pallas [^xla-scoped-vmem].
 * **SparseCore Scratchpad Memory (SPMEM):** Each SparseCore contains an explicitly managed local SRAM scratchpad that stages lookups, non-elementwise reductions, and temporary data to avoid high HBM latency [^openxla-sparsecore]. The SparseCore runtime lacks dynamic scratchpad allocation; buffer sizing inside SPMEM is strictly static and determined at compile time using ID limit settings [^openxla-sparsecore].
 * **Host DRAM:** Physical hosts provide 1536 GiB of DRAM across their 8 hosted TPU chips [^cloud-tpu-v6e].
@@ -114,3 +115,5 @@ See [the generation-specific memory and buffer reference](memory-buffers.md) for
 [^openxla-sparsecore]: [OpenXLA SparseCore](https://github.com/openxla/xla/blob/main/docs/sparsecore.md). architecture-reference. SparseCore organization, scratch sizing and embedding stack estimates. URL checked 2026-10-03.
 
 <!-- sources:generated:end -->
+
+[^tpu-info-chips]: [tpu_info chip table](https://github.com/AI-Hypercomputer/cloud-accelerator-diagnostics/blob/main/tpu_info/tpu_info/device.py). code-reference. `TpuChip`: HBM per chip in GiB (`hbm_gib`) and devices per chip, the table `compute inspect` sizes from; checked at commit 35b5377566aa. URL checked 2026-10-27.

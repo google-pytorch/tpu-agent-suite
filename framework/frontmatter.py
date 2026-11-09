@@ -15,11 +15,14 @@
 
 from __future__ import annotations
 
+import pathlib
 from typing import Any
 
 import yaml
 
 from framework.utils import TpuAgentSuiteError
+
+Path = pathlib.Path
 
 
 def parse_frontmatter_document(content: str,
@@ -58,3 +61,22 @@ def parse_frontmatter_document(content: str,
             "horizontal rule ('---'), frontmatter is expected; add required "
             "frontmatter or leading content.")
     return fm, body
+
+
+def read_frontmatter_document(
+        path: Path,
+        filename: str | None = None,
+        *,
+        errors: str = "strict") -> tuple[dict[str, Any], str, str]:
+    """Read a markdown file and split off its optional YAML frontmatter.
+
+    `filename` names the file in parse errors, `path.name` by default, and
+    `errors` is how undecodable bytes are handled, as for `bytes.decode`.
+
+    Returns (frontmatter_dict, markdown_body, full_text); as with
+    parse_frontmatter_document, a file without frontmatter is ({}, text, text).
+    """
+    text = path.read_text(encoding="utf-8", errors=errors)
+    fm, body = parse_frontmatter_document(
+        text, path.name if filename is None else filename)
+    return fm, body, text

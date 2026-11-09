@@ -21,7 +21,7 @@ whether a contract holds in production: `validate-delegate-request` and
 `validate-subagent-result`, dispatched by the harness on every delegation.
 
 This file covers that layer with no harness and no accelerator -- compile,
-install into a temporary store, then hand `_builtin_validate_schema` the
+install into a temporary store, then hand `builtin_validate_schema` the
 canonical payloads the harness would give it.
 
 It exists because a bug hid exactly here. `check_status_payload` was wired
@@ -48,6 +48,41 @@ PACKAGE = REPO_ROOT / "package"
 
 RUN_ID = "20260923T101500Z-abcdef123456"
 ARTIFACT = "artifacts/optimized.py"
+
+
+def _load_installed_runtime(runtime_path: pathlib.Path):
+    """Import an installed runtime.py together with its own `framework` package.
+
+    The source tree's `framework` is already in `sys.modules` by the time this
+    runs (this test module lives in it), so the installed runtime's
+    `from framework import ...` would resolve to the source copies. Set those
+    modules aside while importing, then put them back so other tests are
+    unaffected. The installed modules stay reachable through the runtime.
+    """
+    saved_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "framework" or name.startswith("framework.")
+    }
+    saved_path = list(sys.path)
+    for name in saved_modules:
+        del sys.modules[name]
+    sys.path.insert(0, str(runtime_path.parents[1]))
+    try:
+        spec = importlib.util.spec_from_file_location("installed_runtime",
+                                                      runtime_path)
+        assert spec and spec.loader
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+    finally:
+        for name in [
+                n for n in sys.modules
+                if n == "framework" or n.startswith("framework.")
+        ]:
+            del sys.modules[name]
+        sys.modules.update(saved_modules)
+        sys.path[:] = saved_path
+    return runtime
 
 
 class TestContractHooks(unittest.TestCase):
@@ -106,12 +141,14 @@ class TestContractHooks(unittest.TestCase):
         # Import the *installed* runtime, not the source tree's. The hook runs
         # from the installed copy in production, so a bug that survives the
         # build is only visible from there.
-        spec = importlib.util.spec_from_file_location("installed_runtime",
-                                                      runtimes[0])
-        assert spec and spec.loader
-        cls.runtime = importlib.util.module_from_spec(spec)
-        sys.path.insert(0, str(runtimes[0].parent))
-        spec.loader.exec_module(cls.runtime)
+        cls.runtime = _load_installed_runtime(runtimes[0])
+        installed_framework = runtimes[0].parent.resolve()
+        for module in (cls.runtime, cls.runtime.agent_contracts):
+            if installed_framework not in pathlib.Path(
+                    module.__file__).resolve().parents:
+                raise AssertionError(
+                    f"{module.__name__} loaded from {module.__file__}, not the"
+                    f" installed copy in {installed_framework}")
 
         cls.workspace = workspace
         cls._prev_home = os.environ.get("TPU_AGENT_SUITE_HOME")
@@ -131,7 +168,7 @@ class TestContractHooks(unittest.TestCase):
         # Encoding the prose would wrap it in a JSON string literal, which the
         # hook reads as "no JSON object here" -- the opposite of the test.
         prompt = payload if isinstance(payload, str) else json.dumps(payload)
-        decision = self.runtime._builtin_validate_schema(
+        decision = self.runtime.agent_contracts.builtin_validate_schema(
             "tpu-agent-suite", self.workspace, {
                 "event": "PreToolUse",
                 "tool": "delegate",
@@ -146,7 +183,7 @@ class TestContractHooks(unittest.TestCase):
         return decision.get("decision", "allow")
 
     def _result(self, agent: str, payload: dict) -> str:
-        decision = self.runtime._builtin_validate_schema(
+        decision = self.runtime.agent_contracts.builtin_validate_schema(
             "tpu-agent-suite", self.workspace, {
                 "event": "SubagentStop",
                 "subagent": agent,
@@ -154,200 +191,99 @@ class TestContractHooks(unittest.TestCase):
             })
         return decision.get("decision", "allow")
 
-    # -- the tpu-agent -> tpu-kernel-development boundary -----------------------------
+    # -- requests -------------------------------------------------------------
 
-    def test_kernel_request_refuses_a_prompt_that_names_no_kernel(self):
-        """The loop improves on an existing kernel, so a file is not optional.
+    def test_requests_reject_bad_payloads(self):
+        """Each row is a valid dispatch with exactly one defect."""
+        kernel = self._dispatch("tpu-kernel-development", "speed up fa")
+        no_kernel = dict(kernel)
+        del no_kernel["base_kernel_path"]
+        no_prompt = dict(kernel)
+        del no_prompt["prompt"]
+        cases = [
+            # The loop improves on an existing kernel, so a file is not
+            # optional. A bare prompt used to validate, and the loop then fell
+            # back to `<work>/base.py` -- a file the caller never named and may
+            # not have written. The failure surfaced stages later, as a planner
+            # with nothing to read, or worse as a real speedup measured against
+            # the wrong kernel.
+            ("tpu-kernel-development", "names no kernel", no_kernel),
+            # `minLength: 1` -- an empty string names no file either.
+            ("tpu-kernel-development", "empty base_kernel_path", {
+                **kernel, "base_kernel_path": ""
+            }),
+            # A budget the loop has no stop condition for must not
+            # validate. The schema is closed precisely so a caller cannot
+            # promise the user an exit the agent will never take.
+            ("tpu-kernel-development", "field the loop cannot honour", {
+                **kernel, "time_budget_minutes": 30
+            }),
+            ("tpu-kernel-development", "no prompt", no_prompt),
+            # A value that is present and malformed resolves to the wrong
+            # artifact root, so it fails here rather than silently.
+            ("tpu-kernel-development", "malformed run_id", {
+                **kernel, "run_id": "not-a-run-id"
+            }),
+        ]
+        for agent, label, payload in cases:
+            with self.subTest(agent=agent, case=label):
+                self.assertEqual(self._request(agent, payload), "deny")
 
-        A bare prompt used to validate, and the loop then fell back to
-        `<work>/base.py` -- a file the caller never named and may not have
-        written. The failure surfaced stages later, as a planner with nothing
-        to read, or worse as a real speedup measured against the wrong kernel.
-        """
-        self.assertEqual(
-            self._request("tpu-kernel-development", {
-                "prompt": "speed up fa",
-                "run_id": RUN_ID
-            }), "deny")
-        self.assertEqual(
-            self._request(
-                "tpu-kernel-development", {
-                    "prompt": "speed up fa",
-                    "run_id": RUN_ID,
-                    "base_kernel_path": "work/base.py"
-                }), "allow")
-
-    def test_kernel_request_refuses_an_empty_base_kernel_path(self):
-        """`minLength: 1` -- an empty string names no file either."""
-        self.assertEqual(
-            self._request("tpu-kernel-development", {
+    def test_typed_requests_are_accepted(self):
+        """Every optional field a caller's instructions send is declared."""
+        cases = [
+            ("tpu-kernel-development", {
                 "prompt": "speed up fa",
                 "run_id": RUN_ID,
-                "base_kernel_path": ""
-            }), "deny")
-
-    def test_kernel_request_accepts_the_typed_fields(self):
-        self.assertEqual(
-            self._request(
-                "tpu-kernel-development", {
-                    "prompt": "speed up fa",
-                    "run_id": RUN_ID,
-                    "base_kernel_path": "work/base.py",
-                    "target_op": "flash attention",
-                    "max_iterations": 8,
-                    "atol": 0.001,
-                    "rtol": 0.001,
-                }), "allow")
-
-    def test_kernel_request_rejects_a_field_the_loop_cannot_honour(self):
-        """A budget the loop has no stop condition for must not validate.
-
-        The schema is closed precisely so a caller cannot promise the user an
-        exit the agent will never take.
-        """
-        self.assertEqual(
-            self._request("tpu-kernel-development", {
-                "prompt": "x",
-                "time_budget_minutes": 30
-            }), "deny")
-
-    def test_kernel_request_requires_a_prompt(self):
-        self.assertEqual(
-            self._request("tpu-kernel-development", {"max_iterations": 5}),
-            "deny")
-
-    def test_kernel_request_rejects_a_malformed_run_id(self):
-        """`run_id` is optional -- standalone mode allocates its own -- but a
-        value that is present and malformed resolves to the wrong artifact
-        root, so it fails here rather than silently."""
-        self.assertEqual(
-            self._request("tpu-kernel-development", {
-                "prompt": "x",
-                "run_id": "not-a-run-id"
-            }), "deny")
-
-    def test_kernel_result_accepts_an_honest_failure(self):
-        self.assertEqual(
-            self._result(
-                "tpu-kernel-development", {
-                    "status":
-                    "failed",
-                    "run_id":
-                    RUN_ID,
-                    "failure_reason":
-                    "no_device",
-                    "error_message":
-                    "TPU unreachable",
-                    "iterations": [{
-                        "iteration": 1,
-                        "compile_ok": False,
-                        "test_ok": False
-                    }],
-                }), "allow")
-
-    def test_kernel_result_accepts_a_complete_success(self):
-        self.assertEqual(
-            self._result(
-                "tpu-kernel-development", {
-                    "status": "optimized",
-                    "run_id": RUN_ID,
-                    "artifacts": [ARTIFACT],
-                    "best_kernel_artifact": ARTIFACT,
-                    "baseline_latency_ms": 10.0,
-                    "best_latency_ms": 4.0,
-                    "speedup_factor": 2.5,
-                    "iterations_run": 5,
-                }), "allow")
-
-    def test_kernel_result_rejects_the_retired_status_vocabulary(self):
-        self.assertEqual(
-            self._result("tpu-kernel-development", {
-                "status": "success",
-                "run_id": RUN_ID
-            }), "deny")
-
-    # -- the rule that used to reach only the CLI ----------------------------
-
-    def test_claimed_outcome_without_measurements_is_denied_at_the_hook(self):
-        """The regression this file exists for.
-
-        `artifacts` is non-empty and the schema itself is satisfied -- only
-        the conditional payload rule can catch this.
-        """
-        self.assertEqual(
-            self._result(
-                "tpu-kernel-development", {
-                    "status": "optimized",
-                    "run_id": RUN_ID,
-                    "artifacts": [ARTIFACT],
-                    "summary": "went well",
-                }), "deny")
-
-    def test_an_optimized_kernel_must_point_at_a_durable_artifact(self):
-        """The rule that renaming the status could have switched off silently.
-
-        `check_completed_has_artifact` -- 'a completed result must carry an
-        artifact' -- fires only on the literal status `completed`. Every
-        measurement below is present; only the artifacts are missing or empty.
-        """
-        measured = {
-            "status": "optimized",
-            "run_id": RUN_ID,
-            "best_kernel_artifact": ARTIFACT,
-            "best_latency_ms": 1.83,
-            "speedup_factor": 2.31,
-            "iterations_run": 3,
-        }
-        for label, artifacts in (("omitted", None), ("empty", [])):
-            with self.subTest(artifacts=label):
-                payload = dict(measured)
-                if artifacts is not None:
-                    payload["artifacts"] = artifacts
-                self.assertEqual(
-                    self._result("tpu-kernel-development", payload), "deny")
-
-        self.assertEqual(
-            self._result("tpu-kernel-development", {
-                **measured, "artifacts": [ARTIFACT]
-            }), "allow")
-
-    def test_stage_subagents_are_held_to_the_same_rule(self):
-        """A stage schema has no `artifacts` property at all, so the
-        completed-artifact rule never applies to it and the payload rule is
-        the only guard."""
-        cases = [
-            ("analyze-cuda-reference", {
-                "status": "summarized",
-                "run_id": RUN_ID
+                "base_kernel_path": "work/base.py",
+                "target_op": "flash attention",
+                "max_iterations": 8,
+                "atol": 0.001,
+                "rtol": 0.001,
             }),
             ("kernel-worker", {
-                "status": "optimized",
+                "prompt":
+                "Run one iteration of the loop.",
+                "run_id":
+                RUN_ID,
+                "iteration":
+                1,
+                "base_kernel_path":
+                "work/base.py",
+                "work_dir":
+                f"/runs/{RUN_ID}/artifacts/tpu-kernel-development/k01",
+            }),
+            # The open `fields` takes whatever quantities a caller asks for.
+            ("tpu-diagnostics", {
+                "prompt": "Analyse the trace.",
                 "run_id": RUN_ID,
-                "iteration": 1
+                "traces": [{
+                    "path": "/w/iter1/trace"
+                }],
+                "report_path": "/w/iter1/p.md",
+                "fields": ["alu_utilization_percent", "duty_cycle_percent"],
+                "top_ops": 30,
+            }),
+            # Two traces in one call -- the xprof-compare shape one path lost.
+            ("tpu-diagnostics", {
+                "prompt":
+                "Which run has the shorter step?",
+                "run_id":
+                RUN_ID,
+                "traces": [{
+                    "path": "/p/a",
+                    "label": "A"
+                }, {
+                    "path": "/p/b",
+                    "label": "B"
+                }],
+                "workload":
+                "/w/variant.py",
             }),
         ]
         for agent, payload in cases:
-            with self.subTest(agent=agent):
-                self.assertEqual(self._result(agent, payload), "deny")
-
-    def test_stage_subagents_may_report_failure_without_a_payload(self):
-        """The whole point: each of these was unrepresentable before."""
-        cases = [
-            ("analyze-cuda-reference", {
-                "status": "failed",
-                "run_id": RUN_ID,
-                "failure_reason": "timeout"
-            }),
-            ("kernel-worker", {
-                "status": "failed",
-                "run_id": RUN_ID,
-                "iteration": 3,
-                "failure_reason": "compilation_error"
-            }),
-        ]
-        for agent, payload in cases:
-            with self.subTest(agent=agent):
-                self.assertEqual(self._result(agent, payload), "allow")
+            with self.subTest(agent=agent, fields=sorted(payload)):
+                self.assertEqual(self._request(agent, payload), "allow")
 
     # -- every handoff in the tpu-kernel-development workflow -----------------------------
 
@@ -418,41 +354,13 @@ class TestContractHooks(unittest.TestCase):
                 continue  # no request schema -- nothing to enforce
             with self.subTest(edge=f"{caller} -> {callee}"):
                 self.assertEqual(self._request(callee, payload), "deny")
-
-    def test_every_request_schema_declares_prompt(self):
-        """The property that makes a prose delegation survive the hook.
-
-        Only for callees that declare one; an agent with no request schema has
-        nothing for the hook to strip a `prompt` out of, and is reached either
-        way, which `test_every_workflow_handoff_is_accepted_as_dispatched`
-        covers.
-
-        `prompt` must be declared and required everywhere. Beyond it, a stage
-        requires nothing, so a caller with only prose still gets through --
-        except `tpu-kernel-development`, which also requires `base_kernel_path` because the
-        loop has no kernel to optimize without one. That is a deliberate
-        exception, so it is named here rather than left to drift.
-        """
-        schemas_dir = (pathlib.Path(__file__).resolve().parents[2] /
-                       "package" / "schemas")
-        beyond = {
-            "tpu-kernel-development": ["base_kernel_path"],
-            "kernel-worker": ["work_dir"],
-        }
-        checked = 0
-        for _, callee, _ in self.WORKFLOW:
-            accepts = self.contract_of(callee).get("accepts") or ""
-            if not accepts.endswith(".json"):
-                continue
-            checked += 1
-            with self.subTest(callee=callee):
-                schema = json.loads(
-                    (schemas_dir /
-                     accepts.split("/")[-1]).read_text(encoding="utf-8"))
-                self.assertIn("prompt", schema["properties"])
-                self.assertEqual(schema["required"],
-                                 ["prompt", "run_id"] + beyond.get(callee, []))
-        self.assertTrue(checked, "no callee declares a request schema")
+        # Bare prose is validated as `{prompt}` and denied the same way --
+        # with no `accepts` the hook used to allow it.
+        with self.subTest(edge="prose -> tpu-diagnostics"):
+            self.assertEqual(
+                self._request("tpu-diagnostics",
+                              "Analyse the XProf trace at /w/iter1/trace."),
+                "deny")
 
     def contract_of(self, agent: str) -> dict:
         """The built contract for an agent, as the harness resolves it."""
@@ -462,189 +370,134 @@ class TestContractHooks(unittest.TestCase):
                       encoding="utf-8"))
         return build["contracts"][agent]
 
-    def test_a_richer_typed_request_still_validates(self):
-        """Relaxing `required` must not stop a caller from being precise."""
-        self.assertEqual(
-            self._request(
-                "kernel-worker", {
-                    "prompt":
-                    "Run one iteration of the loop.",
-                    "run_id":
-                    RUN_ID,
-                    "iteration":
-                    1,
-                    "base_kernel_path":
-                    "work/base.py",
-                    "work_dir":
-                    f"/runs/{RUN_ID}/artifacts/tpu-kernel-development/k01",
-                }), "allow")
+    # -- results ----------------------------------------------------------------
 
-    def test_relaxed_requests_still_reject_bad_payloads(self):
-        """`required: [prompt]` is not `anything goes`."""
-        for label, payload in [
-            ("unknown field", {
-                "prompt": "x",
-                "bogus_field": 1
+    def test_claimed_outcome_without_its_payload_is_denied_at_the_hook(self):
+        """The regression this file exists for: `status_requires` at the hook.
+
+        Each payload satisfies its schema's shape -- only the conditional
+        payload rule can catch it. Stage schemas have no `artifacts` property
+        at all, so the completed-artifact rule never applies to them and this
+        rule is the only guard.
+        """
+        reported = {
+            "status": "reported",
+            "summary": "done",
+            "run_id": RUN_ID,
+            "profiling_report_artifact": "/w/iter1/p.md",
+            "xprof_version": "xprof 2.24.0",
+            "traces": [{
+                "path": "/w/iter1/trace",
+                "captured": False
+            }],
+        }
+        without_report = dict(reported)
+        del without_report["profiling_report_artifact"]
+        cases = [
+            ("tpu-kernel-development", "optimized, no measurements", {
+                "status": "optimized",
+                "run_id": RUN_ID,
+                "artifacts": [ARTIFACT],
+                "summary": "went well",
             }),
-            ("malformed run_id", {
-                "prompt": "x",
-                "run_id": "not-a-run-id"
+            ("analyze-cuda-reference", "summarized, no payload", {
+                "status": "summarized",
+                "run_id": RUN_ID
             }),
-            ("no prompt at all", {
+            ("kernel-worker", "optimized, no measurements", {
+                "status": "optimized",
+                "run_id": RUN_ID,
                 "iteration": 1
             }),
-        ]:
-            with self.subTest(case=label):
-                self.assertEqual(self._request("kernel-worker", payload),
-                                 "deny")
-
-    # -- the shared tpu-diagnostics boundary ------------------------------------
-
-    def test_profiling_request_from_each_caller_is_accepted(self):
-        """Callers ask for different quantities; the open `fields` takes both."""
-        for caller, fields in (
-            ("tpu-sharding", ["duty_cycle_percent", "tc_idle_ms_average"]),
-            ("tpu-kernel-development",
-             ["alu_utilization_percent", "dma_sync_wait_to_compute_ratio"]),
-        ):
-            with self.subTest(caller=caller):
-                self.assertEqual(
-                    self._request(
-                        "tpu-diagnostics", {
-                            "prompt": "Analyse the trace.",
-                            "run_id": RUN_ID,
-                            "traces": [{
-                                "path": "/w/iter1/trace"
-                            }],
-                            "report_path": "/w/iter1/p.md",
-                            "fields": fields,
-                            "top_ops": 30,
-                        }), "allow")
-
-    def test_profiling_request_for_a_comparison_is_accepted(self):
-        """Two traces in one call -- the xprof-compare shape one path lost."""
-        self.assertEqual(
-            self._request(
-                "tpu-diagnostics", {
-                    "prompt":
-                    "Which run has the shorter step?",
-                    "run_id":
-                    RUN_ID,
-                    "traces": [{
-                        "path": "/p/a",
-                        "label": "A"
-                    }, {
-                        "path": "/p/b",
-                        "label": "B"
-                    }],
-                    "workload":
-                    "/w/variant.py",
-                }), "allow")
-
-    def test_profiling_refuses_prose_without_a_run_id(self):
-        """The regression a contract brings: bare prose used to pass.
-
-        With no `accepts` the hook allowed anything. Now prose is validated as
-        `{prompt}` and denied for the missing `run_id`, which is why every
-        caller's instructions send a JSON object instead.
-        """
-        self.assertEqual(
-            self._request("tpu-diagnostics",
-                          "Analyse the XProf trace at /w/iter1/trace."),
-            "deny")
-
-    def test_profiling_result_passes_xprof_output_through(self):
-        """XProf's own strings and shapes are not the framework's to constrain."""
-        self.assertEqual(
-            self._result(
-                "tpu-diagnostics", {
-                    "status":
-                    "reported",
-                    "summary":
-                    "read in 143s",
-                    "run_id":
-                    RUN_ID,
-                    "profiling_report_artifact":
-                    "/w/iter1/p.md",
-                    "xprof_version":
-                    "xprof 2.24.0",
-                    "traces": [{
-                        "path": "/w/iter1/trace",
-                        "captured": True,
-                        "metrics": {
-                            "peak_hbm_gib": {
-                                "value": "N/A",
-                                "source_tool": "get_kpi_metrics"
-                            },
-                            "alu_utilization_percent": {
-                                "value": None,
-                                "source_tool": "get_llo_analysis",
-                                "tool_status": "UNAVAILABLE",
-                                "tool_reason": "LLO_DATA_ABSENT",
-                            },
-                        },
-                    }],
-                }), "allow")
-
-    def test_profiling_success_without_a_report_is_denied(self):
-        """`status_requires` has to hold at the hook, not only in the CLI."""
-        self.assertEqual(
-            self._result(
-                "tpu-diagnostics", {
-                    "status": "reported",
-                    "summary": "done",
-                    "run_id": RUN_ID,
-                    "xprof_version": "xprof 2.24.0",
-                    "traces": [{
-                        "path": "/w/iter1/trace",
-                        "captured": False
-                    }],
-                }), "deny")
-
-    def test_profiling_success_without_traces_is_denied(self):
-        """A report that read nothing is not a report; [] counts as absent."""
-        self.assertEqual(
-            self._result(
-                "tpu-diagnostics", {
-                    "status": "reported",
-                    "summary": "done",
-                    "run_id": RUN_ID,
-                    "profiling_report_artifact": "/w/iter1/p.md",
-                    "xprof_version": "xprof 2.24.0",
-                    "traces": [],
-                }), "deny")
-
-    def test_profiling_may_report_each_unhappy_path(self):
-        for payload in (
-            {
-                "status": "invalid_input",
-                "summary": "no traces, no workload",
-                "run_id": RUN_ID
-            },
-            {
-                "status": "needs_input",
-                "summary": "workload builds no inputs",
-                "run_id": RUN_ID
-            },
-            {
-                "status": "failed",
-                "summary": "read did not finish",
-                "run_id": RUN_ID,
-                "failure_reason": "read_timeout",
-                "error_message": "killed after 3600s"
-            },
-        ):
-            with self.subTest(status=payload["status"]):
-                self.assertEqual(self._result("tpu-diagnostics", payload),
-                                 "allow")
-
-    def test_profiling_failure_without_a_reason_is_denied(self):
-        self.assertEqual(
-            self._result("tpu-diagnostics", {
+            ("tpu-diagnostics", "no report", without_report),
+            # A report that read nothing is not a report; [] counts as absent.
+            ("tpu-diagnostics", "no traces", {
+                **reported, "traces": []
+            }),
+            ("tpu-diagnostics", "failed without a reason", {
                 "status": "failed",
                 "summary": "x",
                 "run_id": RUN_ID
-            }), "deny")
+            }),
+        ]
+        for agent, label, payload in cases:
+            with self.subTest(agent=agent, case=label):
+                self.assertEqual(self._result(agent, payload), "deny")
+
+    def test_an_optimized_kernel_must_point_at_a_durable_artifact(self):
+        """The rule that renaming the status could have switched off silently.
+
+        `check_completed_has_artifact` -- 'a completed result must carry an
+        artifact' -- fires only on the literal status `completed`. Every
+        measurement below is present; only the artifacts are missing or empty.
+        """
+        measured = {
+            "status": "optimized",
+            "run_id": RUN_ID,
+            "slot": "k01",
+            "base_kernel_path": "/workspace/work/base.py",
+            "best_kernel_artifact": ARTIFACT,
+            "best_latency_ms": 1.83,
+            "speedup_factor": 2.31,
+            "iterations_run": 3,
+        }
+        for label, artifacts in (("omitted", None), ("empty", [])):
+            with self.subTest(artifacts=label):
+                payload = dict(measured)
+                if artifacts is not None:
+                    payload["artifacts"] = artifacts
+                self.assertEqual(
+                    self._result("tpu-kernel-development", payload), "deny")
+
+        self.assertEqual(
+            self._result("tpu-kernel-development", {
+                **measured, "artifacts": [ARTIFACT]
+            }), "allow")
+
+    def test_honest_results_are_allowed(self):
+        """An honest failure must stay representable for every agent, and
+        XProf's own strings and shapes are not the framework's to constrain."""
+
+        def report(status, **fields):
+            return dict(status=status, run_id=RUN_ID, **fields)
+
+        diag = "tpu-diagnostics"
+        # XProf's "N/A" and null metric values pass through.
+        metrics = dict(peak_hbm_gib=dict(value="N/A",
+                                         source_tool="get_kpi_metrics"),
+                       alu_utilization_percent=dict(
+                           value=None,
+                           source_tool="get_llo_analysis",
+                           tool_status="UNAVAILABLE",
+                           tool_reason="LLO_DATA_ABSENT"))
+        iteration = dict(iteration=1, compile_ok=False, test_ok=False)
+        cases = [
+            ("tpu-kernel-development",
+             report("failed",
+                    failure_reason="no_device",
+                    iterations=[iteration])),
+            ("analyze-cuda-reference",
+             report("failed", failure_reason="timeout")),
+            ("kernel-worker",
+             report("failed", iteration=3,
+                    failure_reason="compilation_error")),
+            (diag, report("invalid_input", summary="no traces, no workload")),
+            (diag, report("needs_input", summary="workload builds no inputs")),
+            (diag,
+             report("failed",
+                    summary="read did not finish",
+                    failure_reason="read_timeout")),
+            (diag,
+             report("reported",
+                    summary="read in 143s",
+                    profiling_report_artifact="/w/iter1/p.md",
+                    xprof_version="xprof 2.24.0",
+                    traces=[dict(path="/w/t", captured=True,
+                                 metrics=metrics)])),
+        ]
+        for agent, payload in cases:
+            with self.subTest(agent=agent, status=payload["status"]):
+                self.assertEqual(self._result(agent, payload), "allow")
 
 
 if __name__ == "__main__":

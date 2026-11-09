@@ -1,0 +1,117 @@
+{
+  "case": "gemma3_tp8_stock_c64",
+  "framework": "vllm_torchtpu",
+  "profiles": [
+    {
+      "key": "stock_c64_steady",
+      "role": "mixed",
+      "session_id": "session-5287059881428353181",
+      "result": {
+        "phase_stats": [
+          {
+            "phase": "decode",
+            "n_steps_per_device": 125.0,
+            "idle_frac": 0.0011493038,
+            "mean_bucket": 64.0,
+            "mean_dur_ms": 21.930780744,
+            "p90_dur_ms": 22.0934118
+          },
+          {
+            "phase": "all",
+            "n_steps_per_device": 125.0,
+            "idle_frac": 0.0011493038,
+            "mean_bucket": 64.0,
+            "mean_dur_ms": 21.930780744,
+            "p90_dur_ms": 22.0934118
+          }
+        ],
+        "findings": [
+          {
+            "detector_id": "D45_rpa_decode_block_oversized",
+            "title": "Decode attention computes over max_model_len KV slots",
+            "phase": "decode",
+            "summary": "RPA decode kernels whose KV compute chunk far exceeds the live context are 68.1% of the decode step (attention 69.9%). The stock v7 decode block sizes set the KV block and compute chunk to max_model_len, so each step computes over every slot regardless of sequence length, and sliding-window layers c",
+            "evidence": [
+              {
+                "metric": "attention kernel share",
+                "value": 69.85940947036993,
+                "unit": "%",
+                "detail": "",
+                "xprof_link": null
+              },
+              {
+                "metric": "kernel `RPAd-p_64-bq_1_1-bkv_10240_10240-sw_1024`",
+                "value": 57.23682064275897,
+                "unit": "% of decode step",
+                "detail": "compute chunk 10240 >= max_model_len 10240; compute chunk 10240 is 10.0x the sliding window 1024; compute chunk 10240 is 5.0x the longest context 2048",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "perf_only",
+            "confidence": "high",
+            "est_step_fraction_saved": 0.4427011464904736,
+            "validation": "A/B against a same-session control with separate compile cache roots (the vLLM compile cache key ignores env vars). Re-profile: decode kernels should read e.g. `bkv_1536_1536-sw_1024` / `bkv_10240_2560`. Gemma-3 27B TP8 v7x: decode step 21.93 -> 11.85 ms, +23-75% throughput.",
+            "kernel_followup": "Generic fix: per-layer RPA decode block sizes (sliding layers bkv = bkv_c ~ 1.5x window; global layers smaller compute chunks that divide the block), via the RPA block-size knobs (vLLM-TPU `RPA_V3_DECODE_BLOCK_SIZES`) or upstreaming scripts/common/vllm_patches/rpa_decode_block_sizes.patch to vllm-torchtpu.",
+            "source_refs": [
+              "Gemma-3-27B TP8 on tpu7x, A/B against a same-session control, 2026-10-14: +23-75% throughput"
+            ],
+            "lever": "serving_knob",
+            "couples_with": [],
+            "score": 0.4427
+          },
+          {
+            "detector_id": "D11_recompilation",
+            "title": "XLA compilation inside the serving window",
+            "phase": "all",
+            "summary": "125 compile events (8.3 ms) happen after serving started; each blocks the engine loop.",
+            "evidence": [
+              {
+                "metric": "compile events",
+                "value": 125,
+                "unit": "",
+                "detail": "CommonPjRtLoadedExecutable::Execute (tt_jit_compile_mlir_as_strided)",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "diagnostic",
+            "confidence": "medium",
+            "est_step_fraction_saved": 0.0,
+            "validation": "Warm up all buckets before profiling; confirm no runtime compiles with the recompilation check enabled.",
+            "kernel_followup": null,
+            "source_refs": [],
+            "lever": "diagnostic",
+            "couples_with": [],
+            "score": 0.0
+          },
+          {
+            "detector_id": "D14_profile_hygiene",
+            "title": "Profile quality limits confidence",
+            "phase": "all",
+            "summary": "Re-profile to raise confidence: stop_trace stalls the engine (exclude the tail).",
+            "evidence": [
+              {
+                "metric": "stop_trace duration",
+                "value": 376.639649,
+                "unit": " ms",
+                "detail": "",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "diagnostic",
+            "confidence": "high",
+            "est_step_fraction_saved": 0.0,
+            "validation": "",
+            "kernel_followup": null,
+            "source_refs": [],
+            "lever": "diagnostic",
+            "couples_with": [],
+            "score": 0.0
+          }
+        ]
+      }
+    }
+  ]
+}

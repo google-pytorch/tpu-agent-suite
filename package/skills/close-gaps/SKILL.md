@@ -30,25 +30,10 @@ relayout, copy or un-fused neighbour sitting next to the op the profile named.
 
 **Runs on the main thread.** It delegates to {{skill:roofline-analysis}}, {{agent:tpu-diagnostics}},
 {{skill:critical-review}} and {{skill:exit-review}}, and submits its own TPU jobs with `{{runtime}} compute`;
-nesting depth is 3, so it must not itself run inside one. /{{skill:write-tpu-kernels}} and
-{{skill:decompose-optimization}} are main-thread skills too — invoke them from here, not from a
-subagent.
+nesting depth is 3, so it must not itself run inside one. /{{skill:write-tpu-kernels}} is a
+main-thread skill too — invoke it from here, not from a subagent.
 
-## Resource & Time Discipline in Hill Climbing
-
-Optimization and hill climbing—especially on large models—are inherently open-ended: there is
-always room for deeper profiling, broader parameter sweeps, and stricter validation gates. Without
-deliberate bounds, execution time can easily spiral out of control. Follow this skill's guidance to
-prevent unbounded scope expansion. Deeper analysis and additional experiments are encouraged,
-provided they are backed by deliberate reasoning and cheaper alternatives have already been
-exhausted.
-
-For example:
-
-* Tightly Scoped Subagent Prompts: Whenever you invoke a subagent, define a clear, concrete
-  objective. Do not pass vague prompts that allow the subagent to expand its scope arbitrarily, and
-  do not request extra analysis or polished reports beyond what you actually need to make your next
-  decision just because you think writing prompts like this looks nice.
+## Efficiency in Hill Climbing
 
 * Targeted XProf & tpu-diagnosis: Profiling analysis can quickly become a bottleneck. Every XProf
   inspection must have a specific, deliberate target—running tpu-diagnosis without explicit bounds
@@ -58,9 +43,8 @@ For example:
   them outside of the mandatory check after the final end-to-end (e2e) run unless strictly
   necessary.
 
-Note: This principle does not prohibit exploration or intermediate checks when an open-ended
-hill-climbing problem genuinely requires them. Rather, it is a reminder that you are operating at
-scale—never consume time or compute arbitrarily without weighing the cost.
+* Microbenchmark usage: use microbenchmark to replace the full end-to-end (e2e) run except the final
+  one.
 
 ## Invocation
 
@@ -75,7 +59,7 @@ scale—never consume time or compute arbitrarily without weighing the cost.
 - `--top K` (default 5): cells in the microbenchmark plan.
 - `--mode` as in /{{skill:workload-microbenchmark}}
   (scaled 2x2x1 for kernel work, mirror for sharding/collective gaps).
-- `--max-jobs N` (default 60): total TPU jobs the whole loop may launch, E2E included. The loop's
+- `--max-jobs N` (default 200): total TPU jobs the whole loop may launch, E2E included. The loop's
   only spend brake besides the per-gap budget.
 - `--pause`: opt back into two human stops — after the list (step 1) and before the E2E (step 4).
   Off by default.
@@ -159,9 +143,9 @@ If the source job's own `T_mix` projection disagrees with the job's measured bus
 
 ## Step 1 — Rank the gaps
 
-Invoke {{skill:decompose-optimization}} on the baseline microbenchmark run (it has a section for
-{{skill:workload-microbenchmark}} jobs: per-layer-kind join, served weighting). Its `decomposition.md`
-ranked table **is the list**.
+Invoke a built-in subagent (`general-purpose` on Claude Code, `self` on Antigravity) that follows
+{{skill:decompose-optimization}} on the baseline microbenchmark run (it has a section for {{skill:workload-microbenchmark}} jobs: per-layer-kind
+join, served weighting). Its `decomposition.md` ranked table **is the list**.
 
 Copy into the ledger, one row per candidate, in rank order: rank, slug, op/block, regimes, measured
 served ms, floor ms, gap ms, e2e ceiling %, binding resource, and the route decompose named. Add
@@ -332,6 +316,8 @@ speedup is not significant — that is a stop, so {{skill:exit-review}} it first
    Wait on the client with `{{runtime}} compute job wait --until done`, fetch it with
    `{{runtime}} compute job artifacts`, then `{{runtime}} compute job cancel` the server: a
    `--serve` job is not reaped at session end and holds the chips until it is cancelled.
+   (If the active compute backend does not support `--colocate-with`, establish a local port-forward
+   to the server container's HTTP and profile ports and run `bench.sh` against `127.0.0.1` instead.)
    The server starts through `serve_vllm.sh`, the launcher every vLLM server in this package uses,
    so close-gaps and the other skills start servers the same way.
    **Every arm runs with the profiler armed by default:** `serve_vllm.sh` arms the phased profiler

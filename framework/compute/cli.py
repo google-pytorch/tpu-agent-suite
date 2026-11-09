@@ -28,7 +28,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from framework import utils
+from framework import jsonio, paths, utils
 
 from . import config, lease, setup
 from .drivers import (ComputeConfigError, ComputeDriver, NotConfigured,
@@ -37,7 +37,7 @@ from .drivers import (ComputeConfigError, ComputeDriver, NotConfigured,
 
 Path = pathlib.Path
 
-format_json = utils.format_json
+format_json = jsonio.format_json
 
 DriverResolver = Callable[..., ComputeDriver]
 
@@ -95,19 +95,20 @@ def _print_result(payload: dict[str, Any], as_json: bool) -> None:
     print(json.dumps(payload) if as_json else format_json(payload))
 
 
-# Asked of a local target's interpreter by `compute versions`.
-ENV_CHECK = pathlib.Path(__file__).with_name("env_check.py")
+# `setup.ENV_CHECK` is asked of a local target's interpreter by
+# `compute versions`.
 VERSIONS_TIMEOUT_SEC = 60
 
 
 def _ask_interpreter(python: str) -> dict[str, Any] | None:
     """`env_check.py --versions` under `python`; None if it can't answer."""
     try:
-        proc = subprocess.run([python, str(ENV_CHECK), "--versions"],
-                              capture_output=True,
-                              text=True,
-                              timeout=VERSIONS_TIMEOUT_SEC,
-                              check=False)
+        proc = subprocess.run(
+            [python, str(setup.ENV_CHECK), "--versions"],
+            capture_output=True,
+            text=True,
+            timeout=VERSIONS_TIMEOUT_SEC,
+            check=False)
         # The last line, in case a sitecustomize printed before it.
         lines = [line for line in proc.stdout.splitlines() if line.strip()]
         found = (json.loads(lines[-1])
@@ -167,7 +168,7 @@ def target_versions(package: str | None,
     if path is None or not stored or (backend and backend != configured):
         # Nothing recorded, or another backend than the one checked.
         return result
-    results = utils.load_json_doc(path.parent / utils.VERIFICATION_FILE)
+    results = jsonio.load_json_or_empty(path.parent / paths.VERIFICATION_FILE)
     record = results.get(config.profile_hash(stored))
     recorded = (record.get("target_versions")
                 if isinstance(record, dict) else None)
@@ -278,7 +279,7 @@ def _environment(
     if not package:
         return {}, None
     try:
-        return utils.resolve_environment(
+        return paths.resolve_environment(
             package, workspace if workspace is not None else Path.cwd())
     except (utils.TpuAgentSuiteError, OSError, ValueError):
         return {}, None
@@ -306,7 +307,7 @@ def _last_check_path(run_id: str | None) -> Path | None:
     if not run_id:
         return None
     try:
-        run_root = utils.get_run_root(run_id)
+        run_root = paths.get_run_root(run_id)
     except utils.TpuAgentSuiteError:
         return None
     return run_root / LAST_CHECK_FILE if run_root.is_dir() else None
@@ -315,7 +316,8 @@ def _last_check_path(run_id: str | None) -> Path | None:
 def _last_checked_hash(run_id: str | None) -> str | None:
     """The profile hash the run's last check saw, if any."""
     path = _last_check_path(run_id)
-    return (utils.load_json_doc(path) if path else {}).get("profile_hash")
+    return (jsonio.load_json_or_empty(path)
+            if path else {}).get("profile_hash")
 
 
 def _resolve_target_driver(package: str | None,
@@ -361,7 +363,7 @@ def _check_configured_target(
     path = _last_check_path(run_id)
     if path and env_hash:
         try:
-            utils.write_json(path, {"profile_hash": env_hash})
+            jsonio.write_json(path, {"profile_hash": env_hash})
         except OSError:
             pass
     return report
@@ -553,7 +555,7 @@ def _compute_state_note(package: str | None, workspace: Path | str | None,
             f" {config.use_hint(package)}" if name else config.no_profile_lead(
                 package, profiles))
         return _setup_message(package, lead, None)
-    results = utils.load_json_doc(path.parent / utils.VERIFICATION_FILE)
+    results = jsonio.load_json_or_empty(path.parent / paths.VERIFICATION_FILE)
     state, record = setup.setup_state(name, profiles[name], results)
     if state == "NOT_CONFIGURED":
         return _setup_message(
@@ -733,7 +735,7 @@ def _resolve_run_id(args: argparse.Namespace) -> str | None:
     """
     return (getattr(args, "run_id", None)
             or getattr(args, "session_run_id", None)
-            or utils.get_active_run_id(getattr(args, "workspace", None)))
+            or paths.get_active_run_id(getattr(args, "workspace", None)))
 
 
 def _no_run_message(args: argparse.Namespace, command: str,
@@ -807,7 +809,7 @@ def _action_submit(driver: ComputeDriver, args: argparse.Namespace) -> int:
         # why its initial status is unknown rather than passing off the
         # optimistic "PENDING" as an observed one.
         payload["status_error"] = f"{type(exc).__name__}: {exc}"
-    landing = utils.get_run_artifacts_dir(run_id) / job_id
+    landing = paths.get_run_artifacts_dir(run_id) / job_id
     if outputs:
         payload["outputs"] = {
             staged.remote: str(landing / staged.remote)
@@ -949,9 +951,9 @@ def _action_job(driver: ComputeDriver, args: argparse.Namespace) -> int:
             run_id = (getattr(args, "run_id", None)
                       or (record.run_id if record else "")
                       or getattr(args, "session_run_id", None)
-                      or utils.get_active_run_id(
+                      or paths.get_active_run_id(
                           getattr(args, "workspace", None)))
-            out_dir = (utils.get_run_artifacts_dir(run_id)
+            out_dir = (paths.get_run_artifacts_dir(run_id)
                        if run_id else Path.cwd()) / args.job_id
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1253,7 +1255,7 @@ def _refresh_statuses(
         if target not in unreachable:
             try:
                 live = driver_for(record).get_status(record.job_id)
-                # Drivers that catch their own transport errors (shell, xpk)
+                # Drivers that catch their own transport errors (shell)
                 # answer UNKNOWN with the error instead of raising it.
                 if live.status == "UNKNOWN" and live.error:
                     unreachable[target] = live.error
@@ -1384,13 +1386,13 @@ def _print_setup_result(args: argparse.Namespace, result: dict[str,
                                                                Any]) -> int:
     """Print a setup/config result; exit 1 unless its status is ok."""
     print(
-        json.dumps(result) if getattr(args, "json", False) else utils.
+        json.dumps(result) if getattr(args, "json", False) else jsonio.
         format_json(result))
     return 0 if result.get("status", "ok") == "ok" else 1
 
 
 def handle_config_cli(args: argparse.Namespace) -> int:
-    """Run `runtime config [show|set|use]`.
+    """Run `runtime config [show|set|use|remove]`.
 
     The run is found the way compute commands find it: `--run-id`, else the
     session's run.
@@ -1408,6 +1410,11 @@ def handle_config_cli(args: argparse.Namespace) -> int:
                                   profile=args.profile,
                                   run_id=_resolve_run_id(args),
                                   user_confirmed=args.user_confirmed)
+    elif action == "remove":
+        result = setup.config_remove(**where,
+                                     profile=args.profile_name,
+                                     user_confirmed=args.user_confirmed,
+                                     run_id=_resolve_run_id(args))
     else:
         result = setup.config_use(**where,
                                   profile=args.profile_name,

@@ -116,7 +116,7 @@ profile, and `costmodel.significance` (Welch's t) tests two arms on those sample
 - per arm: `T_mix`, per-class seconds, `T_mix` per repeat and its spread, coverage, missing cells;
 - the A/B: speedup, whether it beats the repeat spread, per-class deltas, guardrails (the
   heaviest decode cell for typical TPOT, every mixed cell for TTFT and the tail), and the
-  modelled served output gain `(busy + idle) / (busy / speedup + idle)`.
+  modelled served output gain `(busy + idle) / (busy * (covered_share / speedup + 1 - covered_share) + idle)`.
 
 It is valid for changes that keep the job's step counts (kernels, collectives, env, layout). Changes
 to the schedule (chunk size, `mnbt`, speculative tokens or acceptance, admission) change the counts
@@ -127,7 +127,8 @@ and need a server-level run. SKILL.md "Cost model" is the full statement.
 | file | role | reads → writes |
 | --- | --- | --- |
 | `cli.py` | entry point for every mode (`onboard`, `derive`, `project`, `points`, `forward-cmd`, `collect`, …) | orchestrates the rest |
-| `jobdata.py` | fetched job dir → snapshot | `<work>/jobs/<job>` (`cli.py --jobs`) → `*.source.json` |
+| `jobdata.py` | fetched job dir → snapshot: the server from vLLM's log, the client from aiperf or `summary.json` | `<work>/jobs/<job>` (`cli.py --jobs`) → `*.source.json` |
+| `jobdata_agentx.py` | builds on `jobdata`: an AgentX job's JobSet manifest (`recipe.yaml`) → served command and env, and the checkpoint config it names; else `jobdata`'s vLLM-log readers. `cli` reads every job through its `snapshot` and `read_recipe` | `recipe.yaml` → `jobdata.snapshot` |
 | `deploy.py` | server args → `Deploy`; per-rank shapes; `Facts` type | — |
 | `cells.py` | cache-hit rule (`with_hit`), request-level cells and counts, closure check | snapshot requests |
 | `derive.py` | snapshot (+ overrides) → real-workload config, feasibility | snapshot → `<name>.json` |
@@ -135,7 +136,7 @@ and need a server-level run. SKILL.md "Cost model" is the full statement.
 | `mix.py` | snapshot → **step mix** (cells, counts, shares) | snapshot `step_slices` + requests |
 | `steps.py` | mix (or `--point` shapes) → batches, buckets, plan | → `<sharding>-mix-<job>/<cell>.steps.json` |
 | `costmodel.py` | per-cell step times → `T_mix`, spread, and an A/B (speedup, class deltas, guardrails) | results + plans → `cost_model.json` (via `mix-rollup`) |
-| `forward_run.py` | **runs on the TPU host**, in the image under test: boot twin, time/profile the plan; `--node-prep` readies each host of a mirror run | plan → `result.json`, profile |
+| `forward_run.py` | **runs on the TPU host**, in the image under test: boot twin, time/profile the plan; `--node-prep` readies each host of a mirror run. The recipe runs it under `supervise`, which stops the job if engine start-up fails and the engine does not exit | plan → `result.json` and a profile; `failure.json` if the run ends without a result |
 | `cachelocal.py` | local compile-cache store `~/.xla_cache` | job outputs ↔ cache |
 | `xprof_steps.py` | twin profile → steps, layers, served projection | `trace_events.json` (exported by tpu-diagnostics) + plan + result → `xprof_steps.json` |
 | `evidence.py` | a finished run → `evidence.json` (facts only, no prose) | result, plan, `xprof_steps.json`, `hlo_categories.json` (from tpu-diagnostics) |
@@ -164,7 +165,8 @@ job dir ──jobdata──> snapshot ──derive (deploy, cells, model.py)─�
 ```
 
 - `cli.py` is the only file that calls across stages. The library modules import only
-  `deploy`, `cells` and `jobdata`; `report` is used only by `cli`.
+  `deploy`, `cells` and `jobdata` (which `jobdata_agentx` builds on); `report` is used only by
+  `cli`.
 - `forward_run.py` and `xprof_steps.py` are standalone scripts: the first runs on the TPU host
   with the image's vLLM, the second on this host, on the event export. Neither imports another
   `core` module; the plan they get is self-contained.

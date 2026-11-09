@@ -213,7 +213,7 @@ TRACE = {
     "backbone_by_all_reduces":
     True,
     "boundary_regex":
-    r"^all-reduce\.\d+(\.cloned\.\d+\.call-done)?$",
+    r"^all-reduce\.\d+(?:\.cloned\.\d+\.call-done)?(?:\.refs_\d+_)*$",
     "census": {
         "families": {
             "gdn": {

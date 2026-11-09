@@ -32,7 +32,8 @@ _PERF_SCRIPTS_DIR = _PACKAGE_ROOT / "scripts" / "tpu-performance-optimization"
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from framework import compiler, study, utils  # noqa: E402
+from framework import study, utils  # noqa: E402
+from framework.builder import translate  # noqa: E402
 
 
 def _load_script_module(name: str, path: Path):
@@ -122,7 +123,7 @@ class TestTpuPerformanceSchemaParity(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             dist_dir = Path(tmp_dir) / "dist_claude"
-            compiler.translate(_PACKAGE_ROOT, "claude-code", dist_dir)
+            translate(_PACKAGE_ROOT, "claude-code", dist_dir)
 
             # tpu-performance-optimization is not in package.release.json; stage
             # evaluate_arm.py beside the bundled framework/ to check its

@@ -1,0 +1,135 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Shared release archive build and verification workflow:
+# resolves the version from package/package.release.json (optionally stamped with
+# .dev<datetime>), runs `make test`, builds public harness archives (`--no-overlays`),
+# smoke-tests installing the claude-code archive as an end user would, generates
+# SHA256SUMS + VERSION, and uploads the verified artifact.
+name: release-archives
+on:
+  workflow_call:
+    inputs:
+      stamp:
+        description: 'Append .dev<YYYYMMDDHHMM> to the manifest version'
+        type: boolean
+        default: false
+    outputs:
+      version:
+        description: 'Resolved release version string'
+        value: ${{ jobs.release.outputs.version }}
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r cicd-requirements.txt
+
+      - name: ${{ inputs.stamp && 'Stamp nightly version' || 'Read release version' }}
+        id: version
+        env:
+          STAMP: ${{ inputs.stamp }}
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, re
+          src = pathlib.Path("package/package.release.json")
+          text = src.read_text()
+          version = json.loads(text)["version"]
+          if os.environ["STAMP"] == "true":
+              stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d%H%M")
+              stamped = f"{version}.dev{stamp}"
+              text, n = re.subn(r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{stamped}"',
+                                text, count=1)
+              assert n == 1, "version field not found in package.release.json"
+              src.write_text(text)
+              assert json.loads(src.read_text())["version"] == stamped
+              print(f"{version} -> {stamped}")
+              version = stamped
+          else:
+              assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+                  f"{version!r} is not a stable X.Y.Z version")
+              print(f"Releasing {version} as-is")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={version}\n")
+          PY
+
+      - name: Test
+        run: make test
+
+      - name: Build public release archives
+        run: |
+          set -euo pipefail
+          for h in claude-code codex antigravity cursor; do
+            python3 framework/compiler.py translate package --no-overlays \
+              --harness "$h" --output "dist/$h/tpu-agent-suite"
+          done
+          python3 framework/compiler.py archive --dist-dir dist --output dist/archives
+
+      - name: Scan compiled dist/ against denylist when present
+        run: |
+          if [ -f google/denylist.yaml ]; then
+            python3 scripts/check_denylist.py --paths dist/ --output-format github
+          fi
+
+      - name: Smoke test the claude-code archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="dist/archives/tpu-agent-suite-claude-code-v${VERSION}.tar.gz"
+          test -f "$archive"
+          work="$(mktemp -d)"
+          tar -xzf "$archive" -C "$work"
+          dist="$work/tpu-agent-suite-claude-code-v${VERSION}"
+          mkdir -p "$work/project"
+          git init -q "$work/project"
+          HOME="$work/home" python3 "$dist/framework/installer.py" \
+            install --destination "$work/project" \
+            --non-interactive --skip-host-check --skip-harness-check
+          central=("$work"/home/.tpu-agent-suite/packages/tpu-agent-suite@*)
+          (cd "$work/project" && HOME="$work/home" python3 \
+            "${central[0]}/framework/runtime.py" compute \
+            --package "$(basename "${central[0]}")" \
+            setup apply --profile default --answers '{"backend": "local"}')
+
+      - name: Generate SHA256SUMS and VERSION
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist/archives
+          sha256sum -- *.tar.gz > SHA256SUMS
+          echo "$VERSION" > VERSION
+
+      - name: ${{ inputs.stamp && 'Upload nightly archives' || 'Upload release archives' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tpu-agent-suite-${{ steps.version.outputs.version }}
+          path: |
+            dist/archives/*.tar.gz
+            dist/archives/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

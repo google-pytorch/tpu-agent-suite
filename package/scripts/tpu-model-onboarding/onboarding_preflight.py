@@ -39,9 +39,11 @@ whatever happens, so none is ever missing:
   image_probe.json  image_probe.py --touch_device; {"error": ...} if it wrote
                     nothing
   full_check.log    preflight_check.py's output, which the Rules are read from
-  tp_plan.json      engine_compatibility_check.py (vLLM); {"ok": false,
+  tp_plan.json      engine_compatibility_check.py (vLLM or SGLang); {"ok": false,
                     "reason": ...} if it stopped before planning
   vllm_flags.txt    `vllm serve --help` (vLLM); a `# ` line saying why if not
+  sglang_flags.txt  `python3 -m sglang.launch_server --help` (SGLang); a `# `
+                    line saying why if not
 
 It exits 0 once every step has run; judge each step by preflight.json.
 
@@ -51,10 +53,14 @@ Usage:
     --input .../preflight_check.py:preflight_check.py \
     [--cpu-requests cpu=2,memory=8Gi --input .../chipless_tpu.py:chipless_tpu.py] \
     [--input .../engine_compatibility_check.py:engine_compatibility_check.py \
+     --input .../oss_meshes.py:oss_meshes.py \
      --input .../discover_vllm_flags.sh:discover_vllm_flags.sh] \
     --output preflight.json:<local> ... \
     -- --model <id> --mode inference \
-       [--devices <n> --hbm-gb-per-device <gb> [--tp <n>] [--vllm-patch <py>]]
+       [--engine vllm|sglang] [--trust-remote-code] \
+       [--devices <n> --hbm-gb-per-device <gb> [--tp <n>] [--vllm-patch <py>]
+        [--points <isl:osl:c,...>]
+        [--objective throughput|latency]]
 """
 
 import argparse
@@ -119,10 +125,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode",
                         required=True,
                         choices=("benchmark", "inference"))
+    parser.add_argument("--engine", choices=("vllm", "sglang"), default="vllm")
+    parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--devices", type=int)
     parser.add_argument("--hbm-gb-per-device", type=float)
     parser.add_argument("--tp", type=int)
     parser.add_argument("--vllm-patch")
+    # Passed to the engine check: the target points the KV check and the
+    # traffic rule use.
+    parser.add_argument("--points")
+    # What the target traffic needs; the check picks the layout by it.
+    parser.add_argument("--objective", choices=("throughput", "latency"))
     args = parser.parse_args(argv)
     if args.devices is not None and args.hbm_gb_per_device is None:
         parser.error("--devices needs --hbm-gb-per-device")
@@ -186,11 +199,20 @@ def main(argv: list[str] | None = None) -> int:
             str(args.devices), "--hbm-gb-per-device",
             f"{args.hbm_gb_per_device:g}"
         ]
+        if args.engine != "vllm":
+            check_args += ["--engine", args.engine]
+        if args.trust_remote_code:
+            check_args += ["--trust-remote-code"]
         if args.tp is not None:
             check_args += ["--tp", str(args.tp)]
         if args.vllm_patch:
             check_args += ["--vllm-patch", args.vllm_patch]
-        check = run_step("vLLM engine compatibility check", [
+        if args.points:
+            check_args += ["--points", args.points]
+        if args.objective:
+            check_args += ["--objective", args.objective]
+        engine_label = "SGLang" if args.engine == "sglang" else "vLLM"
+        check = run_step(f"{engine_label} engine compatibility check", [
             py, "engine_compatibility_check.py", "--plan-json", "tp_plan.json"
         ] + check_args, env)
         steps["engine_compatibility_check"] = check
@@ -211,21 +233,30 @@ def main(argv: list[str] | None = None) -> int:
                     failure_reason(check["lines"]),
                 },
                 indent=2) + "\n")
-        flags = run_step("vLLM flag discovery",
-                         ["bash", "discover_vllm_flags.sh", "vllm_flags.txt"],
-                         env)
-        steps["discover_vllm_flags"] = flags
+        if args.engine == "sglang":
+            flag_step = "discover_sglang_flags"
+            flag_script = "discover_sglang_flags.sh"
+            flag_file = "sglang_flags.txt"
+        else:
+            flag_step = "discover_vllm_flags"
+            flag_script = "discover_vllm_flags.sh"
+            flag_file = "vllm_flags.txt"
+        flags = run_step(f"{engine_label} flag discovery",
+                         ["bash", flag_script, flag_file], env)
+        steps[flag_step] = flags
         write_if_missing(
-            "vllm_flags.txt",
+            flag_file,
             f"# flag discovery exited {flags['exit_code']} without writing "
             f"this file: {failure_reason(flags['lines'])}\n")
 
+    flag_step_name = ("discover_sglang_flags"
+                      if args.engine == "sglang" else "discover_vllm_flags")
     report = {
         name: {
             "exit_code": None
         }
         for name in ("chipless", "image_probe", "full_check",
-                     "engine_compatibility_check", "discover_vllm_flags")
+                     "engine_compatibility_check", flag_step_name)
     }
     for name, step in steps.items():
         report[name] = {"exit_code": step["exit_code"]}

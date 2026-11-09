@@ -1,0 +1,267 @@
+{
+ "case": "qwen38_8k1k_c256",
+ "framework": "vllm_torchtpu",
+ "profiles": [
+  {
+   "key": "prefill-only",
+   "role": "prefill",
+   "session_id": "rank0_mitch2-golden-qwen-bench-agent-8k1k-prof-c256-dxjjr.xplane.pb",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 4.5,
+      "idle_frac": 0.0230428549,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 110.8044302222,
+      "p90_dur_ms": 119.521518
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 4.5,
+      "idle_frac": 0.0230428549,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 110.8044302222,
+      "p90_dur_ms": 119.521518
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D7_collective_bound",
+      "title": "Step is collective-bound",
+      "phase": "prefill_or_mixed",
+      "summary": "Collectives are 41.6% of the prefill_or_mixed step (exposed on the TensorCore timeline). Review the mesh / collective overlap.",
+      "evidence": [
+       {
+        "metric": "collective share",
+        "value": 41.56836500817328,
+        "unit": "%",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "top op `distributed_all_reduce.678`",
+        "value": 362.784,
+        "unit": " \u00b5s/step",
+        "detail": "1\u00d7/step",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "low",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": "Hand off to the mesh step (mesh) and xla_flag_optimizer (collective-matmul / async collective flags). Subtract the D6 barrier excess first: part of this may be imbalance wait.",
+      "source_refs": [],
+      "lever": "mesh",
+      "couples_with": [
+       "mesh"
+      ],
+      "score": 0.0
+     },
+     {
+      "detector_id": "D14_profile_hygiene",
+      "title": "Profile quality limits confidence",
+      "phase": "all",
+      "summary": "Re-profile to raise confidence: only 4 prefill_or_mixed steps.",
+      "evidence": [
+       {
+        "metric": "prefill_or_mixed steps per device",
+        "value": 4.5,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "high",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "diagnostic",
+      "couples_with": [],
+      "score": 0.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "decode-only",
+   "role": "decode",
+   "session_id": "rank0_mitch2-golden-qwen-bench-agent-8k1k-prof-c256-dxjjr.xplane.pb",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "decode",
+      "n_steps_per_device": 5.0,
+      "idle_frac": 0.0013709962,
+      "mean_bucket": 128.0,
+      "mean_dur_ms": 19.6027008,
+      "p90_dur_ms": 19.6099292
+     },
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 1.0,
+      "idle_frac": 0.0003317769,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 85.196223,
+      "p90_dur_ms": 85.196223
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 5.5,
+      "idle_frac": 0.0010141035,
+      "mean_bucket": 302.5454545455,
+      "mean_dur_ms": 25.5657482727,
+      "p90_dur_ms": 19.610219
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D8_kv_head_padding",
+      "title": "KV heads padded/replicated under TP attention",
+      "phase": "decode",
+      "summary": "4 KV heads over TP=4 gives 1 head(s)/device, below the bf16 packing of 2; attention reads padded/replicated KV. Attention is 28.7% of the decode step. Attention DP keeps whole KV heads per device.",
+      "evidence": [
+       {
+        "metric": "attention kernel share",
+        "value": 28.65656144687981,
+        "unit": "%",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "KV heads per device",
+        "value": 1.0,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [
+       {
+        "knob": "vllm.cli.data_parallel_size",
+        "kind": "cli",
+        "name": "--data-parallel-size",
+        "suggested_value": "8",
+        "current_value": "2",
+        "already_set": false
+       },
+       {
+        "knob": "vllm.cli.tensor_parallel_size",
+        "kind": "cli",
+        "name": "--tensor-parallel-size",
+        "suggested_value": "1",
+        "current_value": "4",
+        "already_set": false
+       }
+      ],
+      "risk": "memory",
+      "confidence": "high",
+      "est_step_fraction_saved": 0.12895452651095915,
+      "validation": "Co-propose with the mesh step (changes the attention mesh; set --max-num-batched-tokens per DP rank). Docs: 1.64-1.8\u00d7 RPA, +6-7% e2e.",
+      "kernel_followup": null,
+      "source_refs": [
+       "Qwen3-Coder-480B serving study on TPU v7x"
+      ],
+      "lever": "serving_knob",
+      "couples_with": [
+       "mesh",
+       "logical_sharding"
+      ],
+      "score": 0.129
+     },
+     {
+      "detector_id": "D14_profile_hygiene",
+      "title": "Profile quality limits confidence",
+      "phase": "all",
+      "summary": "Re-profile to raise confidence: 1 prefill_or_mixed step(s) ignored as a minority phase.",
+      "evidence": [
+       {
+        "metric": "prefill_or_mixed steps per device (skipped)",
+        "value": 1.0,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "high",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "diagnostic",
+      "couples_with": [],
+      "score": 0.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "heavy",
+   "role": "mixed",
+   "session_id": "rank2_mitch2-golden-qwen-bench-agent-8k1k-prof-c256-dxjjr.xplane.pb",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 5.5,
+      "idle_frac": 0.0002817453,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 100.3534947273,
+      "p90_dur_ms": 103.018458
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 5.5,
+      "idle_frac": 0.0002817453,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 100.3534947273,
+      "p90_dur_ms": 103.018458
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D7_collective_bound",
+      "title": "Step is collective-bound",
+      "phase": "prefill_or_mixed",
+      "summary": "Collectives are 45.2% of the prefill_or_mixed step (exposed on the TensorCore timeline). Review the mesh / collective overlap.",
+      "evidence": [
+       {
+        "metric": "collective share",
+        "value": 45.19699147280319,
+        "unit": "%",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "top op `distributed_all_reduce.678`",
+        "value": 383.7430909090909,
+        "unit": " \u00b5s/step",
+        "detail": "1\u00d7/step",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "low",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": "Hand off to the mesh step (mesh) and xla_flag_optimizer (collective-matmul / async collective flags). Subtract the D6 barrier excess first: part of this may be imbalance wait.",
+      "source_refs": [],
+      "lever": "mesh",
+      "couples_with": [
+       "mesh"
+      ],
+      "score": 0.0
+     }
+    ]
+   }
+  }
+ ]
+}

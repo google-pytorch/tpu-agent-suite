@@ -132,8 +132,13 @@
           "metadata": ["toolAction", "toolSummary"],
           "args": {
             "subagents": "Subagents",
-            "subagent": ["Subagents.TypeName", "Subagents.Role"],
-            "prompt": "Subagents.Prompt"
+            "subagent": [
+              "Subagents.TypeName",
+              "Subagents.Role",
+              "TypeName",
+              "Role"
+            ],
+            "prompt": ["Subagents.Prompt", "Prompt"]
           }
         },
         "cursor": {

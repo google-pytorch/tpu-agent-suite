@@ -1,0 +1,65 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scoring Framework for TPU Agent Suite:
+#
+#   hillclimb = hillclimb_success * onboarding_success
+#   speedup_score = np.clip(
+#            np.log(np.maximum(speedup_val, 1.0)) / np.log(target_speedup_w_headroom),
+#            0.0,
+#            1.0,
+#        ) * hillclimb_success * onboarding_success
+#   efficiency = trajectory_score * valid_tool_calls * framework_directed_penalty * onboarding_success * hillclimb_success
+#   reward = (0.3 * onboarding_success + 0.3 * hillclimb
+#             + 0.3 * speedup_score + 0.1 * efficiency) * (1 - cheating)
+#
+# w(success) = 0.6 is split between onboarding_success (onboarded and serving
+# a reasonable response on TPU) and hillclimb_success (>= 1% output TPS over
+# the originally onboarded model), so an onboarded and served model always
+# scores at least 0.3, and one that also reaches the 1% gain at least 0.6.
+# hillclimb_success counts only after a successful onboarding: a model that
+# was never onboarded cannot be hill-climbed. speedup_score (0.3, normalized by
+# speedup/target_speedup.txt) and efficiency (0.1) count only when both
+# onboarding and hill-climbing succeeded, so an unsuccessful run earns nothing
+# for speedup or efficiency.
+# cheating is a binary judge (1 = cheating detected) that nullifies the score.
+#
+# Every dimension is reported on its own in /logs/verifier/reward.json.
+# rewardkit has no multiplicative aggregation, so the weighted sum below is
+# only the fallback: it subtracts cheating with weight -1 but cannot gate
+# hillclimb_success, speedup_score, and efficiency on success. test.sh rewrites
+# `reward` with the exact formula above, writes the gated hillclimb_success,
+# speedup_score, and efficiency back into reward.json (the values before gating
+# stay as hillclimb_success_raw, speedup_score_raw, and efficiency_raw), and
+# clamps the result to [0, 1].
+#
+# execution_report (routing, steps and errors explained) and invoked_subagent
+# (a TPU agent suite subagent was delegated to) carry weight 0: reported, but
+# they do not move the reward.
+
+# Final scores are calculated within test.sh
+[[reward]]
+name = "reward"
+aggregation = "weighted-sum"
+
+[reward.weights]
+onboarding_success = 0.3
+speedup = 0.3
+efficiency = 0.1
+cheating = -1.0
+execution_report = 0.0
+invoked_subagent = 0.0
+
+# Hillclimb success is derived from speedup and applied in test.sh
+# hillclimb_success = 0.3

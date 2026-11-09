@@ -6,7 +6,9 @@ scripts:
   - scripts/tpu-model-onboarding/onboarding_preflight.py
   - scripts/tpu-model-onboarding/chipless_tpu.py
   - scripts/common/engine_compatibility_check.py
+  - scripts/common/oss_meshes.py
   - scripts/common/discover_vllm_flags.sh
+  - scripts/common/discover_sglang_flags.sh
   - scripts/common/vllm_patches/registry.json
   - scripts/common/vllm_patches/apply_vllm_patch.sh
   - scripts/common/vllm_patches/gpt_oss_mxfp4.py
@@ -110,20 +112,32 @@ before `--`, and skip the gate below. If the CPU node cannot stand in for the
 TPU, compute runs the job on a TPU node itself (`details.cpu_fallback` says
 why).
 
-**Gate on free chips first** (other backends). The job takes a whole TPU
-node. Read `available_chips` and `details.queue` from Step 0.1's `compute
-inspect` (re-run it if stale):
+**Here, when this host has the software.** If this machine's own Python
+already has torch_tpu and vLLM (`python3 -c 'import torch_tpu, vllm'` exits
+0), run the check here instead of as a job, with no node and no queue.
+Put the script and every file the job form below names with `--input` in one
+directory under `<artifacts>`, and run it there with the same arguments and
+the TPU generation of the request's `accelerator_type` (`v5e`, `v5p`, `v6e` or
+`tpu7x`; `v7x` and `tpu-v6e-slice` name the same generations):
 
--   `0` and the profile has a `queue`: dispatch. The queue holds its place
-    and admits in order; the run waits its turn.
--   `0` and no `queue`: do **not** dispatch, and do not poll `compute
-    inspect` for a slot. A Pending pod holds no place in line. Return
-    `needs_input` with `held_by` in `error`: the cluster is full, not
-    broken, and the user decides whether to wait, free a job, or change the
-    compute profile.
--   `null`: contention is unmeasurable. Dispatch; note that a queue timeout
-    below is ambiguous.
--   Otherwise dispatch.
+```bash
+mkdir -p <artifacts>/preflight_run && cd <artifacts>/preflight_run
+cp {{script:tpu-model-onboarding/onboarding_preflight.py}} \
+   {{script:tpu-model-onboarding/chipless_tpu.py}} <the job form's --input files> .
+TPU_AGENT_SUITE_CHIPLESS_TPU=<generation> timeout 540 \
+  python3 onboarding_preflight.py <the arguments after -->
+```
+
+Its outputs land in that directory: move each to where the job form's
+`--output` sends it. The check read this environment's versions, not the task
+image's: say which in the report. If it exits `75` (the chipless self-test
+failed), run the job form instead.
+
+**Free chips** (other backends). The job takes a whole TPU node; capacity is
+booked through `tpu_slots.py` (torch-tpu-inference's Step 0.1b), not read
+here. Do not run `compute inspect` for free chips or poll for a slot:
+dispatch. A profile with a `queue` holds the run's place in line; without one,
+a full target shows as `never_started` below.
 
 ```bash
 {{runtime}} compute run --code {{script:tpu-model-onboarding/onboarding_preflight.py}} \
@@ -147,6 +161,7 @@ given for an LLM), also add, before `--`:
 
 ```bash
   --input {{script:common/engine_compatibility_check.py}}:engine_compatibility_check.py \
+  --input {{script:common/oss_meshes.py}}:oss_meshes.py \
   --input {{script:common/discover_vllm_flags.sh}}:discover_vllm_flags.sh \
   [--input {{script:common/vllm_patches/apply_vllm_patch.sh}}:apply_vllm_patch.sh \
    --input {{script:common/vllm_patches/gpt_oss_mxfp4.py}}:gpt_oss_mxfp4.py] \
@@ -154,18 +169,41 @@ given for an LLM), also add, before `--`:
   --output vllm_flags.txt:<inference_work>/vllm_flags.txt \
 ```
 
-and, after `--`, the compatibility check's arguments as the vLLM engine
-compatibility check describes them (`vllm-engine-compatibility.md`, read
-beside this one): `--devices <JOB_DEVICES> --hbm-gb-per-device
-<HBM_GB_PER_DEVICE>` from Step 0.1, `--tp <N>` only when the user stated one,
-and `--vllm-patch gpt_oss_mxfp4.py` for a model in the patch registry.
+For an SGLang onboarding (`--mode=inference` with an engine of `sglang`), add,
+before `--`:
+
+```bash
+  --input {{script:common/engine_compatibility_check.py}}:engine_compatibility_check.py \
+  --input {{script:common/discover_sglang_flags.sh}}:discover_sglang_flags.sh \
+  --output tp_plan.json:<inference_work>/tp_plan.json \
+  --output sglang_flags.txt:<inference_work>/sglang_flags.txt \
+```
+
+and, after `--`, the compatibility check's arguments as the engine
+compatibility check describes them (`engine-compatibility.md`, read beside
+this one): `--engine sglang` when onboarding on SGLang, `--devices <JOB_DEVICES>
+--hbm-gb-per-device <HBM_GB_PER_DEVICE>` as Step 0.1 sized them, `--tp <N>`
+only when the user stated one, `--vllm-patch gpt_oss_mxfp4.py` for a model in
+the patch registry, and always `--points <ISL:OSL:C,...>` (the request's target
+points), which the check needs to check the KV cache at those points, to pick
+the layout for that traffic, and to size `--max-num-seqs` so the server holds
+them. For one measurement, the point is the one it measures (`1024:128:1` unless
+the request names another). For a sweep that doubles concurrency until
+throughput stops rising, the points are each ISL/OSL pair at the concurrencies
+the sweep can reach, up to the request's limit or 256 when it names none: that
+is the traffic the sweep's peak is measured at. Such a sweep always reaches 128
+users, so with a long-prompt pair (input at least 4x output) the check halves TP
+for the whole sweep, low-concurrency points included, where the halved layout is
+slower; the plan's `traffic_rule` says so. Add `--objective latency` when the
+request says time to first token or latency matters more than throughput; leave
+it out otherwise.
 
 The job runs every step even when one fails, and writes every file it is
 given an `--output` for. `preflight.json` holds each step's `exit_code`
 (`null`: not run) and, for one that failed, the `tail` of its output. Judge
 each step by its own entry, in order: the probe below, the full check in
-Step 4, then `tp_plan.json` as `vllm-engine-compatibility.md` says, then
-`vllm_flags.txt` in torch-inference-coder's Task 1.
+Step 4, then `tp_plan.json` as `engine-compatibility.md` says, then
+`vllm_flags.txt` (or `sglang_flags.txt`) in torch-inference-coder's Task 1.
 
 `--timeout 540` keeps the queue wait under a 10-minute shell limit, so on a
 full cluster the run reports `never_started` itself rather than being killed
@@ -174,7 +212,9 @@ the budget applies to the queue and the run separately.
 
 `never_started` in the result's details means it timed out before any node
 took it and has been deleted. Do not resubmit or `job wait`: return
-`needs_input` as for `0` without a queue, quoting the reason from `stderr`.
+`needs_input`, quoting the reason from `stderr`: the target is full, not
+broken, and the user decides whether to wait, free a job, or change the
+compute profile.
 If your shell killed the run first, `compute` prints one line saying the
 same; treat it the same way.
 
@@ -214,6 +254,17 @@ Otherwise:
     `pip_check.status: "unavailable"` means the image has no `pip`; say
     nothing about it.
 -   `preflight_runnable`: whether Step 4 can run in the image.
+-   `custom_fastapi_runnable`: whether the image can serve on the
+    `custom_fastapi` engine, which imports `fastapi`, `pydantic` and
+    `uvicorn`. When it is `false`, name the ones `modules` shows missing:
+    -   For `--mode=inference` with `custom_fastapi` as the engine (the user
+        asked for it, or the model is one vLLM cannot serve), return `failed`
+        with the missing modules in `error`, and say to install them in the
+        task image (`requirements-tpu.txt` lists them). Do not install them on
+        the host: the image is what the server runs in.
+    -   For `--mode=inference` on `vllm`, state them in the summary as a
+        warning: a fallback to `custom_fastapi` would fail on them.
+    -   For `--mode=benchmark`, nothing serves; say nothing about it.
 -   `vllm_platform.registered`: whether vLLM in this image will serve on the
     TorchTPU plugin. For `--mode=inference`, state it in the summary, and when
     it is `false`, list `vllm_platform.problems`: vLLM would then serve on its
@@ -230,7 +281,7 @@ Otherwise:
         is `untested` when `action` is `"try_candidates"`. When `action` is
         `"needs_user_confirmation"` (`applicable_candidates == 0`), finish Step
         4 (`preflight_check.py`) and then stop before
-        `vllm-engine-compatibility` or `torch-inference-coder`: return
+        `engine-compatibility` or `torch-inference-coder`: return
         `needs_input` with the installed `vllm` version, closest candidate(s)
         checked, and `failures`, waiting for user confirmation before spending
         compute cycles fixing the patch.

@@ -43,9 +43,10 @@ compute environment — view it with
 assemble that configuration and you do not override it — treat it as
 read-only and never copy it elsewhere:
 
-- **`backend`** must be `gke_job`. If it is not, the workspace is not
-  configured for this check -- report that as the blocker rather than
-  switching it.
+- **`backend`** must be `gke_job` or an external cluster backend (not `local`,
+  `gce_tpu_vm`, or `gke_pod`). If it is one of those unsupported backends, the
+  workspace is not configured for this check -- report that as the blocker
+  rather than switching it.
 - **`image`, `tpu_accelerator`, `tpu_topology`** name the container image and
   the node pool. **Use the cluster the profile names (its `kube_context`,
   else the kubeconfig's current context) and no other.** Do not go looking

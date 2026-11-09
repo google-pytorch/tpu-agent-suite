@@ -22,10 +22,5 @@ description = "Executes preflight check for Qwen/Qwen2.5-7B-Instruct and reports
 type = "binary"
 weight = 1.0
 
-[[criterion]]
-description = "Routes the request from tpu-agent to tpu-model-onboarding to run the preflight check."
-type = "binary"
-weight = 1.0
-
 [scoring]
 aggregation = "weighted_mean"

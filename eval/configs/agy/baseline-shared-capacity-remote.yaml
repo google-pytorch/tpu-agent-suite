@@ -71,6 +71,12 @@ agents:
     # do not honour this variable, so a value that disagrees with ~
     # breaks them.
     TPU_AGENT_SUITE_HOME: /root/.tpu-agent-suite
+    # Unused here: a control arm installs nothing. Kept so this config stays
+    # identical to its agent-suite twin, which a test checks.
+    # TODO: drop this line and exempt PACKAGE_MANIFEST from the twin check in
+    # eval/tests/test_utils.py: a baseline belongs to neither the release
+    # nor the experimental arm, so it should name no package.
+    PACKAGE_MANIFEST: ${PACKAGE_MANIFEST:-package.release.json}
     # --- Unified Compute Backend Configuration ---
     COMPUTE_BACKEND: ${COMPUTE_BACKEND:-gke_job}
     TASK_DOCKER: ${TASK_DOCKER:-us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-tpu:latest}

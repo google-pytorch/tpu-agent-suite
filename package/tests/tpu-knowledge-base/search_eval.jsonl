@@ -400,7 +400,7 @@
 {"task": "general", "kind": "term", "query": "vmem_capacity_bytes", "want": ["jax-tpu-info"]}
 {"task": "onboarding/qwen3-32b", "kind": "term", "query": "vllm_torchtpu", "want": ["vllm-torchtpu", "vllm-torchtpu-readme"]}
 {"task": "onboarding/qwen3-32b", "kind": "question", "query": "why does the vllm server on torch_tpu compile so many graphs at startup", "want": ["vllm-torchtpu-tpu-platform"]}
-{"task": "onboarding/qwen3-32b", "kind": "question", "query": "where does torch_tpu vllm keep its persistent compilation cache", "want": ["vllm-torchtpu-env-override"]}
+{"task": "onboarding/qwen3-32b", "kind": "question", "query": "where does torch_tpu vllm keep its persistent compilation cache", "want": ["vllm-torchtpu-env-override", "vllm-torchtpu-compilation-cache"]}
 {"task": "onboarding/qwen3-32b", "kind": "question", "query": "how are data parallel ranks bound to tpu chips in vllm on torch_tpu", "want": ["vllm-torchtpu-rank-binding"]}
 {"task": "onboarding/qwen3-32b", "kind": "question", "query": "what tp and dp does the torchtpu-vllm nightly benchmark use", "want": ["vllm-torchtpu-benchmarking"]}
 {"task": "onboarding/qwen3-32b", "kind": "question", "query": "does tensor parallel size have to divide the number of kv heads", "want": ["vllm-qkv-parallel-linear", "concept-tensor-parallelism"]}
@@ -530,7 +530,7 @@
 {"task": "general", "kind": "question", "query": "How does a sharding plan map to DTensor placements or explicit collectives, and what do the spmd_backend modes do?", "want": ["kb-torchtitan-concepts-dtensor-and-sharding-types"]}
 {"task": "general", "kind": "question", "query": "How are documents packed into fixed-length sequences and sharded per data-parallel rank with resumable loader state?", "want": ["kb-torchtitan-concepts-dataloading-and-tokenizer"]}
 {"task": "general", "kind": "question", "query": "Why does the trainer disable FSDP2 gradient division, and how are tied embeddings and MoE experts sharded?", "want": ["kb-torchtitan-concepts-fsdp-sharding"]}
-{"task": "general", "kind": "question", "query": "How can a 256K-token sequence length fit on a single small Ironwood slice without context parallelism?", "want": ["kb-torchtitan-doc-concepts-long-context-training-recipe"]}
+{"task": "general", "kind": "question", "query": "How can a 256K-token sequence length fit on a single small Ironwood slice without context parallelism?", "want": ["torchtitan-mamba2-256k-recipe", "kb-torchtitan-doc-concepts-long-context-training-recipe"]}
 {"task": "general", "kind": "question", "query": "Can an LLM agent iteratively edit compiler graph passes and keep only speedups with bitwise-identical numerics?", "want": ["kb-torchtitan-doc-concepts-graph-trainer-autoresearch"]}
 {"task": "general", "kind": "question", "query": "on v6e how much VMEM can XLA use and how are bf16 arrays padded into tiles", "want": ["hw-memory-v6e", "hw-memory-buffers"]}
 {"task": "general", "kind": "question", "query": "single host versus multi host TPU slices on Kubernetes, how do I pick a topology", "want": ["wiki-cloud-tpu-concepts", "gke-tpu-concepts", "gke-plan-tpus"]}
@@ -567,7 +567,7 @@
 {"task": "general", "kind": "question", "query": "which models does tpu-inference support", "want": ["tpu-inference-model-support", "tpu-inference-model-support-v7x", "tpu-inference-model-support-v6e"]}
 {"task": "general", "kind": "question", "query": "is DeepSeek-R1 supported on v6e with vllm", "want": ["tpu-inference-model-support-v6e"]}
 {"task": "general", "kind": "question", "query": "does gpt-oss run the jax native model or vllm pytorch in tpu-inference", "want": ["tpu-inference-model-loader"]}
-{"task": "general", "kind": "term", "query": "vllm-torchtpu supported models", "want": ["vllm-torchtpu-model-support"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu supported models", "want": ["vllm-torchtpu-model-support", "vllm-torchtpu-supported-models-upstream"]}
 {"task": "general", "kind": "question", "query": "serve qwen3-32b with vllm on ironwood", "want": ["tpu-recipes-ironwood-qwen3-32b"]}
 {"task": "general", "kind": "question", "query": "gemma 4 vllm recipe on trillium v6e", "want": ["tpu-recipes-trillium-gemma4"]}
 {"task": "general", "kind": "question", "query": "deepseek-v3 vllm serving recipe on ironwood gke", "want": ["tpu-recipes-ironwood-deepseek-v3"]}
@@ -621,3 +621,162 @@
 {"task": "general", "kind": "question", "query": "document-packed attention skip blocks in pallas", "want": ["v6e-measured-pallas-skipping-overlap"]}
 {"task": "general", "kind": "question", "query": "long chains of elementwise ops get slow under torch.compile on tpu", "want": ["v6e-measured-vpu-memory-limits"]}
 {"task": "general", "kind": "question", "query": "does lowering xla_tpu_scoped_vmem_limit_kib slow matmuls on v6e", "want": ["v6e-measured-vpu-memory-limits"]}
+{"task": "general", "kind": "question", "query": "No TPU topology found for count: 1", "want": ["vllm-torchtpu-mesh-constraints"]}
+{"task": "general", "kind": "question", "query": "num_row_partitions=32 must be <= num_simd_lanes=16 expert parallel", "want": ["vllm-torchtpu-mesh-constraints"]}
+{"task": "general", "kind": "question", "query": "TP vs DP for 8k/1k at high concurrency on vllm torch_tpu", "want": ["vllm-tp-dp-plan"]}
+{"task": "general", "kind": "question", "query": "does async scheduling help vllm torch_tpu throughput", "want": ["vllm-torchtpu-measured-serving-knobs"]}
+{"task": "general", "kind": "question", "query": "which layout does an all-reduce in a vllm serving trace come from", "want": ["serving-trace-attribution"]}
+{"task": "general", "kind": "question", "query": "should I use fewer TP ranks and more replicas for long prompts at high concurrency", "want": ["vllm-tp-dp-plan"]}
+{"task": "general", "kind": "term", "query": "torchtitan tpu", "want": ["torchtitan", "torchtitan-tpu-training-guide"]}
+{"task": "general", "kind": "question", "query": "how do I train a model with torchtitan on a TPU VM", "want": ["torchtitan-tpu-training-guide", "torchtitan", "kb-torchtitan-doc-concepts-tpu-vm-provisioning"]}
+{"task": "general", "kind": "question", "query": "how do I run torchtitan multi-slice training on GKE with MEGASCALE environment variables", "want": ["torchtitan-tpu-training-guide"]}
+{"task": "general", "kind": "term", "query": "--extra-libtpu-init-flags", "want": ["torchtitan-tpu-training-guide"]}
+{"task": "general", "kind": "term", "query": "torchtitan ironwood recipes", "want": ["torchtitan-tpu-recipes"]}
+{"task": "general", "kind": "question", "query": "what MFU should Qwen3-32B reach on a tpu7x 4x8x8 slice with torchtitan", "want": ["torchtitan-tpu-recipes"]}
+{"task": "general", "kind": "term", "query": "fsdp_allreduce_slice_parameter_patterns", "want": ["torchtitan-tpu-recipes"]}
+{"task": "general", "kind": "term", "query": "torchtitan trillium recipes", "want": ["torchtitan-trillium-recipes", "kb-torchtitan-doc-concepts-trillium-v6e-recipes"]}
+{"task": "general", "kind": "question", "query": "torchtitan recipe for Llama3-8B on v6e-256", "want": ["torchtitan-trillium-recipes"]}
+{"task": "general", "kind": "term", "query": "reg_trainer_qwen3_8b", "want": ["torchtitan-trillium-recipes"]}
+{"task": "general", "kind": "term", "query": "llama3_70b_float8", "want": ["torchtitan-llama3-70b-float8-recipe"]}
+{"task": "general", "kind": "question", "query": "why does torchtitan log mfu N/A with float8 on TPU", "want": ["torchtitan-llama3-70b-float8-recipe"]}
+{"task": "general", "kind": "question", "query": "how much faster is float8 than bf16 for Llama3-70B on Ironwood", "want": ["torchtitan-llama3-70b-float8-recipe"]}
+{"task": "general", "kind": "term", "query": "muse_glimmer_30b_full_logits", "want": ["torchtitan-muse-glimmer-30b-recipe"]}
+{"task": "general", "kind": "question", "query": "torchtitan recipe to train Muse Glimmer 30B on tpu7x", "want": ["torchtitan-muse-glimmer-30b-recipe"]}
+{"task": "general", "kind": "term", "query": "graph_trainer_save_last_n_layers", "want": ["torchtitan-muse-glimmer-30b-recipe"]}
+{"task": "general", "kind": "term", "query": "qwen3_moe_30b_fsdp_only_full_ac_benchmark", "want": ["torchtitan-qwen3-30b-a3b-recipe"]}
+{"task": "general", "kind": "question", "query": "which libtpu flags enable the SparseCore collective aggregator and latency hiding layer scheduler for Qwen3-30B-A3B", "want": ["torchtitan-qwen3-30b-a3b-recipe"]}
+{"task": "general", "kind": "term", "query": "torch-tpu-optimization-guide", "want": ["torchtitan-tpu-optimization-guide"]}
+{"task": "general", "kind": "question", "query": "how do I raise MFU of a dense LLM trained with torchtitan on TorchTPU", "want": ["torchtitan-tpu-optimization-guide"]}
+{"task": "general", "kind": "term", "query": "graph_trainer_memory_policy", "want": ["torchtitan-tpu-optimization-guide"]}
+{"task": "general", "kind": "term", "query": "use_pallas_grouped_mm", "want": ["torchtitan-tpu-optimization-guide"]}
+{"task": "general", "kind": "term", "query": "RayTPUPolicyTrainer", "want": ["torchtitan-tpu-rl-ray"]}
+{"task": "general", "kind": "question", "query": "how do I run non-colocated GRPO with Ray and vLLM on TPU slices", "want": ["torchtitan-tpu-rl-ray"]}
+{"task": "general", "kind": "term", "query": "e2e_recipe_gke.sh", "want": ["torchtitan-tpu-rl-ray"]}
+{"task": "general", "kind": "term", "query": "hf_full_max", "want": ["torchtitan-tpu-hf-backend"]}
+{"task": "general", "kind": "question", "query": "how do I train a Hugging Face model on TPU with torchtitan without porting it", "want": ["torchtitan-tpu-hf-backend"]}
+{"task": "general", "kind": "term", "query": "num_tokens_per_microbatch_per_dp_rank", "want": ["torchtitan-tpu-hf-backend"]}
+{"task": "general", "kind": "term", "query": "mamba2_2_7b_256k", "want": ["torchtitan-mamba2-256k-recipe"]}
+{"task": "general", "kind": "question", "query": "train Mamba-2 with 256K sequence length on Ironwood", "want": ["torchtitan-mamba2-256k-recipe"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu tpu setup", "want": ["vllm-torchtpu-tpu-setup"]}
+{"task": "general", "kind": "question", "query": "how do I provision a tpu v7x vm to run vllm-torchtpu", "want": ["vllm-torchtpu-tpu-setup"]}
+{"task": "general", "kind": "question", "query": "which tpu generations does vllm-torchtpu support and which use queued resources", "want": ["vllm-torchtpu-tpu-setup"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu-core", "want": ["vllm-torchtpu-installation"]}
+{"task": "general", "kind": "term", "query": "UV_TORCH_BACKEND", "want": ["vllm-torchtpu-installation"]}
+{"task": "general", "kind": "question", "query": "why does installing vllm-torchtpu pull cuda torch wheels and how do I use the cpu index", "want": ["vllm-torchtpu-installation"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu quickstart", "want": ["vllm-torchtpu-quickstart"]}
+{"task": "general", "kind": "question", "query": "how do I serve my first model with vllm-torchtpu and send a chat request", "want": ["vllm-torchtpu-quickstart"]}
+{"task": "general", "kind": "question", "query": "run offline batch inference with vllm.LLM on vllm-torchtpu", "want": ["vllm-torchtpu-quickstart"]}
+{"task": "general", "kind": "term", "query": "vllm/vllm-torchtpu:nightly", "want": ["vllm-torchtpu-docker"]}
+{"task": "general", "kind": "question", "query": "which vllm-torchtpu docker image has the test and benchmark dependencies", "want": ["vllm-torchtpu-docker"]}
+{"task": "general", "kind": "question", "query": "what docker run flags does the vllm-torchtpu container need on a tpu vm", "want": ["vllm-torchtpu-docker"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu-validated-models", "want": ["vllm-torchtpu-supported-models-upstream"]}
+{"task": "general", "kind": "question", "query": "which checkpoints does vllm-torchtpu validate in ci and nightly", "want": ["vllm-torchtpu-supported-models-upstream"]}
+{"task": "general", "kind": "question", "query": "how do I enable kv cache offloading or prefix caching on vllm-torchtpu", "want": ["vllm-torchtpu-supported-models-upstream"]}
+{"task": "general", "kind": "term", "query": "TPU_MOE_HIERARCHICAL_EP", "want": ["vllm-torchtpu-parallelism"]}
+{"task": "general", "kind": "question", "query": "should I use tp or dp plus expert parallel for a moe model on vllm-torchtpu", "want": ["vllm-torchtpu-parallelism"]}
+{"task": "general", "kind": "question", "query": "how many logical devices does dp tp pp pcp consume on a v7x host in vllm-torchtpu", "want": ["vllm-torchtpu-parallelism"]}
+{"task": "general", "kind": "term", "query": "VLLM_XLA_CHECK_RECOMPILATION", "want": ["vllm-torchtpu-compilation-cache"]}
+{"task": "general", "kind": "question", "query": "how do I detect unexpected recompilation after warmup in vllm-torchtpu", "want": ["vllm-torchtpu-compilation-cache"]}
+{"task": "general", "kind": "question", "query": "what is the difference between VLLM_CACHE_ROOT and the tier3 compilation cache root", "want": ["vllm-torchtpu-compilation-cache"]}
+{"task": "general", "kind": "term", "query": "TPU_RAIDEN_CONTROLLER_ADDRESS", "want": ["vllm-torchtpu-disaggregated-serving"]}
+{"task": "general", "kind": "question", "query": "how do I run prefill decode disaggregation with the raiden connector on vllm-torchtpu", "want": ["vllm-torchtpu-disaggregated-serving"]}
+{"task": "general", "kind": "question", "query": "single host disaggregated serving script for vllm-torchtpu", "want": ["vllm-torchtpu-disaggregated-serving"]}
+{"task": "general", "kind": "term", "query": "TPU_MULTIHOST_BACKEND", "want": ["vllm-torchtpu-multihost"]}
+{"task": "general", "kind": "question", "query": "how do I serve a model across two tpu v7x hosts with vllm-torchtpu without ray", "want": ["vllm-torchtpu-multihost"]}
+{"task": "general", "kind": "question", "query": "multi-host data parallel with data-parallel-start-rank on vllm-torchtpu", "want": ["vllm-torchtpu-multihost"]}
+{"task": "general", "kind": "term", "query": "MOE_REQUANTIZE_WEIGHT_DTYPE", "want": ["vllm-torchtpu-quantization"]}
+{"task": "general", "kind": "question", "query": "which quantization methods does vllm-torchtpu support", "want": ["vllm-torchtpu-quantization"]}
+{"task": "general", "kind": "question", "query": "how do I requantize moe experts to w4a8 at load time on vllm-torchtpu", "want": ["vllm-torchtpu-quantization"]}
+{"task": "general", "kind": "term", "query": "dflash", "want": ["vllm-torchtpu-speculative-decoding"]}
+{"task": "general", "kind": "question", "query": "how do I enable eagle3 or mtp speculative decoding on vllm-torchtpu", "want": ["vllm-torchtpu-speculative-decoding"]}
+{"task": "general", "kind": "question", "query": "speculative decoding without a draft model on vllm-torchtpu", "want": ["vllm-torchtpu-speculative-decoding"]}
+{"task": "general", "kind": "term", "query": "mp-multihost-slice.yaml", "want": ["vllm-torchtpu-kubernetes"]}
+{"task": "general", "kind": "question", "query": "how do I deploy vllm-torchtpu on gke with jobset manifests", "want": ["vllm-torchtpu-kubernetes"]}
+{"task": "general", "kind": "question", "query": "gke node selectors and caches for a multi-host vllm-torchtpu slice", "want": ["vllm-torchtpu-kubernetes"]}
+{"task": "general", "kind": "term", "query": "qwen3.5-397b-fp8-tp1-dp8-ep", "want": ["vllm-torchtpu-v7x-recipes"]}
+{"task": "general", "kind": "question", "query": "exact vllm serve flags for qwen3.5-397b on a tpu v7x-8 with vllm-torchtpu", "want": ["vllm-torchtpu-v7x-recipes"]}
+{"task": "general", "kind": "question", "query": "how do I serve kimi-k3 on v7x-32 with vllm-torchtpu", "want": ["vllm-torchtpu-v7x-recipes"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu v6e recipes", "want": ["vllm-torchtpu-v6e-recipes"]}
+{"task": "general", "kind": "question", "query": "which v6e slice should I use for a 70b model on vllm-torchtpu", "want": ["vllm-torchtpu-v6e-recipes"]}
+{"task": "general", "kind": "question", "query": "serve gpt-oss-120b on v6e-8 with vllm-torchtpu", "want": ["vllm-torchtpu-v6e-recipes"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu coding guidance", "want": ["vllm-torchtpu-coding-guidance"]}
+{"task": "general", "kind": "question", "query": "what are the coding rules for contributing code to vllm-torchtpu", "want": ["vllm-torchtpu-coding-guidance"]}
+{"task": "general", "kind": "question", "query": "derive don't declare rule in vllm-torchtpu", "want": ["vllm-torchtpu-coding-guidance"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu contributing", "want": ["vllm-torchtpu-contributing"]}
+{"task": "general", "kind": "question", "query": "how do I trigger tpu ci on a vllm-torchtpu pull request", "want": ["vllm-torchtpu-contributing"]}
+{"task": "general", "kind": "question", "query": "does vllm-torchtpu require dco sign-off on commits", "want": ["vllm-torchtpu-contributing"]}
+{"task": "general", "kind": "term", "query": "tuned_block_sizes.py", "want": ["vllm-torchtpu-optimization-best-practices"]}
+{"task": "general", "kind": "question", "query": "what evidence does a vllm-torchtpu performance pr need", "want": ["vllm-torchtpu-optimization-best-practices"]}
+{"task": "general", "kind": "question", "query": "how should I validate hbm use after a weight loading change in vllm-torchtpu", "want": ["vllm-torchtpu-optimization-best-practices"]}
+{"task": "general", "kind": "term", "query": "spawns_tpu_workers", "want": ["vllm-torchtpu-testing-and-ci"]}
+{"task": "general", "kind": "question", "query": "how do I run the vllm-torchtpu tpu tests locally with the right pytest markers", "want": ["vllm-torchtpu-testing-and-ci"]}
+{"task": "general", "kind": "question", "query": "which buildkite pipeline runs vllm-torchtpu tests", "want": ["vllm-torchtpu-testing-and-ci"]}
+{"task": "general", "kind": "term", "query": "patch_registry.py", "want": ["vllm-torchtpu-patch-mechanism"]}
+{"task": "general", "kind": "question", "query": "how do I add a model-specific tpu patch in vllm-torchtpu", "want": ["vllm-torchtpu-patch-mechanism"]}
+{"task": "general", "kind": "question", "query": "what lifecycle stages does the vllm-torchtpu patch registry have", "want": ["vllm-torchtpu-patch-mechanism"]}
+{"task": "general", "kind": "term", "query": "typecheck_full.sh", "want": ["vllm-torchtpu-type-checking"]}
+{"task": "general", "kind": "question", "query": "how do I run pyrefly type checking locally for vllm-torchtpu", "want": ["vllm-torchtpu-type-checking"]}
+{"task": "general", "kind": "question", "query": "buildkite type check fails but my local pyrefly run passes in vllm-torchtpu", "want": ["vllm-torchtpu-type-checking"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu env vars", "want": ["vllm-torchtpu-env-vars"]}
+{"task": "general", "kind": "term", "query": "VLLM_TPU_BLOCK_MAJOR_KV", "want": ["vllm-torchtpu-env-vars"]}
+{"task": "general", "kind": "question", "query": "list of environment variables read by vllm-torchtpu and their defaults", "want": ["vllm-torchtpu-env-vars"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu roadmap", "want": ["vllm-torchtpu-roadmap"]}
+{"task": "general", "kind": "question", "query": "what is planned for vllm-torchtpu in q4 2026", "want": ["vllm-torchtpu-roadmap"]}
+{"task": "general", "kind": "question", "query": "when will vllm-torchtpu add deepseek v4 readiness", "want": ["vllm-torchtpu-roadmap"]}
+{"task": "general", "kind": "term", "query": "offline_inference.py", "want": ["vllm-torchtpu-offline-inference-example"]}
+{"task": "general", "kind": "question", "query": "example script for offline inference on vllm-torchtpu with chat template kwargs", "want": ["vllm-torchtpu-offline-inference-example"]}
+{"task": "general", "kind": "question", "query": "disable thinking for qwen3.5 in the vllm-torchtpu offline inference example", "want": ["vllm-torchtpu-offline-inference-example"]}
+{"task": "general", "kind": "term", "query": "multi_modal_inference.py", "want": ["vllm-torchtpu-multimodal-example"]}
+{"task": "general", "kind": "question", "query": "example for vision language inference with qwen2.5-vl on vllm-torchtpu", "want": ["vllm-torchtpu-multimodal-example"]}
+{"task": "general", "kind": "question", "query": "how do I run multimodal offline inference on vllm-torchtpu", "want": ["vllm-torchtpu-multimodal-example"]}
+{"task": "general", "kind": "term", "query": "offline_lora_inference.py", "want": ["vllm-torchtpu-lora-example"]}
+{"task": "general", "kind": "question", "query": "example of multi-lora offline inference on vllm-torchtpu", "want": ["vllm-torchtpu-lora-example"]}
+{"task": "general", "kind": "question", "query": "how do I pass a LoRARequest with vllm-torchtpu", "want": ["vllm-torchtpu-lora-example"]}
+{"task": "general", "kind": "term", "query": "vllm-torchtpu profiling modes", "want": ["vllm-torchtpu-profiling-overview"]}
+{"task": "general", "kind": "question", "query": "which ways are there to profile vllm-torchtpu and what trace files does each write", "want": ["vllm-torchtpu-profiling-overview"]}
+{"task": "general", "kind": "question", "query": "why does each vllm-torchtpu worker write its own trace", "want": ["vllm-torchtpu-profiling-overview"]}
+{"task": "general", "kind": "term", "query": "tpu_profiling.py", "want": ["vllm-torchtpu-offline-profiling"]}
+{"task": "general", "kind": "question", "query": "how do I profile a single prefill or decode shape offline on vllm-torchtpu", "want": ["vllm-torchtpu-offline-profiling"]}
+{"task": "general", "kind": "question", "query": "offline profiling script for vllm-torchtpu with warmup iterations", "want": ["vllm-torchtpu-offline-profiling"]}
+{"task": "general", "kind": "term", "query": "profiler_kwargs", "want": ["vllm-torchtpu-server-profiling"]}
+{"task": "general", "kind": "question", "query": "how do I pass tracer levels at start_profile time without restarting vllm serve on vllm-torchtpu", "want": ["vllm-torchtpu-server-profiling"]}
+{"task": "general", "kind": "question", "query": "how much does profiling slow down a vllm-torchtpu benchmark", "want": ["vllm-torchtpu-server-profiling"]}
+{"task": "general", "kind": "term", "query": "phased_profiler_decode_only_kv_len_threshold", "want": ["vllm-torchtpu-phased-profiling-doc"]}
+{"task": "general", "kind": "question", "query": "how are prefill_heavy and decode_heavy phases classified in vllm-torchtpu", "want": ["vllm-torchtpu-phased-profiling-doc"]}
+{"task": "general", "kind": "question", "query": "upstream guide to phased profiling with run_benchmarks.sh EXTRA_SERVE_ARGS", "want": ["vllm-torchtpu-phased-profiling-doc"]}
+{"task": "general", "kind": "term", "query": "batch_composition_stats", "want": ["vllm-torchtpu-trace-output-layout"]}
+{"task": "general", "kind": "question", "query": "what does the vllm-torchtpu profiling output directory look like", "want": ["vllm-torchtpu-trace-output-layout"]}
+{"task": "general", "kind": "question", "query": "why are vllm-torchtpu xplane files prefixed with the rank", "want": ["vllm-torchtpu-trace-output-layout"]}
+{"task": "general", "kind": "term", "query": "VLLM_MOE_ROUTING_SIMULATION_STRATEGY", "want": ["vllm-torchtpu-profiling-troubleshooting"]}
+{"task": "general", "kind": "question", "query": "vllm-torchtpu profiling run finished but the trace directory is empty", "want": ["vllm-torchtpu-profiling-troubleshooting"]}
+{"task": "general", "kind": "question", "query": "a profiling phase is missing from my vllm-torchtpu phased run", "want": ["vllm-torchtpu-profiling-troubleshooting"]}
+{"task": "general", "kind": "term", "query": "merge_xplane", "want": ["vllm-torchtpu-viewing-traces"]}
+{"task": "general", "kind": "question", "query": "how do I combine per-rank xplane files from vllm-torchtpu into one file", "want": ["vllm-torchtpu-viewing-traces"]}
+{"task": "general", "kind": "question", "query": "view vllm-torchtpu traces locally with xprof after copying them off the tpu vm", "want": ["vllm-torchtpu-viewing-traces"]}
+{"task": "general", "kind": "term", "query": "KV_Cache_Decode_Recv_Complete", "want": ["vllm-torchtpu-pd-profiling"]}
+{"task": "general", "kind": "question", "query": "how do I profile prefill decode disaggregation with raiden on gke", "want": ["vllm-torchtpu-pd-profiling"]}
+{"task": "general", "kind": "question", "query": "correlate a kv transfer across prefill and decode traces", "want": ["vllm-torchtpu-pd-profiling"]}
+{"task": "general", "kind": "term", "query": "VLLM_XLA_CACHE_PATH", "want": ["vllm-torchtpu-doc-errata"]}
+{"task": "general", "kind": "question", "query": "TPU_KV_RESHARD_TRANSPORT tcp is rejected", "want": ["vllm-torchtpu-doc-errata"]}
+{"task": "general", "kind": "question", "query": "vllm-torchtpu raiden_connector module not found", "want": ["vllm-torchtpu-doc-errata", "vllm-torchtpu-disaggregated-serving"]}
+{"task": "general", "kind": "question", "query": "mamba3 recipe fails: unknown flag --training.local_batch_size", "want": ["torchtitan-doc-errata"]}
+{"task": "general", "kind": "question", "query": "torchtitan recipe sets xla_tpu_scoped_vmem_limit_kib 131072 on tpu7x", "want": ["torchtitan-doc-errata", "vmem"]}
+{"task": "general", "kind": "question", "query": "which serving knob does a vllm trace on tpu argue for", "want": ["vllm-serving-heuristics"]}
+{"task": "general", "kind": "question", "query": "is 8 kv heads at tp 8 kv cache padding on tpu", "want": ["vllm-serving-heuristics", "serving-trace-attribution"]}
+{"task": "general", "kind": "question", "query": "should my vllm server switch from tp 4 x dp 2 to tp 2 x dp 4", "want": ["vllm-sharding-heuristics", "vllm-tp-dp-plan"]}
+{"task": "general", "kind": "question", "query": "batched rpa decode attention has no block size knob with attention backend custom", "want": ["vllm-serving-heuristics", "serving-trace-attribution"]}
+{"task": "general", "kind": "question", "query": "what does workload_dependent mean for a layout candidate", "want": ["vllm-sharding-heuristics"]}
+{"task": "general", "kind": "question", "query": "collective-bound prefill which tensor parallel size should I try", "want": ["vllm-sharding-heuristics"]}
+{"task": "general", "kind": "question", "query": "vllm on tpu throughput is low what serving knobs should I tune", "want": ["vllm-serving-heuristics"]}
+{"task": "general", "kind": "question", "query": "next hypothesis to speed up a vllm server on tpu from its xprof trace", "want": ["vllm-serving-heuristics", "vllm-sharding-heuristics"]}
+{"task": "general", "kind": "question", "query": "should I use fewer tp ranks and more data parallel replicas for serving", "want": ["vllm-sharding-heuristics"]}
+{"task": "general", "kind": "question", "query": "all-reduce takes a large share of the step what layout change helps", "want": ["vllm-sharding-heuristics"]}
+{"task": "general", "kind": "question", "query": "decode attention dominates the decode step on the batched rpa kernel", "want": ["vllm-serving-heuristics"]}
+{"task": "general", "kind": "question", "query": "which tp dp layouts fail to start on vllm-torchtpu", "want": ["vllm-sharding-heuristics", "vllm-torchtpu-mesh-constraints"]}
+{"task": "general", "kind": "question", "query": "max-num-seqs or max-num-batched-tokens tuning for vllm tpu", "want": ["vllm-serving-heuristics", "vllm-torchtpu-measured-serving-knobs"]}
+{"task": "general", "kind": "question", "query": "device idle between decode steps async scheduling", "want": ["vllm-serving-heuristics", "vllm-torchtpu-measured-serving-knobs"]}
+{"task": "general", "kind": "question", "query": "MoE padding waste expert parallel vllm tpu what to try", "want": ["vllm-serving-heuristics"]}
+{"task": "general", "kind": "question", "query": "kv cache padding with too many tp ranks for the kv heads", "want": ["vllm-serving-heuristics", "vllm-sharding-heuristics", "serving-trace-attribution"]}
+{"task": "general", "kind": "question", "query": "hill climbing serving optimization candidates tpu", "want": ["vllm-serving-heuristics", "vllm-sharding-heuristics"]}
+{"task": "general", "kind": "question", "query": "optimize serving throughput layout change measured gains", "want": ["vllm-sharding-heuristics"]}
+{"task": "general", "kind": "question", "query": "tp2xdp4 vs tp4xdp2 gemma mistral", "want": ["vllm-sharding-heuristics", "vllm-tp-dp-plan"]}

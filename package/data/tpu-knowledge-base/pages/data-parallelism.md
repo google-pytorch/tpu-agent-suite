@@ -31,7 +31,7 @@ critical-batch-size (`index.py get concept-critical-batch-size`).
 ## Memory ceiling
 
 With bf16 params and fp32 Adam state a parameter costs ~10 bytes, so pure DP can hold at
-most `HBM / 10` parameters per chip — ~9 B on a 96 GB v5p, before any activation
+most `HBM / 10` parameters per chip — ~10 B on a 95 GiB v5p, before any activation
 checkpoints (scaling-book, Part 5 (`index.py get scaling-book-training`)). That is why DP alone is
 rarely used for interesting models; FSDP (`index.py get concept-fsdp`) keeps the same roofline and drops the
 replication.

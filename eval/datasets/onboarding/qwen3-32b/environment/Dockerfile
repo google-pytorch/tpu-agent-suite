@@ -12,23 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The nightly the instruction names, plus what an agent run needs on top.
-FROM us-docker.pkg.dev/ml-oss-artifacts-transient/torch-tpu-docker-container/torchtpu-vllm-dev:nightly-20260804
-
-# node for the agent CLI Harbor installs; git because the deliverable is a
-# local commit history; jq for the session supervisor hook;
-# google-cloud-cli-gke-gcloud-auth-plugin for kubectl GKE authentication.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      nodejs npm git ca-certificates curl gnupg jq \
-    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
-      > /etc/apt/sources.list.d/google-cloud-sdk.list \
-    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-      | gpg --dearmor --yes -o /usr/share/keyrings/cloud.google.gpg \
-    && apt-get update && apt-get install -y --no-install-recommends \
-      google-cloud-cli-gke-gcloud-auth-plugin \
-    && rm -rf /var/lib/apt/lists/*
-
-# tokamax needs jax >= 0.11, which the nightly's flax 0.12.0 cannot load.
-RUN pip install --no-cache-dir tokamax "flax>=0.12.10"
+# vllm-on-host (eval/images/vllm-on-host) has vLLM-TorchTPU plus
+# the host-side dependencies an agent run needs, and tokamax.
+FROM us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/vllm-on-host@sha256:c0698b8b2b99f749f1599221152f9d651a5893317a724f2688b9c3db2c9a023c
 
 WORKDIR /workspace

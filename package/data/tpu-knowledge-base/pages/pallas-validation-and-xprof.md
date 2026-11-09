@@ -417,7 +417,7 @@ Matrix Unit (MXU), Vector Programmable Unit (VPU), and Vector Memory (VMEM).
 How TensorCores map to `jax.Device` objects (typically `TpuDevice`) depends on
 the generation. On TPU v4 and v5p the two TensorCores typically run in **megacore** mode,
 as one logical device (`index.py get megacore`). On a v5p host with 4 chips
-we observed 4 devices, all with `core_on_chip == 0` (https://github.com/google-pytorch/torchtpu-agents/issues/400). JAX also
+we observed 4 devices, all with `core_on_chip == 0`. JAX also
 supports a "split" mode on these chips, where each core is its own device
 (`ChipVersion.supports_megacore`, and the `TpuInfo.is_megacore` /
 `TpuInfo.is_split_chip` properties, in JAX `tpu_info.py` at

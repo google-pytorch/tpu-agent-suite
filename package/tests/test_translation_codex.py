@@ -44,7 +44,8 @@ from test_translation_base import PACKAGE_DIR  # noqa: E402
 from test_translation_base import TranslationParityBase  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from framework import compiler, utils  # noqa: E402
+from framework import jsonio  # noqa: E402
+from framework.builder import package_checks, package_loader  # noqa: E402
 
 Path = pathlib.Path
 
@@ -57,7 +58,7 @@ def capability_sets(
     """Partition declared tools by the capability their `action_level` grants.
 
     Derived from the package's declared metadata rather than hardcoded, and
-    deliberately *not* from `compiler.codex_sandbox_mode`. Importing that
+    deliberately *not* from `harness_rules.codex_sandbox_mode`. Importing that
     function would make every assertion below tautological -- it would agree
     with itself no matter how badly the tier logic were broken -- and there is
     no shared constant to import, because the producer decides from
@@ -104,7 +105,7 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
         self.assertTrue(plugin_json_path.is_file(),
                         "Missing .codex-plugin/plugin.json")
 
-        plugin = utils.load_json(plugin_json_path)
+        plugin = jsonio.load_json(plugin_json_path)
         self.assertEqual(plugin["name"], self.manifest["name"])
         self.assertEqual(plugin["version"], self.manifest["version"])
         self.assertEqual(plugin["description"], self.manifest["description"])
@@ -116,7 +117,7 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
 
     def test_install_plan_uses_toml_configuration(self):
         """Codex is configured through `.codex/config.toml`, not a JSON merge."""
-        plan = utils.load_json(self.dist_dir / "tpu-agent-suite-install.json")
+        plan = jsonio.load_json(self.dist_dir / "tpu-agent-suite-install.json")
         self.assertEqual(plan["json_merges"], [],
                          "Codex configures via TOML, not JSON merges")
 
@@ -138,7 +139,7 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
         # A nested chain holds one thread per level.
         self.assertGreaterEqual(
             by_key[("agents", "max_concurrent_threads_per_session")]["value"],
-            compiler.MAX_DELEGATION_DEPTH)
+            package_checks.MAX_DELEGATION_DEPTH)
         self.assertEqual(by_key[("sandbox", "allowed_paths")]["value"],
                          ["~/.tpu-agent-suite"])
 
@@ -178,7 +179,7 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
 
     def _capabilities(self) -> tuple[set[str], set[str]]:
         return capability_sets(
-            compiler.get_declared_tools(PACKAGE_DIR, self.manifest))
+            package_loader.get_declared_tools(PACKAGE_DIR, self.manifest))
 
     def test_sandbox_mode_matches_declared_tools(self):
         """Sandbox tier escalates with the agent's declared capability."""

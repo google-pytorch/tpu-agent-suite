@@ -92,6 +92,43 @@ if by_name.exists():
 (out / name).write_text(json.dumps(result))
 '''
 
+SGLANG_RAW_RESULT = {
+    "duration": 7.0,
+    "completed": 10,
+    "num_prompts": 10,
+    "total_input_tokens": 5120,
+    "total_output_tokens": 1280,
+    "request_throughput": 1.4,
+    "output_throughput": 180.0,
+    "total_throughput": 900.0,
+    "mean_ttft_ms": 20.0,
+    "median_ttft_ms": 18.0,
+    "p99_ttft_ms": 39.0,
+    "mean_tpot_ms": 5.0,
+    "median_tpot_ms": 5.0,
+    "p99_tpot_ms": 5.5,
+    "mean_itl_ms": 5.0,
+    "median_itl_ms": 5.0,
+    "p99_itl_ms": 5.7,
+    "mean_e2e_latency_ms": 700.0,
+    "median_e2e_latency_ms": 700.0,
+    "p99_e2e_latency_ms": 720.0,
+}
+
+FAKE_SGLANG = r'''
+import json, pathlib, sys
+argv = sys.argv[1:]
+here = pathlib.Path(__file__).parent
+with open(here / "calls.jsonl", "a") as f:
+    f.write(json.dumps(argv) + "\n")
+result = json.loads((here / "sglang_raw_result.json").read_text())
+override = here / "override.json"
+if override.exists():
+    result.update(json.loads(override.read_text()))
+out_file = pathlib.Path(argv[argv.index("--output-file") + 1])
+out_file.write_text(json.dumps(result) + "\n")
+'''
+
 
 class _FakeServer(http.server.BaseHTTPRequestHandler):
     models = {
@@ -103,12 +140,15 @@ class _FakeServer(http.server.BaseHTTPRequestHandler):
             "max_model_len": 2048,
         }],
     }
+    server_info = None
 
     def do_GET(self):  # noqa: N802
         if self.path == "/health":
             body = b""
         elif self.path == "/v1/models":
             body = json.dumps(self.models).encode()
+        elif self.path == "/get_server_info" and self.server_info is not None:
+            body = json.dumps(self.server_info).encode()
         else:
             self.send_response(404)
             self.end_headers()
@@ -119,15 +159,23 @@ class _FakeServer(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         # Answers only when the test enabled it, as vLLM registers the route
-        # only under VLLM_SERVER_DEV_MODE=1.
-        if self.path != "/reset_prefix_cache" or self.server.resets is None:
-            self.send_response(404)
+        # only under VLLM_SERVER_DEV_MODE=1 and SGLang registers /flush_cache.
+        if (self.path == "/reset_prefix_cache"
+                and self.server.resets is not None):
+            self.server.resets += 1
+            self.send_response(200)
             self.end_headers()
+            self.wfile.write(json.dumps({"success": True}).encode())
             return
-        self.server.resets += 1
-        self.send_response(200)
+        if (self.path == "/flush_cache"
+                and getattr(self.server, "flushes", None) is not None):
+            self.server.flushes += 1
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Cache flushed.\n")
+            return
+        self.send_response(404)
         self.end_headers()
-        self.wfile.write(json.dumps({"success": True}).encode())
 
     def log_message(self, *args):
         pass
@@ -228,6 +276,59 @@ class TestPureFunctions(unittest.TestCase):
         self.assertEqual(m["total_tokens_per_s"], 900.0)
         self.assertEqual(m["requests_per_s"], 1.4)
         self.assertAlmostEqual(m["output_tokens_per_s_per_user"], 200.0)
+
+    def test_normalize_maps_sglang_keys(self):
+        m = serving_benchmark.normalize(SGLANG_RAW_RESULT)
+        self.assertEqual(m["total_tokens_per_s"], 900.0)
+        self.assertEqual(m["e2el_mean_ms"], 700.0)
+        self.assertEqual(m["e2el_p50_ms"], 700.0)
+        self.assertEqual(m["e2el_p99_ms"], 720.0)
+        self.assertEqual(m["failed"], 0)
+        self.assertAlmostEqual(m["output_tokens_per_s_per_user"], 200.0)
+
+    def test_pareto_frontier_and_reproduction(self):
+        points = [
+            {
+                "concurrency": 1,
+                "output_tokens_per_s": 70.0,
+                "output_tokens_per_s_per_user": 70.0,
+            },
+            {
+                "concurrency": 4,
+                "output_tokens_per_s": 212.0,
+                "output_tokens_per_s_per_user": 53.0,
+            },
+            {
+                "concurrency": 8,
+                "output_tokens_per_s": 200.0,
+                "output_tokens_per_s_per_user": 25.0,
+            },
+            {
+                "concurrency": 16,
+                "output_tokens_per_s": 511.0,
+                "output_tokens_per_s_per_user": 32.0,
+            },
+        ]
+        frontier = serving_benchmark.compute_pareto_frontier(points)
+        # Concurrency 8 is dominated by concurrency 16 (511 > 200 and 32 > 25)
+        self.assertEqual([p["concurrency"] for p in frontier], [1, 4, 16])
+
+        curves = {"8192:1024": {"points": points, "pareto_frontier": frontier}}
+        repro_ok = serving_benchmark.evaluate_pareto_reproduction(
+            curves, {"curves": curves}, tolerance_pct=5.0)
+        self.assertTrue(repro_ok["consistent"])
+        self.assertTrue(repro_ok["promote_to_bkc"])
+
+        # Drop concurrency 16 throughput by 20% -> fails reproduction check
+        degraded_points = [
+            dict(p, output_tokens_per_s=400.0) if p["concurrency"] == 16 else p
+            for p in points
+        ]
+        degraded_curves = {"8192:1024": {"points": degraded_points}}
+        repro_fail = serving_benchmark.evaluate_pareto_reproduction(
+            degraded_curves, {"curves": curves}, tolerance_pct=5.0)
+        self.assertFalse(repro_fail["consistent"])
+        self.assertFalse(repro_fail["promote_to_bkc"])
 
     def test_aggregate_reports_spread(self):
         agg = serving_benchmark.aggregate([{"x": 100.0}, {"x": 110.0}])
@@ -348,11 +449,15 @@ class TestEndToEnd(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = pathlib.Path(self.tmp.name)
         (self.dir / "fake_vllm.py").write_text(FAKE_VLLM, encoding="utf-8")
+        (self.dir / "fake_sglang.py").write_text(FAKE_SGLANG, encoding="utf-8")
         (self.dir / "raw_result.json").write_text(json.dumps(RAW_RESULT),
                                                   encoding="utf-8")
+        (self.dir / "sglang_raw_result.json").write_text(
+            json.dumps(SGLANG_RAW_RESULT), encoding="utf-8")
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
                                                       _FakeServer)
         self.server.resets = None
+        self.server.flushes = None
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
         self.out = self.dir / "out"
@@ -669,6 +774,70 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(by_cell["isl128_osl8_c1"]["seeds"], [42 + 5])
         self.assertEqual(by_cell["isl128_osl8_c4"]["seeds"], [42 + 7])
 
+    def test_sglang_bench_client_and_flush_cache(self):
+        self.server.flushes = 0
+        models = {"data": [{"id": "org/model", "root": "hub-org/model"}]}
+        server_info = {"context_length": 4096}
+        sglang_cmd = shlex.join(
+            [sys.executable, str(self.dir / "fake_sglang.py")])
+        with unittest.mock.patch.object(_FakeServer, "models", models), \
+                unittest.mock.patch.object(_FakeServer, "server_info", server_info):
+            rc = self._main("--bench-client", "sglang", "--sglang-cmd",
+                            sglang_cmd, "--isl-osl", "512:128",
+                            "--concurrency", "1,4")
+        self.assertEqual(rc, serving_benchmark.EXIT_OK)
+        self.assertEqual(self.server.flushes, 1 + 2)
+        summary = json.loads((self.out / "summary.json").read_text())
+        self.assertEqual(summary["client"], "sglang.bench_serving")
+        self.assertEqual(summary["model"]["max_model_len"], 4096)
+        self.assertEqual(summary["settings"]["prefix_cache"], "reset per run")
+        self.assertIn("512:128", summary["curves"])
+        argv = self._calls()[-1]
+        self.assertEqual(argv[argv.index("--backend") + 1], "sglang-oai")
+        self.assertEqual(argv[argv.index("--max-concurrency") + 1], "4")
+
+    def test_pareto_reproduction_exports_bkc_when_consistent(self):
+        ref_path = self.dir / "ref_summary.json"
+        ref_path.write_text(
+            json.dumps({
+                "curves": {
+                    "512:128": {
+                        "pareto_frontier": [{
+                            "concurrency":
+                            1,
+                            "output_tokens_per_s":
+                            175.0,
+                            "output_tokens_per_s_per_user":
+                            195.0,
+                        }]
+                    }
+                }
+            }),
+            encoding="utf-8",
+        )
+        bkc_path = self.dir / "bkc.json"
+        rc = self._main("--isl-osl", "512:128", "--concurrency", "1",
+                        "--reference-curve", str(ref_path), "--export-bkc",
+                        str(bkc_path))
+        self.assertEqual(rc, serving_benchmark.EXIT_OK)
+        self.assertTrue(bkc_path.exists())
+        bkc = json.loads(bkc_path.read_text(encoding="utf-8"))
+        self.assertEqual(bkc["status"], "best_known_config")
+        self.assertTrue(bkc["reproduction"]["consistent"])
+        self.assertTrue(bkc["reproduction"]["promote_to_bkc"])
+
+    def test_export_bkc_requires_reference_curve(self):
+        bkc_path = self.dir / "bkc.json"
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = self._main("--isl-osl", "512:128", "--concurrency", "1",
+                            "--export-bkc", str(bkc_path))
+        self.assertEqual(rc, serving_benchmark.EXIT_SETUP)
+        self.assertFalse(bkc_path.exists())
+        self.assertEqual(self._calls(), [])
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("--reference-curve", payload["error"])
+
 
 class _FakeFastAPIServer(http.server.BaseHTTPRequestHandler):
     """Answers like torch-inference-coder's FastAPI recipe: /health and
@@ -779,6 +948,283 @@ class TestFastAPIEngine(unittest.TestCase):
                 "--engine", "custom_fastapi", "--model", "m", "--output-dir",
                 str(self.out), "--stop-below-gain-pct", "10"
             ])
+
+
+# An AgentX aggregate result (process_agentic_result.py's), trimmed to the
+# keys the summary reads. Latencies are in seconds.
+AGENTX_RESULT = {
+    "num_requests_successful": 73,
+    "request_accounting": {
+        "records_error_dropped": 0
+    },
+    "request_metrics": {
+        "qps": {
+            "mean": 0.04
+        },
+        "latency": {
+            "ttft": {
+                "mean": 2.0,
+                "p50": 1.5,
+                "p90": 4.0,
+                "p95": 5.0
+            },
+            "tpot": {
+                "mean": 0.1,
+                "p50": 0.09,
+                "p90": 0.2,
+                "p95": 0.25
+            },
+            "itl": {
+                "mean": 0.1,
+                "p50": 0.09
+            },
+            "e2el": {
+                "mean": 30.0,
+                "p50": 25.0
+            },
+        },
+        "throughput": {
+            "input": {
+                "tokens_per_second": 4000.0
+            },
+            "output": {
+                "tokens_per_second": 20.0
+            },
+            "total": {
+                "tokens_per_second": 4020.0
+            },
+            "duration_seconds": 1800.0,
+        },
+        "cache": {
+            "theoretical_cache_hit_rate": 0.95
+        },
+    },
+    "server_metrics": {
+        "cache": {
+            "overall_cache_hit_rate": 0.9
+        }
+    },
+}
+
+# Stands in for benchmark_lib.sh's replay: writes what the real one writes
+# (the replay command and the aggregate result), records the
+# variables it was run with, and exits FAKE_RC.
+FAKE_AGENTX_REPLAY = r'''set -e
+python3 - <<'PY'
+import json, os, pathlib
+env = os.environ
+result_dir = pathlib.Path(env["RESULT_DIR"])
+artifacts = result_dir / "aiperf_artifacts"
+artifacts.mkdir(parents=True, exist_ok=True)
+(result_dir / "benchmark_command.txt").write_text(
+    "aiperf profile --scenario inferencex-agentx-mvp --concurrency "
+    + env["CONC"])
+out = pathlib.Path(env["AGENTIC_OUTPUT_DIR"]) / (env["RESULT_FILENAME"] + ".json")
+out.write_text(pathlib.Path(env["FAKE_AGENTX_RESULT"]).read_text())
+with open(env["FAKE_AGENTX_CALLS"], "a") as f:
+    f.write(json.dumps({"cwd": os.getcwd(), "env": dict(env)}) + "\n")
+PY
+exit "${FAKE_RC:-0}"
+'''
+
+
+class TestAgentXWorkload(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                                      _FakeServer)
+        self.server.resets = 0
+        # A context the 256k corpus fits.
+        self.server.RequestHandlerClass = type(
+            "_AgentXServer", (_FakeServer, ), {
+                "models": {
+                    "data": [{
+                        "id": "org/model",
+                        "root": "hub-org/model",
+                        "max_model_len": 262144,
+                    }]
+                }
+            })
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+        self.out = self.dir / "out"
+        self.cache = self.dir / "cache"
+        (self.cache /
+         f"InferenceX-{serving_benchmark.INFERENCEX_SHA[:9]}").mkdir(
+             parents=True)
+        result = self.dir / "agentx_result.json"
+        result.write_text(json.dumps(AGENTX_RESULT), encoding="utf-8")
+        self.calls_path = self.dir / "calls.jsonl"
+        self.prepared = []
+        patches = [
+            unittest.mock.patch.object(serving_benchmark,
+                                       "AGENTX_REPLAY_SCRIPT",
+                                       FAKE_AGENTX_REPLAY),
+            unittest.mock.patch.object(
+                serving_benchmark, "prepare_agentx",
+                lambda args, raw_dir: self.prepared.append(raw_dir)),
+            unittest.mock.patch.dict(
+                os.environ, {
+                    "FAKE_AGENTX_RESULT": str(result),
+                    "FAKE_AGENTX_CALLS": str(self.calls_path),
+                    "PYTHONPATH": "/somewhere/torch_tpu",
+                }),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        for name in ("HF_HOME", "HF_HUB_CACHE"):
+            os.environ.pop(name, None)  # patch.dict restores them.
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def _main(self, *extra: str) -> tuple[int, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(
+                io.StringIO()):
+            rc = serving_benchmark.main([
+                "--base-url", self.base_url, "--output-dir",
+                str(self.out), "--ready-timeout", "5", "--workload", "agentx",
+                "--agentx-cache-dir",
+                str(self.cache), *extra
+            ])
+        return rc, err.getvalue()
+
+    def _calls(self) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in self.calls_path.read_text().splitlines()
+        ]
+
+    def test_replays_each_concurrency_and_maps_the_metrics(self):
+        rc, _ = self._main("--concurrency", "4,1")
+        self.assertEqual(rc, serving_benchmark.EXIT_OK)
+        self.assertEqual(len(self.prepared), 1)
+        summary = json.loads((self.out / "summary.json").read_text())
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["client"], "aiperf (InferenceX AgentX)")
+        self.assertEqual(summary["settings"]["workload"], "agentx")
+        self.assertEqual(summary["settings"]["prefix_cache"], "reset per run")
+        agentx = summary["settings"]["agentx"]
+        self.assertEqual(agentx["inferencex_sha"],
+                         serving_benchmark.INFERENCEX_SHA)
+        self.assertEqual(agentx["corpus"],
+                         serving_benchmark.AGENTX_CORPUS_256K)
+        self.assertTrue(agentx["canonical"])
+        self.assertEqual([c["cell"] for c in summary["cells"]],
+                         ["agentx_c1", "agentx_c4"])
+        cell = summary["cells"][0]
+        self.assertEqual(
+            cell["command"],
+            "aiperf profile --scenario inferencex-agentx-mvp --concurrency 1")
+        metrics = {k: v["mean"] for k, v in cell["metrics"].items()}
+        self.assertAlmostEqual(metrics["ttft_p50_ms"], 1500.0)
+        self.assertAlmostEqual(metrics["ttft_p95_ms"], 5000.0)
+        self.assertAlmostEqual(metrics["tpot_mean_ms"], 100.0)
+        self.assertAlmostEqual(metrics["output_tokens_per_s_per_user"], 10.0)
+        self.assertEqual(metrics["output_tokens_per_s"], 20.0)
+        self.assertEqual(metrics["total_tokens_per_s"], 4020.0)
+        self.assertEqual(metrics["total_input_tokens"], 7200000)
+        self.assertEqual(metrics["completed"], 73)
+        self.assertEqual(metrics["failed"], 0)
+        self.assertEqual(metrics["requests_per_s"], 0.04)
+        self.assertEqual(metrics["prefix_cache_hit_rate"], 0.9)
+        self.assertEqual(metrics["theoretical_prefix_cache_hit_rate"], 0.95)
+        self.assertNotIn("ttft_p99_ms", metrics)
+        self.assertIn("prefix hit", (self.out / "summary.md").read_text())
+        # One reset at setup, then one before every replay.
+        self.assertEqual(self.server.resets, 3)
+
+    def test_each_replay_gets_the_variables_an_agentx_recipe_sets(self):
+        rc, _ = self._main("--concurrency", "2", "--tokenizer", "/tok")
+        self.assertEqual(rc, serving_benchmark.EXIT_OK)
+        [call] = self._calls()
+        env = call["env"]
+        self.assertEqual(
+            call["cwd"],
+            str(self.cache.resolve() / f"InferenceX-"
+                f"{serving_benchmark.INFERENCEX_SHA[:9]}"))
+        self.assertEqual(env["MODEL"], "/tok")
+        self.assertEqual(env["SERVED_MODEL_NAME"], "org/model")
+        self.assertEqual(env["AIPERF_SERVER_URL"], self.base_url)
+        self.assertEqual(env["CONC"], "2")
+        self.assertEqual(env["DURATION"], "1800")
+        self.assertEqual(env["MAX_MODEL_LEN"], "262144")
+        self.assertEqual(env["WEKA_LOADER_OVERRIDE"],
+                         serving_benchmark.AGENTX_CORPUS_256K)
+        self.assertEqual(env["AIPERF_FAILED_REQUEST_THRESHOLD"], "0.1")
+        self.assertEqual(env["ENABLE_AGENTX_POWER"], "0")
+        self.assertEqual(env["KV_OFFLOADING"], "none")
+        self.assertEqual(env["FRAMEWORK"], "vllm")
+        self.assertEqual(env["RESULT_FILENAME"], "agentx_c2_r1")
+        self.assertEqual(env["AIPERF_VENV"],
+                         str(self.cache.resolve() / "venv"))
+        self.assertEqual(env["HF_HUB_CACHE"],
+                         str(self.cache.resolve() / "hf_hub"))
+        self.assertNotIn("PYTHONPATH", env)
+
+    def test_a_failed_replay_fails_its_cell(self):
+        with unittest.mock.patch.dict(os.environ, {"FAKE_RC": "1"}):
+            rc, _ = self._main("--concurrency", "1")
+        self.assertEqual(rc, serving_benchmark.EXIT_CELL_FAILED)
+        summary = json.loads((self.out / "summary.json").read_text())
+        self.assertEqual(summary["cells"][0]["status"], "failed")
+        self.assertIn("exited 1", summary["cells"][0]["error"])
+
+    def test_dry_run_prints_the_replay_and_sets_nothing_up(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(
+                io.StringIO()):
+            rc = serving_benchmark.main([
+                "--base-url", self.base_url, "--output-dir",
+                str(self.out), "--workload", "agentx", "--dry-run", "--model",
+                "org/model", "--concurrency", "8"
+            ])
+        self.assertEqual(rc, serving_benchmark.EXIT_OK)
+        self.assertEqual(self.prepared, [])
+        self.assertIn("CONC=8", out.getvalue())
+        self.assertIn("SERVED_MODEL_NAME=org/model", out.getvalue())
+
+    def test_corpus_follows_the_servers_context(self):
+        corpus = serving_benchmark.agentx_corpus
+        self.assertEqual(corpus(1_048_576, None),
+                         serving_benchmark.AGENTX_CORPUS_FULL)
+        self.assertEqual(corpus(262_144, None),
+                         serving_benchmark.AGENTX_CORPUS_256K)
+        self.assertEqual(corpus(None, None),
+                         serving_benchmark.AGENTX_CORPUS_256K)
+        self.assertEqual(corpus(8192, serving_benchmark.AGENTX_CORPUS_FULL),
+                         serving_benchmark.AGENTX_CORPUS_FULL)
+
+    def test_flags(self):
+
+        def parse(*extra):
+            return serving_benchmark.parse_args(
+                ["--output-dir", str(self.out), *extra])
+
+        args = parse("--workload", "agentx")
+        self.assertEqual(args.max_failed_pct, 10.0)
+        self.assertEqual(
+            args.run_timeout, serving_benchmark.AGENTX_DURATION_S +
+            serving_benchmark.AGENTX_TIMEOUT_SLACK_S)
+        self.assertEqual(args.agentx_cache_dir, self.out / "agentx_cache")
+        self.assertEqual(
+            parse("--workload", "agentx", "--agentx-fast").run_timeout,
+            1200 + serving_benchmark.AGENTX_TIMEOUT_SLACK_S)
+        random = parse()
+        self.assertEqual((random.max_failed_pct, random.run_timeout),
+                         (0.0, 1800.0))
+        for bad in (["--isl-osl", "1024:128"], ["--stop-on-failure"],
+                    ["--engine", "custom_fastapi", "--model",
+                     "m"], ["--agentx-coverage-ratio", "1.5"]):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                parse("--workload", "agentx", *bad)
 
 
 if __name__ == "__main__":

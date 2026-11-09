@@ -14,9 +14,11 @@
 """TorchTPU VLLM Pre-flight Guardrail Check."""
 
 import argparse
+import contextlib
 import glob
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -182,6 +184,30 @@ def replica_cost(replicas):
             "the weight-fit check does not count")
 
 
+# Traffic-aware layout: with long prompts at high concurrency, one TP halving
+# with twice the replicas serves more tokens/s; with short prompts or few
+# users, or when time to first token matters, the largest TP does. Two
+# halvings lose up to a third at short prompts, so the rule halves once. The
+# measurements, the concurrency each was taken at and why the cutoffs are 4x
+# and 128 are in the knowledge base entry vllm-tp-dp-plan ("TP versus
+# replicas, measured"); keep the numbers there only.
+PREFILL_HEAVY_RATIO = 4  # input length / output length
+HIGH_CONCURRENCY = 128
+OBJECTIVES = ("throughput", "latency")
+
+
+def traffic_points(points):
+    """The target points that argue for fewer TP ranks: long prompts, many users."""
+    return [(isl, osl, c) for isl, osl, c in points or []
+            if isl >= PREFILL_HEAVY_RATIO * osl and c >= HIGH_CONCURRENCY]
+
+
+def _format_rejection(engine_label, tp, why):
+    if why.startswith(("vLLM ", "SGLang ", "torch_tpu ")):
+        return why
+    return f"{engine_label} rejected TP {tp}: {why}"
+
+
 def plan_parallelism(devices,
                      hbm_gib_per_device,
                      num_heads,
@@ -190,7 +216,10 @@ def plan_parallelism(devices,
                      user_tp=None,
                      use_mla=False,
                      rejected=None,
-                     linear_heads=None):
+                     linear_heads=None,
+                     points=None,
+                     objective="throughput",
+                     engine="vllm"):
     """Choose TP and DP so that TP x DP uses every device.
 
     A TP the user states always wins; the plan only records what it costs.
@@ -209,10 +238,16 @@ def plan_parallelism(devices,
     `rejected` maps TPs that cannot run to why, said in full ("vLLM rejected
     TP 1: ...", "torch_tpu has no device layout for TP 1 ..."); they are not
     candidates.
+    `points` are the target (isl, osl, concurrency) points. When the
+    `objective` is throughput, one of them is a long prompt at high
+    concurrency (`traffic_points`), and the largest fitting TP spans every
+    device, the plan halves it once (two replicas), if that TP fits too,
+    and records the rule in `traffic_rule`.
 
     Returns the plan dict; its `ok` is False when no deployable TP exists.
     """
     rejected = rejected or {}
+    engine_label = "SGLang" if engine == "sglang" else "vLLM"
     plan = {
         "devices": devices,
         "hbm_gib_per_device": hbm_gib_per_device,
@@ -244,7 +279,7 @@ def plan_parallelism(devices,
                                linear_heads)
         if problem:
             plan["ok"] = False
-            plan["reason"] = f"{problem}; vLLM will refuse it"
+            plan["reason"] = f"{problem}; {engine_label} will refuse it"
             return plan
         if user_tp > devices:
             plan["ok"] = False
@@ -253,7 +288,8 @@ def plan_parallelism(devices,
             return plan
         if user_tp in rejected:
             plan["ok"] = False
-            plan["reason"] = rejected[user_tp]
+            plan["reason"] = _format_rejection(engine_label, user_tp,
+                                               rejected[user_tp])
             return plan
         unused = devices - user_tp * plan["data_parallel_size"]
         if unused:
@@ -267,12 +303,13 @@ def plan_parallelism(devices,
             notes.append(f"weights exceed {WEIGHT_HBM_FRACTION:.0%} of HBM "
                          "per device at this TP; expect OOM")
         plan["ok"] = True
-        plan["recommended_engine"] = "vllm"
+        plan["recommended_engine"] = engine
         plan["reason"] = "; ".join(notes)
         return plan
 
     plan["source"] = "recommended"
-    skipped = "".join(f"; {why}" for _, why in sorted(rejected.items()))
+    skipped = "".join(f"; {_format_rejection(engine_label, t, why)}"
+                      for t, why in sorted(rejected.items()))
     if not fitting:
         plan["ok"] = False
         plan["recommended_engine"] = "custom_fastapi"
@@ -298,11 +335,39 @@ def plan_parallelism(devices,
         return plan
 
     tp = max(fitting)
+    heavy = traffic_points(points) if objective == "throughput" else []
+    halved = tp // 2
+    traffic = None
+    # Only from one engine on every device, the layout the rule was
+    # measured from; a plan already running replicas stays as it is.
+    if heavy and devices // tp == 1 and tp % 2 == 0 and halved in fitting:
+        traffic = {
+            "rule":
+            "throughput at long prompts and high concurrency",
+            "points": [f"{i}:{o}:{c}" for i, o, c in heavy],
+            "instead_of": {
+                "tensor_parallel_size": tp,
+                "data_parallel_size": devices // tp
+            },
+            "tradeoff": ("fewer tokens/s below about 32 users, and higher "
+                         "time to first token at long prompts up to about "
+                         "128 users (above that, less queueing lowers it)"),
+        }
+        tp = halved
     plan["ok"] = True
-    plan["recommended_engine"] = "vllm"
+    plan["recommended_engine"] = engine
     plan["tensor_parallel_size"] = tp
     plan["data_parallel_size"] = devices // tp
-    if weights_gib is None:
+    if traffic:
+        plan["traffic_rule"] = traffic
+        prev = traffic["instead_of"]["tensor_parallel_size"]
+        plan["reason"] = (
+            f"TP {tp} with {devices // tp} replicas instead of the largest "
+            f"fitting TP {prev}: the target traffic has long prompts at high "
+            f"concurrency ({', '.join(traffic['points'])}), where one TP "
+            "halving serves more tokens/s; expect "
+            f"{traffic['tradeoff']}")
+    elif weights_gib is None:
         plan["reason"] = (
             f"weight size unknown; the largest head-compatible TP ({tp}) "
             "gives each device the smallest shard")
@@ -316,7 +381,7 @@ def plan_parallelism(devices,
         plan["reason"] += (f"; {devices // tp} replicas use all {devices} "
                            f"devices; {replica_cost(devices // tp)}")
     smallest = plan["smallest_fitting_tp"]
-    if smallest is not None and smallest < tp:
+    if smallest is not None and smallest < tp and not traffic:
         plan["reason"] += (
             f"; TP {smallest} also fits and, with more replicas, may "
             "serve faster: pass --tp to measure it, at the cost of startup "
@@ -377,19 +442,197 @@ def topology_rejections(devices, get_topology):
     return refused
 
 
-def find_topology_lookup():
+def find_topology_lookup(engine="vllm"):
     """The plugin's per-engine topology lookup, or None if it has none.
 
     vllm_torchtpu's workers call `TpuPlatform._get_tpu_topology(world_size)`
-    for their engine's TP group. Plugins from before it existed set up any
-    device count, so its absence means nothing is ruled out.
+    for their engine's TP group, and sglang_tpu's workers call
+    `_resolve_single_host_tpu_topology(world_size)` (wrapping
+    `torch_tpu._internal.utils.hardware.get_tpu_topology`). Plugins from
+    before it existed set up any device count, so its absence means nothing is
+    ruled out.
     """
+    if engine == "sglang":
+        try:
+            # pylint: disable=g-import-not-at-top
+            from sglang_tpu.patches import _resolve_single_host_tpu_topology
+            return _resolve_single_host_tpu_topology
+        except ImportError:
+            pass
+        try:
+            # pylint: disable=g-import-not-at-top
+            from torch_tpu._internal.utils import hardware
+            lookup = getattr(hardware, "get_tpu_topology", None)
+            if lookup is not None:
+                return lookup
+        except ImportError:
+            pass
     try:
         # pylint: disable=g-import-not-at-top
         from vllm_torchtpu.platforms.tpu_platform import TpuPlatform
     except ImportError:
         return None
     return getattr(TpuPlatform, "_get_tpu_topology", None)
+
+
+def load_mesh_rules():
+    """`oss_meshes`, shipped beside this script, or None when it is absent.
+
+    It holds the KV-cache estimate. Without it the plan is made as before,
+    from the heads, the weight fit, the device layouts and vLLM alone.
+    """
+    for directory in (os.path.dirname(os.path.abspath(__file__)), os.getcwd()):
+        if directory not in sys.path:
+            sys.path.insert(0, directory)
+    try:
+        import oss_meshes  # pylint: disable=g-import-not-at-top
+    except ImportError:
+        return None
+    return oss_meshes
+
+
+def parse_points(text):
+    """`isl:osl:c,...` as a list of (isl, osl, concurrency) int tuples."""
+    points = []
+    for item in filter(None, (p.strip() for p in (text or "").split(","))):
+        isl, osl, conc = (int(v) for v in item.split(":"))
+        if min(isl, osl, conc) < 1:
+            raise ValueError(f"benchmark point {item!r} must be positive")
+        points.append((isl, osl, conc))
+    return points
+
+
+def kv_warnings(rules, shape, tp, dp, hbm_gib_per_device, weights_gib, points):
+    """Target points whose KV cache does not fit the planned TP x DP.
+
+    Sliding-window layers count only their window, as vLLM's hybrid KV-cache
+    manager allocates them. The free HBM is an estimate (weights, a runtime
+    reserve and vLLM's default memory utilization), so this is a warning to
+    check, not a refusal.
+    """
+    out = []
+    for isl, osl, conc in points:
+        est = rules.hbm_estimate(shape,
+                                 rules.Mesh(tp, dp),
+                                 hbm_gib_per_device,
+                                 weights_gib=weights_gib,
+                                 max_len=isl + osl,
+                                 concurrency=conc)
+        if est.kv_ok is False:
+            out.append({
+                "isl": isl,
+                "osl": osl,
+                "concurrency": conc,
+                "kv_gib_free": est.kv_gib_free,
+                "kv_gib_needed": est.kv_gib_needed,
+            })
+    return out
+
+
+# Share of the estimated free KV cache that `max_num_seqs` may fill: the
+# estimate leaves out prefix-cache sharing and block rounding. Hybrid models'
+# linear-attention state is not counted at all.
+KV_FIT_MARGIN = 0.8
+# Fewest sequences per step to launch with, as the serving benchmark asks of a
+# baseline. A point the KV cache holds fewer of is left to `kv_warnings`.
+MIN_MAX_NUM_SEQS = 8
+
+
+def max_num_seqs_plan(rules, shape, tp, dp, hbm_gib_per_device, weights_gib,
+                      points):
+    """`--max-num-seqs` for each replica, sized for the target points.
+
+    Each point asks for its concurrency split over the replicas, capped at
+    `KV_FIT_MARGIN` of what the estimated KV cache holds at that point's own
+    length (a layer type with no per-token cache, linear attention, adds no
+    cap); the value is the largest of those, and at least
+    `MIN_MAX_NUM_SEQS`. A long point's cap therefore never stops a short
+    one's sweep short of its top concurrency. `capped` says the KV cache,
+    not the points, set the value. Returns None, leaving vLLM's default,
+    without points, when no point asks a replica for more than
+    `MIN_MAX_NUM_SEQS` (a server sized for one request would cap any later
+    sweep against it), or when the KV cache holds fewer than that at every
+    point, where a smaller value would only measure queueing.
+    """
+    if not points:
+        return None
+    mesh = rules.Mesh(tp, dp)
+    free = rules.hbm_estimate(shape,
+                              mesh,
+                              hbm_gib_per_device,
+                              weights_gib=weights_gib).kv_gib_free
+    sized = []
+    for isl, osl, conc in points:
+        per_seq_gib = rules.kv_bytes_per_sequence(shape, mesh,
+                                                  isl + osl) / 2**30
+        fit = (math.floor(KV_FIT_MARGIN * free /
+                          per_seq_gib) if per_seq_gib > 0 else None)
+        want = math.ceil(conc / dp)
+        sized.append({
+            "isl": isl,
+            "osl": osl,
+            "concurrency": conc,
+            "kv_fit_per_replica": fit,
+            "value": want if fit is None else min(want, fit),
+        })
+    target = max(math.ceil(p["concurrency"] / dp) for p in sized)
+    if target <= MIN_MAX_NUM_SEQS or all(
+            p["kv_fit_per_replica"] is not None
+            and p["kv_fit_per_replica"] < MIN_MAX_NUM_SEQS for p in sized):
+        return None
+    value = max(MIN_MAX_NUM_SEQS, max(p["value"] for p in sized))
+    return {
+        "value": value,
+        "target_per_replica": target,
+        "capped": value < target,
+        "kv_gib_free": free,
+        "points": sized,
+    }
+
+
+def max_num_seqs_layouts(plan, size):
+    """`max_num_seqs` for layouts a deployment may use instead of the plan's.
+
+    One replica of the planned TP (a build without data parallelism) and the
+    layout a traffic rule passed over. `size(tp, dp)` is `max_num_seqs_plan`
+    for a layout.
+    """
+    layouts = [(plan["tensor_parallel_size"], 1)]
+    if plan.get("traffic_rule"):
+        full = plan["traffic_rule"]["instead_of"]
+        layouts.append(
+            (full["tensor_parallel_size"], full["data_parallel_size"]))
+    out = []
+    for tp, dp in layouts:
+        if (tp, dp) == (plan["tensor_parallel_size"],
+                        plan["data_parallel_size"]):
+            continue
+        sized = size(tp, dp)
+        out.append({
+            "tensor_parallel_size": tp,
+            "data_parallel_size": dp,
+            "value": sized["value"] if sized else None,
+        })
+    return out
+
+
+def halving_kv_short(plan, warnings_at):
+    """Target points where the traffic rule's halved layout runs short of KV
+    cache and the layout it passed over does not.
+
+    `warnings_at(tp, dp)` gives `kv_warnings` for a layout. A point short in
+    both layouts is no reason to give up the halving: the larger TP would not
+    fix it.
+    """
+    full = plan["traffic_rule"]["instead_of"]
+    passed_over = {(w["isl"], w["osl"], w["concurrency"])
+                   for w in warnings_at(full["tensor_parallel_size"],
+                                        full["data_parallel_size"])}
+    return [
+        w for w in warnings_at(plan["tensor_parallel_size"],
+                               plan["data_parallel_size"])
+        if (w["isl"], w["osl"], w["concurrency"]) not in passed_over
+    ]
 
 
 def apply_vllm_patch(patch):
@@ -423,6 +666,56 @@ def apply_vllm_patch(patch):
     return None
 
 
+def validated_plan(make_plan,
+                   validate,
+                   rejected,
+                   accepted,
+                   kv_short=None,
+                   engine="vllm"):
+    """The plan the engine accepts, with the traffic rule dropped when it runs short.
+
+    `make_plan(use_traffic)` plans with or without the target traffic. Every
+    (TP, DP) pair a plan names, and its single replica (TP, 1), goes through
+    `validate` (the engine's config check); a TP the engine refuses lands in
+    `rejected` and the plan is redone. When `kv_short(plan)` says the traffic
+    rule's halved layout cannot hold a target point that the larger TP holds,
+    the plan is redone without the rule, and that plan is validated the same
+    way.
+    """
+    engine_label = "SGLang" if engine == "sglang" else "vLLM"
+    use_traffic, dropped = True, None
+    while True:
+        plan = make_plan(use_traffic)
+        unchecked = [] if not plan["ok"] else [
+            # (TP, 1) is what an engine that cannot run replicas starts.
+            pair for pair in dict.fromkeys(((plan["tensor_parallel_size"],
+                                             plan["data_parallel_size"]),
+                                            (plan["tensor_parallel_size"], 1)))
+            if pair not in accepted
+        ]
+        if unchecked:
+            for tp, dp in unchecked:
+                try:
+                    validate(tp, dp)
+                    accepted.add((tp, dp))
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    rejected[
+                        tp] = f"{engine_label} rejected TP {tp}: {vllm_error(e)}"
+            continue
+        if (use_traffic and plan.get("traffic_rule") and kv_short
+                and kv_short(plan)):
+            # The halved layout cannot hold the target: keep the largest TP.
+            dropped, use_traffic = plan["traffic_rule"], False
+            continue
+        break
+    if dropped:
+        plan["traffic_rule_dropped"] = dict(
+            dropped,
+            why=("the KV cache of the halved layout is short at a target "
+                 "point where the larger TP's is not"))
+    return plan
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="TorchTPU VLLM Pre-flight Guardrail Check")
@@ -447,13 +740,37 @@ def main():
                         type=str,
                         default="tp_plan.json",
                         help="Where to write the TP/DP plan")
+    parser.add_argument("--engine",
+                        choices=["vllm", "sglang"],
+                        default="vllm",
+                        help="Target serving engine (default: vllm)")
+    parser.add_argument("--trust-remote-code",
+                        action="store_true",
+                        help="Allow executing custom model/config code from "
+                        "the Hugging Face repository (default: False)")
     parser.add_argument("--vllm-patch",
                         type=str,
                         default=None,
                         help="vllm_torchtpu patch the model needs, applied"
                         " before vLLM is imported; apply_vllm_patch.sh must"
                         " sit beside it")
+    parser.add_argument("--points",
+                        type=str,
+                        default=None,
+                        help="Benchmark points the deployment must hold, as"
+                        " isl:osl:concurrency,... for the KV-cache check and"
+                        " the traffic-aware layout")
+    parser.add_argument("--objective",
+                        choices=OBJECTIVES,
+                        default="throughput",
+                        help="What the target traffic needs: throughput"
+                        " (tokens/s) or latency (time to first token)")
     args = parser.parse_args()
+    try:
+        points = parse_points(args.points)
+    except ValueError as e:
+        print(f"CRITICAL ERROR: --points: {e}")
+        sys.exit(1)
 
     if args.devices < 1 or args.hbm_gb_per_device <= 0:
         print("CRITICAL ERROR: --devices and --hbm-gb-per-device must be "
@@ -471,8 +788,8 @@ def main():
                   f" did not apply.\n{problem}")
             sys.exit(1)
 
-    # A gs:// folder: vLLM gets a copy of its config and tokenizer, never the
-    # URL, and the weight size comes from the folder itself.
+    # A gs:// folder: vLLM/SGLang gets a copy of its config and tokenizer, never
+    # the URL, and the weight size comes from the folder itself.
     engine_model, gcs_size = args.model, None
     if args.model.startswith(GCS_SCHEME):
         try:
@@ -480,50 +797,146 @@ def main():
         except (ImportError, OSError, RuntimeError, ValueError) as e:
             print(f"CRITICAL ERROR: could not read {args.model}: {e}")
             sys.exit(1)
+    elif not os.path.isdir(engine_model) and os.environ.get("HF_HUB_OFFLINE"):
+        with contextlib.suppress(Exception):
+            from huggingface_hub import \
+                snapshot_download  # pylint: disable=g-import-not-at-top
+            engine_model = snapshot_download(engine_model,
+                                             local_files_only=True)
 
-    try:
-        # pylint: disable=g-import-not-at-top
-        # pylint: disable=g-importing-member
-        # Ensure vllm_torchtpu is patched into standard vLLM registry
-        import vllm_torchtpu  # noqa: F401  # pylint: disable=unused-import
-        from vllm.engine.arg_utils import EngineArgs
-    except ImportError as e:
-        print("CRITICAL ERROR: Failed to import vLLM or TorchTPU backend. Is"
-              f" the environment set up? \n{e}")
-        sys.exit(1)
+    if args.engine == "sglang":
+        try:
+            # pylint: disable=g-import-not-at-top
+            from sglang.srt.configs.model_config import (AttentionArch,
+                                                         ModelConfig)
+            from sglang.srt.models.registry import ModelRegistry
+            from sglang.srt.server_args import ServerArgs
+        except ImportError as e:
+            print("CRITICAL ERROR: Failed to import SGLang. Is"
+                  f" the environment set up? \n{e}")
+            sys.exit(1)
+
+        if hasattr(ModelRegistry, "register_lazy"):
+            try:
+                # pylint: disable=g-import-not-at-top
+                import sglang_tpu.models  # noqa: F401  # pylint: disable=unused-import
+                ModelRegistry.register_lazy("sglang_tpu.models")
+            except ImportError:
+                pass
+
+        def engine_config(tp, dp=1):
+            if dp < 1:
+                raise ValueError(f"dp_size ({dp}) must be >= 1")
+            server_args = ServerArgs(model_path=engine_model,
+                                     tp_size=tp,
+                                     dp_size=dp,
+                                     device="tpu",
+                                     trust_remote_code=args.trust_remote_code)
+            if hasattr(server_args, "resolve_once"):
+                server_args.resolve_once()
+            if hasattr(ModelConfig, "from_server_args"):
+                mc = ModelConfig.from_server_args(server_args)
+            else:
+                mc = ModelConfig(model_path=engine_model,
+                                 trust_remote_code=args.trust_remote_code)
+            hf_cfg = getattr(mc, "hf_config", None)
+            archs = list(getattr(hf_cfg, "architectures", None) or ())
+            supported_archs = (ModelRegistry.get_supported_archs() if hasattr(
+                ModelRegistry, "get_supported_archs") else getattr(
+                    ModelRegistry, "models", ()))
+            if not archs or not any(arch in supported_archs for arch in archs):
+                raise ValueError(
+                    f"Model architectures {archs} are not supported by SGLang."
+                )
+            text_cfg = getattr(mc, "hf_text_config", None) or getattr(
+                hf_cfg, "text_config", hf_cfg)
+            num_h = (getattr(mc, "num_attention_heads", None)
+                     or getattr(text_cfg, "num_attention_heads", 1))
+            num_kv = (mc.get_total_num_kv_heads() if hasattr(
+                mc, "get_total_num_kv_heads") else
+                      getattr(mc, "num_key_value_heads", None)
+                      or getattr(text_cfg, "num_key_value_heads", num_h))
+            attn_arch = getattr(mc, "attention_arch", None)
+            mla = (attn_arch == getattr(AttentionArch, "MLA", object())
+                   or bool(getattr(mc, "kv_lora_rank", None))
+                   or bool(getattr(text_cfg, "kv_lora_rank", None)))
+            max_len = (getattr(mc, "context_len", None)
+                       or getattr(text_cfg, "max_position_embeddings", None)
+                       or getattr(text_cfg, "seq_length", None))
+            quant = (getattr(mc, "quantization", None)
+                     or getattr(hf_cfg, "quantization_config", None))
+            lin_heads = tuple(
+                getattr(text_cfg, name, None)
+                for name in ("linear_num_key_heads", "linear_num_value_heads"
+                             )) if text_cfg is not None else (None, None)
+            if not all(lin_heads):
+                lin_heads = None
+            prob = head_problem(tp, num_h, num_kv, mla, lin_heads)
+            if prob is not None:
+                raise ValueError(prob)
+            hf_dict = hf_cfg.to_dict() if hasattr(hf_cfg, "to_dict") else {}
+            return num_h, num_kv, mla, quant, max_len, lin_heads, hf_dict
+    else:
+        try:
+            # pylint: disable=g-import-not-at-top
+            # pylint: disable=g-importing-member
+            # Ensure vllm_torchtpu is patched into standard vLLM registry
+            import vllm_torchtpu  # noqa: F401  # pylint: disable=unused-import
+            from vllm.engine.arg_utils import EngineArgs
+        except ImportError as e:
+            print(
+                "CRITICAL ERROR: Failed to import vLLM or TorchTPU backend. Is"
+                f" the environment set up? \n{e}")
+            sys.exit(1)
+
+        # We enforce VLLM_TARGET_DEVICE="tpu" implicitly via the environment or setup.
+        # vllm_torchtpu overrides standard vLLM mechanisms to hook into the TPU.
+        def engine_config(tp, dp=1):
+            extra_kwargs = ({
+                "trust_remote_code": True
+            } if args.trust_remote_code else {})
+            cfg = EngineArgs(
+                model=engine_model,
+                tensor_parallel_size=tp,
+                data_parallel_size=dp,
+                # We don't want to actually allocate TPU memory or download heavy
+                # weights during pre-flight. We only want to force the config
+                # parsers to execute their static analysis.
+                enforce_eager=True,
+                **extra_kwargs,
+            ).create_engine_config()
+            mc = cfg.model_config
+            text_cfg = getattr(mc, "hf_text_config", None)
+            lin_heads = tuple(
+                getattr(text_cfg, name, None)
+                for name in ("linear_num_key_heads", "linear_num_value_heads"
+                             )) if text_cfg is not None else (None, None)
+            if not all(lin_heads):
+                lin_heads = None
+            hf_cfg = getattr(mc, "hf_config", None)
+            hf_dict = hf_cfg.to_dict() if hasattr(hf_cfg, "to_dict") else {}
+            return (mc.model_arch_config.total_num_attention_heads,
+                    mc.get_total_num_kv_heads(), bool(mc.use_mla),
+                    mc.quantization, mc.max_model_len, lin_heads, hf_dict)
 
     print("==================================================")
-    print(f" PRE-FLIGHT CHECK: {args.model}")
+    print(f" PRE-FLIGHT CHECK ({args.engine}): {args.model}")
     print(f" DEVICES: {args.devices} x {args.hbm_gb_per_device:g} GiB")
     print("==================================================")
 
-    # We enforce VLLM_TARGET_DEVICE="tpu" implicitly via the environment or setup.
-    # vllm_torchtpu overrides standard vLLM mechanisms to hook into the TPU.
-    def engine_config(tp, dp=1):
-        return EngineArgs(
-            model=engine_model,
-            tensor_parallel_size=tp,
-            data_parallel_size=dp,
-            # We don't want to actually allocate TPU memory or download heavy
-            # weights during pre-flight. We only want to force the config
-            # parsers to execute their static analysis.
-            enforce_eager=True,
-        ).create_engine_config()
-
     print("\n[1/3] Introspecting Architecture and Pallas Kernels...")
     try:
-        # This function fetches the config.json and runs it through vLLM's
-        # initialization logic. The TorchTPU patches will intercept it. If it sees
-        # an unsupported feature (like AWQ, missing Sliding Window Attention
-        # masking, or ALiBi), it crashes here. TP 1 keeps a TP problem from
-        # reading as an architecture one; TP is checked in step 2.
-        config = engine_config(1)
+        # This function fetches the config.json and runs it through the engine's
+        # initialization logic. If it sees an unsupported feature, it crashes
+        # here. TP 1 keeps a TP problem from reading as an architecture one;
+        # TP is checked in step 2.
+        (num_heads, num_kv_heads, use_mla, quant, max_len, linear_heads,
+         hf_config_dict) = engine_config(1)
         print(
             "  ✅ Architecture is officially supported by the TorchTPU backend."
         )
-        print(f"  ✅ Quantization Config: {config.model_config.quantization}")
-        print("  ✅ Max Model Length Allowed: "
-              f"{config.model_config.max_model_len}")
+        print(f"  ✅ Quantization Config: {quant}")
+        print(f"  ✅ Max Model Length Allowed: {max_len}")
 
     except NotImplementedError as e:
         print(
@@ -544,27 +957,12 @@ def main():
         sys.exit(1)
 
     print("\n[2/3] Planning Tensor / Data Parallelism...")
-    # Read heads the way vLLM does: its getters resolve architecture-specific
-    # names (Falcon's multi_query, n_head_kv, ...) that the raw HF config
-    # does not.
-    model_config = config.model_config
-    num_heads = model_config.model_arch_config.total_num_attention_heads
-    num_kv_heads = model_config.get_total_num_kv_heads()
-    use_mla = bool(model_config.use_mla)
-    # Gated-DeltaNet layers in hybrid models (Qwen3-Next, Qwen3.5) shard
-    # their own heads, which the getters above do not report.
-    text_config = model_config.hf_text_config
-    linear_heads = tuple(
-        getattr(text_config, name, None)
-        for name in ("linear_num_key_heads", "linear_num_value_heads"))
-    if not all(linear_heads):
-        linear_heads = None
     weights_gib = None
     try:
         if args.model.startswith(GCS_SCHEME):
             size = gcs_size
-        elif os.path.isdir(args.model):
-            size = local_weights_bytes(args.model)
+        elif os.path.isdir(engine_model):
+            size = local_weights_bytes(engine_model)
         else:
             # pylint: disable=g-import-not-at-top
             from huggingface_hub import hf_hub_download, model_info
@@ -586,14 +984,16 @@ def main():
         print(f"  ⚠️ WARNING: Could not read the weight size ({e}); the plan "
               "takes the largest head-compatible TP.")
 
-    # vLLM has the last word on the (TP, DP) pairs the plan names: the one to
+    # The engine has the last word on the (TP, DP) pairs the plan names: the one to
     # deploy, and the single replica without data parallelism. A TP it
     # refuses is dropped and the plan is redone, so the next fitting TP is
-    # tried. vLLM does not check TP x DP against the devices; the plan does.
+    # tried.
     rejected, accepted = {}, set()
-    lookup = find_topology_lookup()
+    lookup = find_topology_lookup(args.engine)
     if lookup is None:
-        print("  ⚠️ WARNING: this vllm_torchtpu has no topology lookup, so "
+        plugin_name = ("sglang_tpu"
+                       if args.engine == "sglang" else "vllm_torchtpu")
+        print(f"  ⚠️ WARNING: this {plugin_name} has no topology lookup, so "
               "no TP is ruled out for lack of a device layout.")
     else:
         try:
@@ -601,25 +1001,63 @@ def main():
         except TopologyLookupError as e:
             print(f"  ⚠️ WARNING: the topology lookup failed ({e}), so no TP "
                   "is ruled out for lack of a device layout.")
-    while True:
-        plan = plan_parallelism(args.devices, args.hbm_gb_per_device,
-                                num_heads, num_kv_heads, weights_gib, args.tp,
-                                use_mla, rejected, linear_heads)
-        unchecked = [] if not plan["ok"] else [
-            # (TP, 1) is what an engine that cannot run replicas starts.
-            pair for pair in dict.fromkeys(((plan["tensor_parallel_size"],
-                                             plan["data_parallel_size"]),
-                                            (plan["tensor_parallel_size"], 1)))
-            if pair not in accepted
-        ]
-        if not unchecked:
-            break
-        for tp, dp in unchecked:
-            try:
-                engine_config(tp, dp)
-                accepted.add((tp, dp))
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                rejected[tp] = f"vLLM rejected TP {tp}: {vllm_error(e)}"
+    # The KV check needs the weight size: without it the fit is not checked
+    # either, and the plan says so.
+    rules = load_mesh_rules() if weights_gib is not None and points else None
+    shape = None
+    if weights_gib is not None and points and rules is None:
+        print("  ⚠️ WARNING: oss_meshes.py was not shipped beside this "
+              "script, so the KV cache is not checked at the target points.")
+    elif rules is not None and hf_config_dict:
+        shape = rules.ModelShape.from_hf_config(hf_config_dict)
+
+    def make_plan(use_traffic):
+        return plan_parallelism(args.devices,
+                                args.hbm_gb_per_device,
+                                num_heads,
+                                num_kv_heads,
+                                weights_gib,
+                                args.tp,
+                                use_mla,
+                                rejected,
+                                linear_heads,
+                                points if use_traffic else None,
+                                args.objective,
+                                engine=args.engine)
+
+    kv_cache = {}
+
+    def warnings_at(tp, dp):
+        if (tp, dp) not in kv_cache:
+            kv_cache[tp, dp] = kv_warnings(rules, shape, tp, dp,
+                                           args.hbm_gb_per_device, weights_gib,
+                                           points)
+        return kv_cache[tp, dp]
+
+    plan = validated_plan(
+        make_plan,
+        engine_config,
+        rejected,
+        accepted,
+        (lambda p: bool(halving_kv_short(p, warnings_at)))
+        if shape is not None else None,
+        engine=args.engine,
+    )
+    plan["kv_warnings"] = []
+    if shape is not None and plan["ok"]:
+        plan["kv_warnings"] = warnings_at(plan["tensor_parallel_size"],
+                                          plan["data_parallel_size"])
+    plan["max_num_seqs"], plan["max_num_seqs_other_layouts"] = None, []
+    if shape is not None and plan["ok"]:
+
+        def size(tp, dp):
+            return max_num_seqs_plan(rules, shape, tp, dp,
+                                     args.hbm_gb_per_device, weights_gib,
+                                     points)
+
+        plan["max_num_seqs"] = size(plan["tensor_parallel_size"],
+                                    plan["data_parallel_size"])
+        plan["max_num_seqs_other_layouts"] = max_num_seqs_layouts(plan, size)
     with open(args.plan_json, "w", encoding="utf-8") as f:
         json.dump(plan, f, indent=2)
     print(f"  ℹ️  Heads: {num_heads} attention, {num_kv_heads} KV"
@@ -629,6 +1067,15 @@ def main():
     print(f"  ℹ️  TP {plan['tensor_parallel_size']} x DP "
           f"{plan['data_parallel_size']} ({plan['source']})")
     print(f"  ℹ️  Reason: {plan['reason']}")
+    for entry in plan["kv_warnings"]:
+        print(f"  ⚠️ KV cache short at {entry['isl']}/{entry['osl']} "
+              f"c{entry['concurrency']}: needs {entry['kv_gib_needed']:g} GiB "
+              f"per device, {entry['kv_gib_free']:g} GiB free")
+    if plan["max_num_seqs"]:
+        sized = plan["max_num_seqs"]
+        print(f"  ℹ️  max_num_seqs {sized['value']} per replica (target "
+              f"{sized['target_per_replica']}"
+              f"{', capped by the KV cache' if sized['capped'] else ''})")
     print(f"  ℹ️  Plan written to {args.plan_json}")
 
     print("\n[3/3] Final Verdict")

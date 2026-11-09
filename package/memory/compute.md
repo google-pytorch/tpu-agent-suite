@@ -1,9 +1,6 @@
-This applies only to the TPU agent suite: inside the `tpu-agent` skill or one
-of its agents, or on a task that skill covers -- onboarding, optimizing,
-profiling or benchmarking a model on Cloud TPUs -- even before you load it.
-For anything else -- including kubectl, manifests or other clusters the user
-names -- just do the task; don't run `{{runtime}} compute` to check whether
-this applies.
+For compute, those tasks are onboarding, optimizing, profiling or benchmarking a
+model on Cloud TPUs, not kubectl, manifests or other clusters the user names.
+Don't run `{{runtime}} compute` to check whether this applies.
 
 For that work, every job, server, log and port-forward goes through
 `{{runtime}} compute`. Don't write Kubernetes manifests or run `kubectl`,

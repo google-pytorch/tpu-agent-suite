@@ -33,6 +33,7 @@ files made by `fetch_weights.py` (no weights).
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
 import json
 import os
@@ -1374,6 +1375,12 @@ def main(argv: Sequence[str]) -> None:
         raise app.UsageError("Missing required flag --model.")
 
     print(f"Checking model: {model_id}")
+    cached_dir = model_id
+    if (not os.path.isdir(model_id) and not model_id.startswith(GCS_SCHEME)
+            and os.environ.get("HF_HUB_OFFLINE")):
+        with contextlib.suppress(Exception):
+            cached_dir = huggingface_hub.snapshot_download(
+                repo_id=model_id, local_files_only=True)
 
     if model_id.startswith(GCS_SCHEME):
         print("  Access Check: gs:// checkpoint folder; the Hub is not asked"
@@ -1393,13 +1400,13 @@ def main(argv: Sequence[str]) -> None:
             return
         print(f"  Metadata copied (config, tokenizer, code; no weights) to"
               f" {local_dir}")
-    elif os.path.isdir(model_id):
+    elif os.path.isdir(cached_dir):
         print("  Access Check: Local checkpoint directory verified.")
-        format_compatible, format_msg = check_local_formats(model_id)
+        format_compatible, format_msg = check_local_formats(cached_dir)
         print(f"  Format Check: {format_msg}")
         if not format_compatible:
             handle_failure(f"Format check failed: {format_msg}")
-        local_dir = str(Path(model_id).resolve())
+        local_dir = str(Path(cached_dir).resolve())
     else:
         # Step 1: Check access
         accessible, msg, model_info = check_access(model_id)

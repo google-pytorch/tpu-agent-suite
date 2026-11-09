@@ -21,7 +21,7 @@
 # Identical in every task; keep the copies in sync.
 
 [judge]
-judge = "vertex_ai/gemini-3.5-flash"
+judge = "vertex_ai/gemini-3.8-flash"
 atif-trajectory = "/logs/agent/trajectory.json"
 timeout = 600
 

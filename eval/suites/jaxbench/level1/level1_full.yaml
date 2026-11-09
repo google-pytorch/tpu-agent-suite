@@ -21,7 +21,7 @@ suite_name: jaxbench_level_1_full
 # 1. ENVIRONMENT (Sandbox & Agent Suite Requirements)
 # ==============================================================================
 environment:
-  base_image: python:3.12-slim
+  base_image: us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host@sha256:7ff58a98ae2655dbcf25fa0aeb3e8081281bfb3061f97581a98951e98371fff4
   apt_packages:
     - gnupg
     - procps
@@ -39,6 +39,13 @@ environment:
 # 2. EVALUATION (Benchmark Scenarios & Grading)
 # ==============================================================================
 evaluation:
+  script_verifiers:
+    - name: "invoked_subagent"
+      script: "eval/verifiers/common/invoked_subagent.py"
+      verifier_params:
+        agents:
+          - "tpu-kernel-development"
+
   cases:
     - name: "1p-flash-attention"
       prompt_file: "assets/prompts/accelerate_kernel.md"

@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from eval.utils import find_repo_root
+from eval.utils import RELEASE_MANIFEST, find_repo_root, package_identity
+from framework.compute.drivers import external as external_drivers
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ def compute_staging_digest(
     harness: str,
     compute_answers: dict[str, Any],
     skills: list[str] | None = None,
+    manifest: str = RELEASE_MANIFEST,
 ) -> str:
     """Generate fast multi-factor cache digest.
 
@@ -83,11 +85,29 @@ def compute_staging_digest(
       - Target harness
       - Resolved compute answers
       - The skill subset, when one was chosen
+      - The package manifest built
     """
     commit_hash = get_git_commit_hash(repo_root)
     answers_str = json.dumps(compute_answers, sort_keys=True)
     subset = ",".join(skills) if skills else "ALL"
-    raw_key = f"{repo_root}:{commit_hash}:{harness}:{answers_str}:{subset}"
+    ext_sources, _ = external_drivers.find_sources()
+    ext_sig_parts: list[str] = []
+    for src in ext_sources:
+        if src.is_file():
+            ext_sig_parts.append(
+                f"{src.name}:{hashlib.sha256(src.read_bytes()).hexdigest()[:12]}"
+            )
+        elif src.is_dir():
+            dir_hasher = hashlib.sha256()
+            for child in sorted(src.rglob("*.py")):
+                if child.is_file():
+                    dir_hasher.update(
+                        child.relative_to(src).as_posix().encode("utf-8"))
+                    dir_hasher.update(child.read_bytes())
+            ext_sig_parts.append(f"{src.name}:{dir_hasher.hexdigest()[:12]}")
+    ext_sig = ",".join(ext_sig_parts)
+    raw_key = (f"{repo_root}:{commit_hash}:{harness}:{answers_str}:{subset}:"
+               f"{manifest}:{ext_sig}")
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -98,14 +118,14 @@ def stage_composite_package(
     skills: list[str] | None = None,
     compute_answers: dict[str, Any] | None = None,
     repo_root: Path | None = None,
-    pkg_name: str = "tpu-agent-suite",
-    pkg_version: str = "0.1.0",
+    manifest: str = RELEASE_MANIFEST,
 ) -> StagingResult:
     """Compile and install the composite package distribution into a staged workspace.
 
     Executes a single `compiler.py translate` pass and a single `installer.py install` pass
-    of the whole package, or of `skills` when a debugging run chose a subset. A
-    control arm installs nothing, so it stages nothing.
+    of the whole package `manifest` names, or of `skills` when a debugging run
+    chose a subset. The installed package's name and version are read from
+    `manifest`. A control arm installs nothing, so it stages nothing.
     """
     repo = repo_root or find_repo_root()
     compute = compute_answers or {"backend": "local"}
@@ -120,12 +140,15 @@ def stage_composite_package(
             is_empty=True,
         )
 
+    pkg_name, pkg_version = package_identity(manifest, repo)
+
     # Compute cache digest
     digest = compute_staging_digest(
         repo_root=repo,
         harness=harness,
         compute_answers=compute,
         skills=skills,
+        manifest=manifest,
     )
     user = os.environ.get("USER", "user")
     staged_root = Path(tempfile.gettempdir()) / f"eval_staged_{user}_{digest}"
@@ -193,12 +216,15 @@ def stage_composite_package(
         harness,
         "--output",
         str(staged_dist),
+        "--manifest",
+        manifest,
     ]
     if skills:
         translate_cmd.extend(["--skills", ",".join(skills)])
         print(f"==> compiling skills {', '.join(skills)} for '{harness}'...")
     else:
-        print(f"==> compiling the whole package for '{harness}'...")
+        print(
+            f"==> compiling the whole package ({manifest}) for '{harness}'...")
     subprocess.run(translate_cmd, cwd=repo, check=True)
 
     # 2. SINGLE Installation Pass, then the `default` profile from the answers
@@ -212,18 +238,41 @@ def stage_composite_package(
         try:
             q_data = json.loads(questions_file.read_text(encoding="utf-8"))
             backend = flat_answers.get("backend")
-            valid_q_names = {
-                q["name"]
-                for q in q_data.get("questions", [])
-                if str(q.get("path") or q["name"]).startswith("compute.")
-                and backend in q.get("when", {}).get("backend", [backend])
-            }
-            flat_answers = {
-                k: v
-                for k, v in flat_answers.items() if k in valid_q_names
-            }
+            backend_choices = set()
+            for q in q_data.get("questions", []):
+                if q.get("name") == "backend":
+                    backend_choices.update(q.get("choices", []))
+            if backend in backend_choices:
+                valid_q_names = {
+                    q["name"]
+                    for q in q_data.get("questions", [])
+                    if str(q.get("path") or q["name"]).startswith("compute.")
+                    and backend in q.get("when", {}).get("backend", [backend])
+                }
+                flat_answers = {
+                    k: v
+                    for k, v in flat_answers.items() if k in valid_q_names
+                }
         except Exception:
             pass
+
+    ext_sources, _ = external_drivers.find_sources()
+    bundled_drivers_dir = staged_dist / "framework" / "compute" / "drivers"
+    unbundled_sources = [
+        src for src in ext_sources
+        if not (bundled_drivers_dir / src.name).exists()
+    ]
+    if unbundled_sources:
+        staged_drivers = staged_root / "drivers"
+        staged_drivers.mkdir(parents=True, exist_ok=True)
+        for src in unbundled_sources:
+            dst = staged_drivers / src.name
+            if src.is_dir():
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
 
     answers_file = staged_root / "answers.json"
     answers_file.write_text(json.dumps(flat_answers, indent=2),
@@ -232,7 +281,11 @@ def stage_composite_package(
 
     print(f"==> installing staged package to {staged_workspace}...")
     staged_workspace.parent.mkdir(parents=True, exist_ok=True)
-    installer_env = {**os.environ, "TPU_AGENT_SUITE_HOME": str(staged_root)}
+    installer_env = {
+        k: v
+        for k, v in os.environ.items() if k != external_drivers.ENV_VAR
+    }
+    installer_env["TPU_AGENT_SUITE_HOME"] = str(staged_root)
     subprocess.run(
         [
             sys.executable,

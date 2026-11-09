@@ -88,13 +88,18 @@ resolved it:
 - **Use torch_tpu.** Do NOT use torch_xla / pytorch_xla, and do NOT use the
   tpu-inference repo. Both are older paths and are out of scope. If you find
   yourself importing either, stop and reconsider the approach.
-- **Do not reuse existing work.** Write everything this task needs yourself.
-  - You MAY read: the Hugging Face model card and config, the torch_tpu source
-    inside the provided container, Tokamax, and public vLLM/TPU documentation.
-  - You MUST NOT read or copy onboarding code, scripts, notebooks, configs, or
-    output artifacts that already exist on any VM, disk, bucket, or container
-    you did not create during this task. Reading such material is a FAIL, even
-    if you do not copy from it.
+- **Do not reuse existing work.** Write everything this task needs yourself,
+  except for packaged patches from the `vllm_patches` directory (use a matching
+  patch if present; the directory or a patch for this model may not exist).
+  - You MAY read and use: the Hugging Face model card and config, the
+    torch_tpu source inside the provided container, Tokamax, public vLLM/TPU
+    documentation, and packaged patches from the `vllm_patches` directory (if
+    available).
+  - Except for packaged patches from the `vllm_patches` directory, you MUST NOT
+    read or copy onboarding code, scripts, notebooks, configs, or output
+    artifacts that already exist on any VM, disk, bucket, or container you did
+    not create during this task. Reading such material is a FAIL, even if you
+    do not copy from it.
   - If you encounter pre-existing work, stop reading it and say so in your
     report.
 - **Do not contaminate pre-existing containers.** Create your own. Do not

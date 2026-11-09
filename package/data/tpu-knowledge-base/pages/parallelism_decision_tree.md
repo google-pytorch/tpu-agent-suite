@@ -43,7 +43,7 @@ TPU hardware topologies consist of two distinct network tiers:
 - **Data Center Network (DCN):** Standard datacenter Ethernet, about 100 Gbps (12.5e9 B/s) egress per chip on v6e and TPU7x, and lower on older generations, used only between slices (`index.py get concept-dcn`).
 
 ### Scenario A: Model Fits in Single-Host Memory (<= 8 Devices)
-If your model and optimizer state fit within the combined HBM of a single host (e.g. 256 GB on v6e-8 with 8 chips, or 768 GiB on TPU7x-8, which is 4 chips × 192 GiB exposed as 8 devices):
+If your model and optimizer state fit within the combined HBM of a single host (e.g. 256 GiB on v6e-8 with 8 chips, or 768 GiB on TPU7x-8, which is 4 chips × 192 GiB exposed as 8 devices):
 - **Model Fits on 1 Device:** Use standard PyTorch **DDP**. DDP only communicates gradients during the backward pass via asynchronous all-reduce, achieving near 100% compute scaling.
 - **Model Exceeds 1 Device:** Use **Tensor Parallelism (TP)** across the 8 local devices. Because TP requires all-reduce on every attention head and MLP layer, it must run exclusively over the ultra-fast ICI mesh.
 

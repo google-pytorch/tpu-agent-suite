@@ -1,0 +1,42 @@
+{
+ "cells": [
+  {
+   "isl": 8192,
+   "osl": 1024,
+   "concurrency": 128,
+   "replicates": [
+    {
+     "output_tokens_per_s": 3832.8,
+     "ttft_p50_ms": 1353.9,
+     "itl_p50_ms": 20.79,
+     "failed": 0
+    },
+    {
+     "output_tokens_per_s": 3837.5,
+     "ttft_p50_ms": 1360.8,
+     "itl_p50_ms": 20.79,
+     "failed": 0
+    }
+   ]
+  },
+  {
+   "isl": 1024,
+   "osl": 1024,
+   "concurrency": 32,
+   "replicates": [
+    {
+     "output_tokens_per_s": 2272.7,
+     "ttft_p50_ms": 312.8,
+     "itl_p50_ms": 13.48,
+     "failed": 0
+    },
+    {
+     "output_tokens_per_s": 2262.4,
+     "ttft_p50_ms": 236.9,
+     "itl_p50_ms": 13.46,
+     "failed": 0
+    }
+   ]
+  }
+ ]
+}

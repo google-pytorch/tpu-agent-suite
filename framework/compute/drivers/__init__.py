@@ -17,6 +17,7 @@ import importlib
 import pathlib
 import pkgutil
 
+from . import external
 from .base import ComputeDriver, SetupFields, StagedFile
 from .contracts import (AsynchronousExecutionResult, HardwareProfile,
                         PreflightCheck, PreflightReport,
@@ -25,7 +26,6 @@ from .errors import ClusterAccessDenied, ComputeConfigError, NotConfigured
 from .gce_tpu_vm import GceTpuVmDriver
 from .gke_job import GkeJobDriver
 from .gke_pod import GkePodDriver
-from .gke_xpk import GkeXpkDriver
 from .jobs import JobRecord, jobs_dir
 from .local import LocalDriver
 from .registry import (DISCOVERY_ERRORS, DRIVER_REGISTRY,
@@ -37,8 +37,9 @@ from .registry import (DISCOVERY_ERRORS, DRIVER_REGISTRY,
 from .setup_fields import validate_field_format
 from .shell import RemoteShellDriver, require_file
 
-_INTERNAL_MODULES = ("base", "contracts", "errors", "gcs_staging", "jobs",
-                     "probe", "registry", "setup_fields", "shell", "__init__")
+_INTERNAL_MODULES = ("base", "contracts", "errors", "external", "gcs_staging",
+                     "jobs", "kubectl", "probe", "registry", "setup_fields",
+                     "shell")
 
 
 def _auto_discover_drivers() -> None:
@@ -61,3 +62,6 @@ def _auto_discover_drivers() -> None:
 
 
 _auto_discover_drivers()
+# After the built-in drivers, so that an external driver cannot take a
+# built-in backend name.
+external.load_external_drivers()

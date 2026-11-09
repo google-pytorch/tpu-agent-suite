@@ -1,6 +1,6 @@
 # Unified Compute Framework
 
-The Unified Compute Framework provides a standardized compute interface for the agent framework, centralizing workload execution and hardware inspection across diverse compute types (local host, remote Cloud TPU VMs, GKE pods, GKE multi-node XPK clusters, and other internal backends) so that packages never need to re-implement compute functionality.
+The Unified Compute Framework provides a standardized compute interface for the agent framework, centralizing workload execution and hardware inspection across diverse compute types (local host, remote Cloud TPU VMs, GKE pods, GKE Jobs, and other internal backends) so that packages never need to re-implement compute functionality.
 
 It provides agents and developers with a unified command interface (`{{runtime}} compute ...`) for:
 - Hardware topology & device contention inspection (`inspect`)
@@ -14,15 +14,63 @@ It provides agents and developers with a unified command interface (`{{runtime}}
 
 ## Supported Backends
 
-The framework ships with 5 built-in compute drivers:
+The framework ships with 4 built-in compute drivers:
 
-| Backend | Description | Required Parameters (`environment.json` / CLI) | Optional Backend Parameters |
-|---|---|---|---|
+| Backend | Description | Required Parameters (`environment.json` / CLI) | Optional Parameters |
+| :--- | :--- | :--- | :--- |
 | `local` | Direct execution on the local host machine. | None | `python_interpreter` (`--interpreter`, default `sys.executable`) |
 | `gce_tpu_vm` | Remote Cloud TPU VM via GCE API / SSH. | `tpu_name` (`--tpu-name`), `zone` (`--zone`), `project` (`--project`) | `python_interpreter` (`--interpreter`, default `python3`) |
-| `gke_pod` | Kubernetes pod on a GKE cluster running TPU workloads via `kubectl exec`. | `pod` (`--pod`) | `namespace` (`--namespace`, default `"default"`), `container` (`--container`), `kube_context` (`--kube-context`, as for `gke_job`), `python_interpreter` (`--interpreter`, default `python3`) |
-| `gke_job` | Single-host TPU Job created on GKE via `kubectl` and optionally scheduled via Kueue. | `image` (`--image`), `tpu_accelerator` (`--tpu-accelerator`), `tpu_topology` (`--tpu-topology`) | `staging_bucket` (`--staging-bucket`), `staging_service_account` (`--staging-service-account`) or `staging_service_account_key` (`--staging-service-account-key`): the service account staging acts as (see below), `namespace` (`--namespace`, default `"default"`; with `queue`, the namespace the LocalQueue is in), `tpu_chips` (`--tpu-chips`), `queue` (`--queue`), `priority` (`--priority`, unset leaves the Job unlabelled), `declared_duration_minutes` (`--declared-duration-minutes`), `kubeconfig` (`--kubeconfig`), `kube_context` (`--kube-context`: passed as `--context` on every kubectl call, so `kubectl config use-context` elsewhere does not move the profile to another cluster; `compute setup plan` suggests the current context, and `setup verify` warns when the current context differs and fails when the kubeconfig lacks it; unset uses whichever context is current), `shm_size_gb` (`--shm-size-gb`, default 128: the memory-backed `/dev/shm` every pod gets, since the runtime's 64 MB default isn't enough for vLLM; its cap is in `TPU_AGENT_SUITE_SHM_LIMIT_BYTES`, since statvfs in the pod can report the node's whole memory. Without `hf_cache_pvc` it also holds every pod's model download, caches and temporary files: `HF_HUB_CACHE`, `VLLM_CACHE_ROOT`, `XDG_CACHE_HOME` and `TORCHINDUCTOR_CACHE_DIR` default to `/dev/shm/cache` and `TMPDIR` to `/dev/shm`, since a TPU node's own disk can hold less than one model. They are set in the container, only where the image and recipe have not, so an image's own ENV (or `HF_HOME`, `XDG_CACHE_HOME`) still wins. `--shm-size-gb` on `submit` overrides it for one Job), `job_name_prefix` (`--job-name-prefix`, added to the name of every Job, e.g. `agent`), `colocate_with` (`--colocate-with JOB_ID`: run on that running Job's node without chips, since it holds them; for a client of a server job, e.g. a benchmark, which then reaches it at `http://<job_id>:<port>` without `exec` or a port-forward: submitting the client gives the server a headless Service of its name, owned by the server's Job, if it has none yet), `colocate_requests` (`--colocate-requests NAME=QTY,...`, required with `colocate_with`: the CPU and memory requested instead of chips, sized to the client, because Kueue admits no pod that requests nothing), `cpu_requests` (`--cpu-requests NAME=QTY,...`: run on a CPU node and book no TPU node; the Job requests this CPU and memory instead of chips and has no TPU node selector or toleration, so the TPU nodes' taint keeps it off them and, on a Kueue cluster, the flavor covering CPU and memory places it. For work that needs the task image but not a chip; not with `colocate_with`. The Job gets the profile's TPU generation, as `probe` names it (`v6e`, `tpu7x`, ...), in `TPU_AGENT_SUITE_CHIPLESS_TPU`, and a `run` that exits 75 or never starts is run again once on a TPU node, with `details.cpu_fallback` saying why), `hf_cache_pvc` (`--hf-cache-pvc`: a ReadWriteMany PersistentVolumeClaim a cluster admin made in the namespace, mounted at `/hf-cache` in every pod with `HF_HUB_CACHE` pointing at it and `VLLM_CACHE_ROOT` and torch_tpu's tier-3 compilation cache roots under `/hf-cache/compile-cache/<accelerator>-<topology>/<image key>/`, so model weights download once and compiled programs are kept across Jobs; every Job in the namespace can write what later pods load, and models are never pruned: see `docs/install.md`), `compile_cache_max_age_days` (`--compile-cache-max-age-days`, default 14: with `hf_cache_pvc`, each pod removes in the background the compile-cache image folders no pod has used in this many days, never its own; 0 keeps them. A pod that starts with the volume over 90% full keeps its compile caches in `/dev/shm`), `python_interpreter` (`--interpreter`, default `python3`) |
-| `gke_xpk` | Multi-node TPU workloads on GKE managed via `xpk`. | `cluster_name` (`--cluster-name`), `zone` (`--zone`), `project` (`--project`) | `gcs_bucket` (`--gcs-bucket`), `python_interpreter` (`--interpreter`, default `python3`) |
+| `gke_pod` | Exec into an existing Kubernetes pod on GKE via `kubectl exec`. | `pod` (`--pod`) | `namespace` (`--namespace`, default `"default"`), `container` (`--container`), `kube_context` (`--kube-context`), `python_interpreter` (`--interpreter`, default `python3`) |
+| `gke_job` | Dispatch a TPU Job onto GKE via `kubectl`, optionally scheduled via Kueue (see [Multi-host execution](#multi-host-execution-on-gke_job)). | `image` (`--image`), `tpu_accelerator` (`--tpu-accelerator`), `tpu_topology` (`--tpu-topology`) | Cluster, Kueue, staging, cache, and placement settings — see [`gke_job` optional parameters](#gke_job-optional-parameters) |
+
+### Multi-host execution on `gke_job`
+
+- **Indexed Job layout**: A topology larger than one node (e.g. `tpu7x` `2x2x2` or `v6e` `4x4`) runs as a Kubernetes Indexed Job with one pod per node behind a headless Service of the Job's name. Every pod runs the same script and inputs.
+- **Worker environment**: Each pod has `TPU_NUM_HOSTS`, `TPU_WORKER_ID` / `TPU_NODE_ID` (`0` is the leader), `TPU_CHIPS_PER_HOST`, `TPU_HEAD_HOST`, and `TPU_WORKER_HOSTNAMES` set, and `MEGASCALE_*` blanked.
+- **Chips per node**: On `v5e` and `v6e`, chips per pod come from the cluster's nodes automatically when `tpu_chips` is unset, since a `2x4` topology can be either one 8-chip node or two 4-chip nodes.
+- **Status, logs & outputs**: `status` reports `RUNNING` once every host is running and `FAILED` (naming the host) when any host fails. `logs`, `wait --until log:`, and `port-forward` read from the leader (host `0`), and only the leader returns `--output` files.
+
+### `gke_job` optional parameters
+
+#### Cluster, Kueue & Naming
+
+| Parameter (`environment.json`) | CLI Flag | Default | Behavior |
+| :--- | :--- | :--- | :--- |
+| `namespace` | `--namespace` | `"default"` | Kubernetes namespace to dispatch into. When `queue` is set, this must be the namespace containing the Kueue `LocalQueue`. |
+| `kubeconfig` | `--kubeconfig` | ambient | Path to a kubeconfig file to use instead of the ambient `$KUBECONFIG` / `~/.kube/config`. |
+| `kube_context` | `--kube-context` | current context | Passed as `--context` on every `kubectl` call so `kubectl config use-context` elsewhere does not move the profile to another cluster. `compute setup plan` suggests the current context; `setup verify` warns when the current context differs and fails when the kubeconfig lacks it. |
+| `tpu_chips` | `--tpu-chips` | derived from topology (`4`) | Override chips requested per pod. |
+| `queue` | `--queue` | unset | Kueue `LocalQueue` name to admit the Job through (omit on clusters without Kueue). |
+| `priority` | `--priority` | unset | Kueue workload priority class; leaving this unset leaves the Job unlabelled so it takes the cluster default. |
+| `declared_duration_minutes` | `--declared-duration-minutes` | unset | Declared runtime in minutes for Kueue suspension enforcement. |
+| `job_name_prefix` | `--job-name-prefix` | unset | Prefix (1–30 lowercase letters, digits, or `-`) added to every generated Job name, e.g. `agent`. |
+| `mldiagnostics` | `--mldiagnostics` | `false` | Label the Job for GKE managed ML diagnostics so the workload appears in the Cloud Console Diagnostics view. |
+| `python_interpreter` | `--interpreter` | `python3` | Python interpreter inside the container. |
+
+#### File Staging & Credentials
+
+| Parameter (`environment.json`) | CLI Flag | Default | Behavior |
+| :--- | :--- | :--- | :--- |
+| `staging_bucket` | `--staging-bucket` | unset | GCS bucket URI (`gs://bucket` or `gs://bucket/folder`) used to transfer large inputs (>900 KiB) and outputs (>1 MiB); see [Synchronous Code Execution (`run`)](#3-synchronous-code-execution-run) and [`docs/install.md`](../../docs/install.md#large-files-on-gke_job-the-staging-bucket). |
+| `pod_service_account` | `--pod-service-account` | unset | Kubernetes service account for the Job's pod. On clusters with Workload Identity, the pod transfers staged files using its own token without signed URLs. |
+| `staging_service_account` | `--staging-service-account` | unset | Google service account impersonated (using your personal login, with no key file) solely to sign GCS staging URLs; `kubectl` keeps your own identity. |
+| `staging_service_account_key` | `--staging-service-account-key` | unset | Key file for the staging service account when impersonation is unavailable (e.g. in CI), without setting `GOOGLE_APPLICATION_CREDENTIALS` globally. |
+
+#### Shared Memory (`/dev/shm`) & Model / Compile Cache
+
+| Parameter (`environment.json`) | CLI Flag | Default | Behavior |
+| :--- | :--- | :--- | :--- |
+| `shm_size_gb` | `--shm-size-gb` | `128` | Size in GiB of the memory-backed `/dev/shm` mounted in every pod (since container runtimes default to 64 MiB, which is too small for vLLM). Recorded in `TPU_AGENT_SUITE_SHM_LIMIT_BYTES` because `statvfs` inside a pod can report total node memory. Without `hf_cache_pvc`, `/dev/shm` also backs model downloads, caches, and temp files (`HF_HUB_CACHE`, `VLLM_CACHE_ROOT`, `XDG_CACHE_HOME`, and `TORCHINDUCTOR_CACHE_DIR` default to `/dev/shm/cache` and `TMPDIR` to `/dev/shm`, only when unset by the image or recipe). Pass `--shm-size-gb` on `submit` to override for a single Job. |
+| `hf_cache_pvc` | `--hf-cache-pvc` | unset | Name of an admin-created `ReadWriteMany` PersistentVolumeClaim in the namespace, mounted at `/hf-cache` in every pod with `HF_HUB_CACHE=/hf-cache` and `VLLM_CACHE_ROOT` + `torch_tpu` tier-3 compilation caches under `/hf-cache/compile-cache/<accelerator>-<topology>/<image key>/`. Model weights download once and compiled programs persist across Jobs (models are never auto-pruned; see [`docs/install.md`](../../docs/install.md#shared-model-cache-on-gke_job-hf_cache_pvc)). |
+| `compile_cache_max_age_days` | `--compile-cache-max-age-days` | `14` | With `hf_cache_pvc`, each pod prunes in the background any compile-cache image folders untouched for this many days (never its own; `0` disables pruning). If the PVC is over 90% full at pod start, compile caches fall back to `/dev/shm`. |
+
+#### Pod Placement (Colocated Clients & CPU-Only Jobs)
+
+| Parameter (`environment.json`) | CLI Flag | Default | Behavior |
+| :--- | :--- | :--- | :--- |
+| `colocate_with` | `--colocate-with JOB_ID` | unset | Schedule onto the same node as running Job `JOB_ID` without requesting TPU chips (since `JOB_ID` holds them). Used for client workloads (e.g. a benchmark hitting a running server at `http://<job_id>:<port>` without `kubectl exec` or port-forwarding; creates an owner-referenced headless Service for the server Job if needed). Requires `colocate_requests`. |
+| `colocate_requests` | `--colocate-requests NAME=QTY,...` | unset (required with `colocate_with`) | CPU and memory requests (e.g. `cpu=2,memory=8Gi`) used in place of TPU chips for a colocated client pod, since Kueue rejects pods with zero resource requests. |
+| `cpu_requests` | `--cpu-requests NAME=QTY,...` | unset | Run on a CPU node without booking a TPU node (mutually exclusive with `colocate_with`). Requests the specified CPU/memory with no TPU node selector or toleration so TPU taints keep it off TPU nodes. Exposes the profile's TPU generation (`v6e`, `tpu7x`, ...) in `TPU_AGENT_SUITE_CHIPLESS_TPU`; if a `run` exits `75` or never starts, it automatically retries once on a TPU node (recording why in `details.cpu_fallback`). |
 
 ---
 
@@ -39,7 +87,7 @@ These flags are supported across all `compute` actions:
 - `--interpreter <path>`: Optional path to Python interpreter (e.g. `/opt/conda/bin/python`).
 - `--json`: Format output as JSON (supported by every subcommand for structured agent parsing).
 
-Backend-specific flags registered by drivers (e.g. `--tpu-name`, `--zone`, `--project`, `--pod`, `--cluster-name`) can also be passed directly on the CLI and outrank configured values.
+Backend-specific flags registered by drivers (e.g. `--tpu-name`, `--zone`, `--project`, `--pod`, `--namespace`) can also be passed directly on the CLI and outrank configured values.
 
 ### Running by hand
 
@@ -96,7 +144,6 @@ problem, the `fix` that resolves it.
 | `gce_tpu_vm` | `gcloud` and an active account; the TPU VM exists and is `READY`. |
 | `gke_pod` | `kubectl`, and `gke-gcloud-auth-plugin` when the kubeconfig calls it; the cluster answers; the gcloud account and `$GOOGLE_APPLICATION_CREDENTIALS` (below); the pod is `Running`. With `kube_context`: the kubeconfig has that context (a warning when kubectl's current context is another one). |
 | `gke_job` | `kubectl`, and `gke-gcloud-auth-plugin` when the kubeconfig calls it; the cluster answers; the gcloud account and `$GOOGLE_APPLICATION_CREDENTIALS` (below); `image`, `tpu_accelerator` and `tpu_topology` are set; an Artifact Registry `image` exists (a warning when it cannot be checked), and, when it is in another project than the cluster's, whether the nodes' service account can read it (a warning unless the repository's policy shows it); the namespace exists and this account may create Jobs in it. With `kube_context`: the kubeconfig has that context (a warning when kubectl's current context is another one). With `queue`: the Kueue `LocalQueue` exists, and with `priority`, the `WorkloadPriorityClass`. With `staging_bucket`: `google-cloud-storage` imports, the staging credential (or else Application Default Credentials) exists and can sign a URL (a failure if not, unless `pod_service_account` is set: the pod cannot reach the bucket, so the profile is not READY), and the bucket, or the folder in it, can be listed. With `hf_cache_pvc`: the claim exists and is ReadWriteMany, and is Bound (a warning while Pending under a storage class that binds on first use; a failure otherwise). |
-| `gke_xpk` | `xpk`, `gcloud`, `kubectl`, `gke-gcloud-auth-plugin` and an active account; the cluster exists, is `RUNNING` and is where `zone` says; with `gcs_bucket`, the bucket exists. |
 
 A check the account is not allowed to make (reading a cluster-scoped object,
 say) is a warning, not a failure.
@@ -202,7 +249,7 @@ again. `config show` reports each profile's `setup_state`: `NOT_CONFIGURED`
     `runtime.py config --package <pkg> ...` commands (nothing chained or
     redirected; the runtime may be named by its full path or `~/...`, as the
     guide does), so setup works after a skill is active (`_is_setup_command`
-    in runtime.py).
+    in `hooks/actions.py`).
 - **`environment.json` changes**: each check saves a hash of the profile it
   checked in `{{runs}}/<run_id>/compute-preflight.json`. The next compute
   command (other than `preflight`) whose profile hashes differently checks the
@@ -384,12 +431,6 @@ file, or writes one the caller needs, declares them:
   and `eviction_reason`, and kept so `job logs` still works. If the Workloads
   cannot be read -- no Kueue CRD, no right to list
   them -- the Job stays `PENDING` and the wait runs its course.
-- On `gke_xpk`, `--input`/`--output` are refused with
-  `UNSUPPORTED_OPERATION`: the recipe creates the workload itself, so it is
-  the only thing that can stage files into it.
-- On `gke_xpk`, synchronous `run` is not supported and exits with
-  `UNSUPPORTED_OPERATION`: cluster workloads are multi-host and go through
-  asynchronous `submit`.
 
 > **_NOTE:_**
 > **The `--` Delimiter**: Always separate `runtime` flags from the script's arguments with `--`. Any arguments following `--` are forwarded verbatim to the target script.
@@ -438,9 +479,8 @@ Establishes a port forward from a local port to a remote workload (Cloud TPU VM,
 - `--background` (`-b`): Runs the port forward in the background and prints its PID (`Port forward established in background (PID: <pid>)`), allowing automated agents and scripts to proceed without blocking. It returns once something accepts a connection on the local port, not after a fixed interval: a tunnel that exits, or that never binds within 30s, is reported as `PORT_FORWARD_FAILED` with the child's output quoted and its log path, rather than handing back a pid for a forward nothing is listening behind. The background process is not tracked after that -- nothing cancels it at session end, so stop it by pid when you are done with it.
 - On `gce_tpu_vm`: Establishes an SSH tunnel via `gcloud compute tpus tpu-vm ssh ... -N -L <local>:localhost:<remote>`.
 - On `gke_pod`: Establishes a port-forward to the target pod via `kubectl port-forward pod/<pod> <local>:<remote>`.
-- On `gke_job`: Automatically discovers the job's running pod and forwards to it, falling back to `job/<job_id>` when no pod is up yet. `--job-id` is required.
+- On `gke_job`: Automatically discovers the job's running pod (of a multi-host job, the leader's, host 0) and forwards to it, falling back to `job/<job_id>` when no pod is up yet. `--job-id` is required.
 - On `local`: A no-op -- the workload runs on this host and is already reachable, so nothing is tunnelled. A mapping to a *different* local port is refused with `UNSUPPORTED_OPERATION`, since nothing would be listening on it.
-- On `gke_xpk`: Not supported (`UNSUPPORTED_OPERATION`); the recipe owns the workload, so there is no single pod here to address.
 
 ### 6. Job Lifecycle Management (`job`)
 
@@ -569,9 +609,9 @@ Pass `--run-id` instead.
 
 Reaping only ever touches jobs the runtime submitted: it works from the runtime's own
 job records, and deletes cluster workloads by their recorded name. Jobs
-tracked by pid (`local`, the `gke_xpk` submission step, and the remote shell
-backends) record the process's start time too, and a pid now held by a
-different process is neither reported as running nor signalled.
+tracked by pid (`local` and the remote shell backends) record the process's
+start time too, and a pid now held by a different process is neither reported
+as running nor signalled.
 
 ---
 
@@ -585,7 +625,7 @@ different process is neither reported as running nor signalled.
    Rather than centralizing validation in `config.py`, each driver implements `from_params(params: dict[str, Any])`. The driver validates its own required parameters (e.g. `gce_tpu_vm` requires `tpu_name`, `zone`, `project`; `gke_pod` requires `pod`; `gke_job` validates `image`, `tpu_accelerator`, `tpu_topology` at dispatch) and raises `ComputeConfigError` with clear error codes.
 
 3. **CLI Inversion of Control (`register_cli_args`)**:
-   `runtime.py` does not hardcode backend-specific flags. Instead, each driver implements `register_cli_args(parser)` using `cls.add_cli_arg(parser, "--flag", ...)`.
+   `cli_parser.py` does not hardcode backend-specific flags. Instead, each driver implements `register_cli_args(parser)` using `cls.add_cli_arg(parser, "--flag", ...)`.
    - Flags are safely deduplicated if shared across backends (e.g. `--zone` and `--project`).
    - The framework automatically tracks registered options into a **positive whitelist** (`REGISTERED_DRIVER_CLI_FLAGS`), so any newly introduced driver argument automatically passes cleanly through to `from_params()`.
 
@@ -593,7 +633,7 @@ different process is neither reported as running nor signalled.
 
 ## Driver Contract (Extending Compute)
 
-To add a new compute driver (internal or external), create a module in `framework/compute/drivers/<backend>.py` implementing `ComputeDriver`. For profiles to use it, also add the backend to the package schema's `backend` enum and declare its `SETUP_FIELDS` (see [Valid backends](#valid-backends)):
+To add a new compute driver to the package, create a module in `framework/compute/drivers/<backend>.py` implementing `ComputeDriver`. A large driver can be a package instead (`drivers/<backend>/`), with an `__init__.py` that imports the registered class; see `gke_job/`. For profiles to use it, also add the backend to the package schema's `backend` enum and declare its `SETUP_FIELDS` (see [Valid backends](#valid-backends)). To add a driver without changing the package, see [External drivers](#external-drivers).
 
 ```python
 import argparse
@@ -735,13 +775,62 @@ the `INVALID_BACKEND` message. A hydrated internal driver whose dependencies are
 missing is reported as a load failure with its import error, rather than
 appearing as an unknown backend.
 
+### External drivers
+
+An **external driver** lets you add a custom compute backend — for example, for an internal job scheduler or custom cluster wrapper — without modifying this repository or the installed package. Because external drivers live outside the package directory, they stay intact when you upgrade or reinstall the suite.
+
+#### Where external drivers are loaded from
+
+After loading the built-in backends, the runtime searches two locations in order:
+
+1. **`~/.tpu-agent-suite/drivers/`** — Place a driver here to make it available automatically in every session. Even processes that do not load your shell profile (such as Claude Code hooks) will find it here.
+2. **`TPU_AGENT_SUITE_COMPUTE_DRIVERS`** — A `:`-separated list of extra paths. Each entry can point to a single `.py` file, a Python package directory (containing `__init__.py`), or a folder of drivers.
+
+When scanning a folder of drivers, the runtime loads every `*.py` file and every subdirectory containing an `__init__.py`, skipping anything whose name starts with `_` or `.`. Put helper modules inside a driver package or prefix their filenames with `_` so the runtime does not treat them as standalone drivers.
+
+#### Writing an external driver
+
+An external driver implements the same `ComputeDriver` interface as a built-in driver and registers itself with `@registry.register_driver("<name>")`:
+
+```python
+# ~/.tpu-agent-suite/drivers/my_backend.py
+from framework.compute.drivers import base, registry
+
+
+@registry.register_driver("my_backend")
+class MyBackendDriver(base.ComputeDriver):
+    SETUP_FIELDS = base.SetupFields(required=("target",))
+    ...  # implement the ComputeDriver methods shown above
+```
+
+Once loaded, `my_backend` works anywhere a built-in backend works: `--backend my_backend`, `compute setup plan --backend my_backend`, and profiles in `environment.json`.
+
+- **Interactive setup & validation**: `compute setup` automatically accepts your backend name and any fields listed in `SETUP_FIELDS`. Because custom fields do not have entries in `questions.json` or fixed types in the package schema, setup asks a generic prompt (`Value for 'target'`) and leaves type validation up to your driver's `from_params()` method.
+
+#### Troubleshooting load errors
+
+A broken external driver never crashes the runtime or disables other backends. Instead, the failure is recorded in `DISCOVERY_ERRORS` under the file or directory path and shown if someone tries to use that backend (see [Discovery failures](#discovery-failures)). A driver fails to load when:
+
+- Importing it raises an exception (any partial registration from that source is rolled back).
+- It finishes importing without calling `registry.register_driver(...)`.
+- It tries to register a backend name that is already taken (for example `gke_job`) — the existing driver keeps the name.
+- Two external drivers have the same filename or package directory name — the first one found stays loaded.
+- A path listed in `TPU_AGENT_SUITE_COMPUTE_DRIVERS` does not exist on disk.
+
+#### Security and privacy
+
+- **Only load trusted code**: External drivers are imported with your user permissions on every runtime command. Only put code you trust in `~/.tpu-agent-suite/drivers/`, and never point `TPU_AGENT_SUITE_COMPUTE_DRIVERS` at untrusted directories, downloads, or job outputs.
+- **Keep private details out of driver output**: Text returned by a driver — including `describe_target()`, error messages, and job logs — is visible to the agent and can be copied into reports, commit messages, or exported trajectories. Avoid returning secrets or sensitive internal details if commits or trajectories leave your environment.
+
 ### Valid backends
 
 The driver registry is the only source of truth for which backends `--backend`
 can name. A compute profile also needs its backend in the package schema's
 `backend` enum (the one `compute setup apply` validates against); without it,
 every profile on that backend is `COMPUTE_NOT_CONFIGURED`, and the backend
-works only through `--backend`. `--backend` is intentionally not constrained by an argparse `choices` list:
+works only through `--backend`. External drivers are the exception: setup adds
+their backend names and setup fields to the schema when it loads it (see
+[External drivers](#external-drivers)). `--backend` is intentionally not constrained by an argparse `choices` list:
 validation happens in `resolve_driver`, which returns a structured
 `INVALID_BACKEND` payload listing the registered backends and any driver that
 failed to load.

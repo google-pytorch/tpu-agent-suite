@@ -1,1 +1,0 @@
-Answer this question about `vit-mnist-tpu`, grounded in the TPU documentation, passing it exactly as written: "What batch size and learning rate does the ViT MNIST example train with?" Answer clearly, citing any references you can for grounding. Drop a JSON at `/logs/artifacts/answer.json` with keys `answer` and `reference`, for scoring.

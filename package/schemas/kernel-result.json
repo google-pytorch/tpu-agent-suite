@@ -10,11 +10,24 @@
   ],
   "status_requires": {
     "optimized": [
+      "slot",
       "best_kernel_artifact",
       "best_latency_ms",
       "speedup_factor",
       "iterations_run",
       "artifacts"
+    ],
+    "no_speedup": [
+      "slot",
+      "best_latency_ms",
+      "speedup_factor",
+      "iterations_run",
+      "iterations"
+    ]
+  },
+  "dependentRequired": {
+    "slot": [
+      "base_kernel_path"
     ]
   },
   "properties": {
@@ -24,9 +37,10 @@
         "optimized",
         "invalid_input",
         "needs_input",
+        "no_speedup",
         "failed"
       ],
-      "description": "What the loop ended up with. 'optimized' means it kept a kernel that compiled and passed its tests; 'invalid_input' and 'failed' are the ways it can end with nothing to hand back. 'needs_input' means the loop stopped before its first iteration for a setting only the user can give -- a `gke_job` profile with no `staging_bucket`, say, which cannot bring profile traces back -- and `summary` carries the question and the setup command. Only the fields a given outcome can actually produce are required -- the measurements are owed by 'optimized' alone, declared in `status_requires` and enforced by the runtime, because this validator has no conditional keywords."
+      "description": "What the loop ended up with. 'optimized' means it kept a kernel that compiled, passed its tests and beat the baseline; 'invalid_input' and 'failed' are the ways it can end with nothing to hand back. 'no_speedup' means kernels compiled and passed, but none beat the baseline in the harness's paired timing: the fastest attempt's measurements come back so the caller can see by how much, and the caller keeps the baseline rather than integrating it. 'needs_input' means the loop stopped before its first iteration for a setting only the user can give -- a `gke_job` profile with no `staging_bucket`, say, which cannot bring profile traces back -- and `summary` carries the question and the setup command. Only the fields a given outcome can actually produce are required -- the measurements are owed by 'optimized' and 'no_speedup' alone, declared in `status_requires` and enforced by the runtime, because this validator has no conditional keywords."
     },
     "run_id": {
       "type": "string",
@@ -36,6 +50,11 @@
       "type": "string",
       "pattern": "^k[0-9]{2,}$",
       "description": "The slot this kernel's artifacts live in, `artifacts/tpu-kernel-development/<slot>`. Returned by every result after the loop resolved a slot, so a caller continuing the same kernel passes it back as the request's `slot` instead of relying on matching the path and op again."
+    },
+    "base_kernel_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The kernel's input file, as the loop keyed it: the request's `base_kernel_path`, normalized, or, for a request that carried `base_kernel_source`, the file the loop wrote the text to. Returned with `slot`. A caller continuing the kernel passes it back as `base_kernel_path`, with `slot` -- never the text again."
     },
     "same_file_slots": {
       "type": "array",
@@ -74,7 +93,7 @@
     },
     "best_kernel_artifact": {
       "type": "string",
-      "description": "Path to the fastest kernel the loop kept. Owed by an 'optimized' result."
+      "description": "Path to the fastest kernel the loop kept. Owed by an 'optimized' result. On a 'no_speedup' result, the fastest attempt, which did not beat the baseline and is not to be integrated."
     },
     "baseline_latency_ms": {
       "type": "number",
@@ -84,17 +103,17 @@
     "best_latency_ms": {
       "type": "number",
       "minimum": 0,
-      "description": "What the best kernel measured. Owed by an 'optimized' result."
+      "description": "What the best kernel measured. Owed by an 'optimized' or 'no_speedup' result."
     },
     "speedup_factor": {
       "type": "number",
       "minimum": 0,
-      "description": "baseline_latency_ms / best_latency_ms. Owed by an 'optimized' result."
+      "description": "baseline_latency_ms / best_latency_ms. Owed by an 'optimized' or 'no_speedup' result."
     },
     "iterations_run": {
       "type": "integer",
       "minimum": 0,
-      "description": "How many iterations actually ran. Owed by an 'optimized' result; it can be lower than the requested budget only if the loop stopped early, which is a fault worth seeing."
+      "description": "How many iterations actually ran. Owed by an 'optimized' or 'no_speedup' result; it can be lower than the requested budget only if the loop stopped early, which is a fault worth seeing."
     },
     "iterations": {
       "type": "array",
@@ -126,7 +145,7 @@
           "speedup": {
             "type": "number",
             "minimum": 0,
-            "description": "This iteration's measured speedup over the baseline, from the harness's paired base-vs-optimized timing in a single process. Reported per iteration rather than only at the end because the next iteration's planner branches on it: above 1.0 it builds on this kernel, at or below 1.0 it restarts from the baseline. Absent when correctness failed and the harness printed no timing line."
+            "description": "This iteration's measured speedup over the baseline, from the harness's paired base-vs-optimized timing in a single process, of the kernel as the iteration left it -- after autotuning, when a configuration was applied. Reported per iteration rather than only at the end because the loop branches on it: above 1.0 the next iteration's planner builds on this kernel and the loop may keep it as its best, at or below 1.0 the planner restarts from the baseline and the kernel is never kept. Absent when correctness failed and the harness printed no timing line."
           },
           "base_choice": {
             "type": "string",
@@ -166,7 +185,7 @@
     },
     "error_message": {
       "type": "string",
-      "description": "Why the stage did not reach 'optimized'. The unhappy case belongs in the contract, not only in the summary prose."
+      "description": "Why the stage did not reach 'optimized' or 'no_speedup'. The unhappy case belongs in the contract, not only in the summary prose."
     },
     "failure_reason": {
       "type": "string",
@@ -184,6 +203,8 @@
     {
       "status": "optimized",
       "run_id": "20260914T120000Z-000000000000",
+      "slot": "k01",
+      "base_kernel_path": "/workspace/work/base.py",
       "summary": "Kept iteration 3: block-wise softmax with a fused epilogue, 2.31x over the baseline.",
       "best_latency_ms": 1.83,
       "baseline_latency_ms": 4.22,

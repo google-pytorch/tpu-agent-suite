@@ -15,5 +15,5 @@
 # Restates task.toml's docker_image as a Dockerfile. Harbor's GKE environment
 # builds from environment/ and never reads docker_image, so the pin only takes
 # effect here. Same pattern as tpu-hello-world/baseline.
-FROM us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/torchtpu-agent:mrasquinha-hfmigrate-20260914
+FROM us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/vllm-on-host@sha256:c0698b8b2b99f749f1599221152f9d651a5893317a724f2688b9c3db2c9a023c
 WORKDIR /workspace

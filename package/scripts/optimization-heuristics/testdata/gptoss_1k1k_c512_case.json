@@ -1,0 +1,322 @@
+{
+ "case": "gptoss_1k1k_c512",
+ "framework": "vllm_torchtpu",
+ "profiles": [
+  {
+   "key": "isl1024-osl1024-c512-prefill-only",
+   "role": "prefill",
+   "session_id": "rank0_t1v-n-9eb622fc-w-0.xplane.pb",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "decode",
+      "n_steps_per_device": 1.0,
+      "idle_frac": 0.3127568308,
+      "mean_bucket": 16.0,
+      "mean_dur_ms": 3.777374,
+      "p90_dur_ms": 3.7774844
+     },
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 4.0,
+      "idle_frac": 0.0008187204,
+      "mean_bucket": 1792.0,
+      "mean_dur_ms": 40.65154675,
+      "p90_dur_ms": 45.1173552
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 5.0,
+      "idle_frac": 0.0150959312,
+      "mean_bucket": 1436.8,
+      "mean_dur_ms": 33.2767122,
+      "p90_dur_ms": 42.7085344
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D29_async_scheduling_off",
+      "title": "Scheduler may run serially with the device (async scheduling)",
+      "phase": "decode",
+      "summary": "The TPU is idle 31.3% of each decode cycle and --async-scheduling is not set (recent vLLM auto-enables it; older releases and some executors/spec-decode methods do not - check the \"Async scheduling\" line in the server log). Without async scheduling the scheduler for step N+1 runs after step N finish",
+      "evidence": [
+       {
+        "metric": "decode idle fraction",
+        "value": 31.27568308180994,
+        "unit": "%",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "decode step time (mean)",
+        "value": 3.777374,
+        "unit": " ms",
+        "detail": "1 steps/device",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [
+       {
+        "knob": "vllm.cli.async_scheduling",
+        "kind": "cli",
+        "name": "--async-scheduling",
+        "suggested_value": "true",
+        "current_value": "",
+        "already_set": false
+       }
+      ],
+      "risk": "perf_only",
+      "confidence": "low",
+      "est_step_fraction_saved": 0.08,
+      "validation": "A/B throughput; Qwen3 on Ironwood: +7.7% and +2.1%.",
+      "kernel_followup": null,
+      "source_refs": [
+       "Qwen3 serving study on TPU v7x"
+      ],
+      "lever": "serving_knob",
+      "couples_with": [],
+      "score": 0.024
+     },
+     {
+      "detector_id": "D14_profile_hygiene",
+      "title": "Profile quality limits confidence",
+      "phase": "all",
+      "summary": "Re-profile to raise confidence: 1 decode step(s) ignored as a minority phase; only 4 prefill_or_mixed steps.",
+      "evidence": [
+       {
+        "metric": "decode steps per device (skipped)",
+        "value": 1.0,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "prefill_or_mixed steps per device",
+        "value": 4.0,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "high",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "diagnostic",
+      "couples_with": [],
+      "score": 0.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "isl1024-osl1024-c512-decode-only",
+   "role": "decode",
+   "session_id": "rank0_t1v-n-9eb622fc-w-0.xplane.pb",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "decode",
+      "n_steps_per_device": 5.0,
+      "idle_frac": 0.0015510527,
+      "mean_bucket": 128.0,
+      "mean_dur_ms": 17.8686874,
+      "p90_dur_ms": 17.9200943
+     },
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 1.0,
+      "idle_frac": 0.0014212801,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 19.51444,
+      "p90_dur_ms": 19.51444
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 5.5,
+      "idle_frac": 0.0015354799,
+      "mean_bucket": 302.5454545455,
+      "mean_dur_ms": 18.0183012727,
+      "p90_dur_ms": 17.920133
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D24_moe_tp_without_ep",
+      "title": "MoE experts sharded by TP instead of EP (decode)",
+      "phase": "decode",
+      "summary": "MoE ops are 36.6% of the decode step with TP=2 and no expert parallelism. Each expert is split 2 ways, so every device runs all 32 experts on 1440-wide slices. With --enable-expert-parallel each device owns whole experts (E/2), giving larger grouped matmuls. Measured on Qwen3-Coder-480B TP8 (v7x): +",
+      "evidence": [
+       {
+        "metric": "MoE share",
+        "value": 36.615372206914316,
+        "unit": "%",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "TP",
+        "value": 2,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [
+       {
+        "knob": "vllm.cli.enable_expert_parallel",
+        "kind": "cli",
+        "name": "--enable-expert-parallel",
+        "suggested_value": "true",
+        "current_value": "false",
+        "already_set": false
+       }
+      ],
+      "risk": "perf_only",
+      "confidence": "low",
+      "est_step_fraction_saved": 0.10984611662074294,
+      "validation": "A/B output tok/s at the target input/output lengths and concurrency; EP adds a token all-to-all and exposes expert imbalance (Qwen3-Coder: 1.5x GMM time spread at EP=8), so check D6 after. Sources: Qwen3-Coder-480B on TPU v7x (+12%); Qwen3-Coder-480B serving study (EP->TP).",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "mesh",
+      "couples_with": [
+       "mesh"
+      ],
+      "score": 0.033
+     },
+     {
+      "detector_id": "D14_profile_hygiene",
+      "title": "Profile quality limits confidence",
+      "phase": "all",
+      "summary": "Re-profile to raise confidence: 1 prefill_or_mixed step(s) ignored as a minority phase.",
+      "evidence": [
+       {
+        "metric": "prefill_or_mixed steps per device (skipped)",
+        "value": 1.0,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "high",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "diagnostic",
+      "couples_with": [],
+      "score": 0.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "isl1024-osl1024-c512-balanced",
+   "role": "mixed",
+   "session_id": "rank0_t1v-n-9eb622fc-w-0.xplane.pb",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "decode",
+      "n_steps_per_device": 5.0,
+      "idle_frac": 0.0013131746,
+      "mean_bucket": 307.2,
+      "mean_dur_ms": 20.8513346,
+      "p90_dur_ms": 23.487559
+     },
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 1.0,
+      "idle_frac": 0.0012237438,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 22.516655,
+      "p90_dur_ms": 22.516655
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 5.5,
+      "idle_frac": 0.0013027558,
+      "mean_bucket": 465.4545454545,
+      "mean_dur_ms": 21.0027273636,
+      "p90_dur_ms": 22.516655
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D24_moe_tp_without_ep",
+      "title": "MoE experts sharded by TP instead of EP (decode)",
+      "phase": "decode",
+      "summary": "MoE ops are 33.7% of the decode step with TP=2 and no expert parallelism. Each expert is split 2 ways, so every device runs all 32 experts on 1440-wide slices. With --enable-expert-parallel each device owns whole experts (E/2), giving larger grouped matmuls. Measured on Qwen3-Coder-480B TP8 (v7x): +",
+      "evidence": [
+       {
+        "metric": "MoE share",
+        "value": 33.677428494193364,
+        "unit": "%",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "TP",
+        "value": 2,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [
+       {
+        "knob": "vllm.cli.enable_expert_parallel",
+        "kind": "cli",
+        "name": "--enable-expert-parallel",
+        "suggested_value": "true",
+        "current_value": "false",
+        "already_set": false
+       }
+      ],
+      "risk": "perf_only",
+      "confidence": "low",
+      "est_step_fraction_saved": 0.10103228548258009,
+      "validation": "A/B output tok/s at the target input/output lengths and concurrency; EP adds a token all-to-all and exposes expert imbalance (Qwen3-Coder: 1.5x GMM time spread at EP=8), so check D6 after. Sources: Qwen3-Coder-480B on TPU v7x (+12%); Qwen3-Coder-480B serving study (EP->TP).",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "mesh",
+      "couples_with": [
+       "mesh"
+      ],
+      "score": 0.0303
+     },
+     {
+      "detector_id": "D14_profile_hygiene",
+      "title": "Profile quality limits confidence",
+      "phase": "all",
+      "summary": "Re-profile to raise confidence: 1 prefill_or_mixed step(s) ignored as a minority phase.",
+      "evidence": [
+       {
+        "metric": "prefill_or_mixed steps per device (skipped)",
+        "value": 1.0,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "high",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "diagnostic",
+      "couples_with": [],
+      "score": 0.0
+     }
+    ]
+   }
+  }
+ ]
+}

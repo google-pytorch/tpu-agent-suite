@@ -10,8 +10,9 @@ scripts:
 # Serving Benchmark
 
 How a study measures a model served behind an OpenAI-compatible endpoint
-(`vllm serve` on `vllm-torchtpu`): one client for speed and one for accuracy,
-each with one invocation, the same for the baseline and for every arm.
+(`vllm serve` on `vllm-torchtpu` or `python3 -m sglang.launch_server` on
+SGLang): one client for speed and one for accuracy, each with one invocation,
+the same for the baseline and for every arm.
 
 ## 1. The speed client
 
@@ -19,7 +20,8 @@ The speed half is the serving benchmark every agent shares,
 {{script:common/serving_benchmark.py}}. What it measures, its metric names
 (the names a study protocol's `primary_metric.name` and
 `admissibility_gates[].metric` use), how it keeps prefix-cache hits out of
-every run, and its exit codes are in
+every run (`POST /reset_prefix_cache` on vLLM or `POST /flush_cache` on
+SGLang), and its exit codes are in
 {{reference:common/inference-serving-benchmark.md}}. This document adds what a
 study needs on top of it.
 
@@ -39,8 +41,16 @@ python3 {{script:common/serving_benchmark.py}} \
   --base-url http://localhost:8000 \
   --tokenizer <hf_model_id> \
   --output-dir <work>/serving_bench \
-  --isl-osl 1024:128 --concurrency 1,8 --replicates 3
+  --isl-osl 8192:1024 --concurrency 1,4,8,16,32 --replicates 3 \
+  --reference-curve <work>/reference_curve.json \
+  --tolerance-pct 5.0 \
+  --export-bkc <work>/bkc.json
 ```
+
+When every point on the reference Pareto frontier is reproduced within
+`--tolerance-pct`, `summary.json` records
+`reproduction: {"consistent": true, "promote_to_bkc": true, ...}` and writes the
+verified BKC manifest to `--export-bkc`.
 
 Run the accuracy eval (Section 4) through the same forward, and kill the
 forward's PID when both are done, whatever they returned. Start the baseline

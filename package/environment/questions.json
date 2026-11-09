@@ -3,14 +3,13 @@
     {
       "name": "backend",
       "path": "compute.backend",
-      "prompt": "Compute backend to use: 'local' (agent runs on the TPU VM), 'gce_tpu_vm' (reach a Cloud TPU VM via gcloud), 'gke_pod' (exec into an already-running TPU pod), 'gke_job' (dispatch a single-host TPU Job via kubectl), or 'gke_xpk' (multi-node cluster via xpk)",
+      "prompt": "Compute backend to use: 'local' (agent runs on the TPU VM), 'gce_tpu_vm' (reach a Cloud TPU VM via gcloud), 'gke_pod' (exec into an already-running TPU pod), or 'gke_job' (dispatch a single-host TPU Job via kubectl)",
       "type": "string",
       "choices": [
         "local",
         "gce_tpu_vm",
         "gke_pod",
-        "gke_job",
-        "gke_xpk"
+        "gke_job"
       ]
     },
     {
@@ -29,11 +28,10 @@
       "path": "compute.params.zone",
       "when": {
         "backend": [
-          "gce_tpu_vm",
-          "gke_xpk"
+          "gce_tpu_vm"
         ]
       },
-      "prompt": "gce_tpu_vm and gke_xpk: GCP zone of compute resource (e.g. us-central1-a)",
+      "prompt": "gce_tpu_vm only: GCP zone of compute resource (e.g. us-central1-a)",
       "type": "string"
     },
     {
@@ -41,11 +39,10 @@
       "path": "compute.params.project",
       "when": {
         "backend": [
-          "gce_tpu_vm",
-          "gke_xpk"
+          "gce_tpu_vm"
         ]
       },
-      "prompt": "gce_tpu_vm and gke_xpk: GCP project ID of compute resource",
+      "prompt": "gce_tpu_vm only: GCP project ID of compute resource",
       "type": "string"
     },
     {
@@ -186,29 +183,6 @@
       "default": ""
     },
     {
-      "name": "cluster_name",
-      "path": "compute.params.cluster_name",
-      "when": {
-        "backend": [
-          "gke_xpk"
-        ]
-      },
-      "prompt": "gke_xpk only: GKE cluster name for xpk workload creation",
-      "type": "string"
-    },
-    {
-      "name": "gcs_bucket",
-      "path": "compute.params.gcs_bucket",
-      "when": {
-        "backend": [
-          "gke_xpk"
-        ]
-      },
-      "prompt": "gke_xpk only (optional): GCS bucket URI for logs and artifacts",
-      "type": "string",
-      "default": ""
-    },
-    {
       "name": "staging_bucket",
       "path": "compute.params.staging_bucket",
       "when": {
@@ -314,8 +288,7 @@
           "local",
           "gce_tpu_vm",
           "gke_pod",
-          "gke_job",
-          "gke_xpk"
+          "gke_job"
         ]
       },
       "prompt": "Python that runs your workloads on the target: the one where `import torch_tpu` works. On a TPU VM this is usually a virtualenv, e.g. `~/tpu_venv/bin/python3`; in a container, e.g. `/opt/conda/bin/python`. Leave blank to use the target's default `python3`, which often doesn't have `torch_tpu` installed",

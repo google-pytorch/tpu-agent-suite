@@ -95,6 +95,7 @@
             "output": ["last_assistant_message"],
             "stop_reason": ["stop_reason"],
             "session_id": ["session_id"],
+            "agent_id": ["agent_id"],
             "transcript_path": ["agent_transcript_path"],
             "prompt_id": ["prompt_id"],
             "permission_mode": ["permission_mode"],
@@ -113,6 +114,26 @@
               "subagent": ["agent_type"],
               "output": ["tool_input.message"],
               "session_id": ["session_id"]
+            }
+          },
+          "idle": {
+            "source": "ledger",
+            "agent_id": ["agent_id"],
+            "agent_type": ["agent_type"],
+            "live_tasks": "background_tasks",
+            "live_statuses": ["running"],
+            "pause_resumes": {"env": "CLAUDE_CODE_ENTRYPOINT", "values": ["cli"]},
+            "launches": {
+              "delegate": {
+                "requested": "tool_input.run_in_background",
+                "requires": {"tool_response.status": "async_launched"},
+                "task_id": "tool_response.agentId",
+                "task_type": "subagent"
+              },
+              "shell": {
+                "task_id": "tool_response.backgroundTaskId",
+                "task_type": "shell"
+              }
             }
           }
         },

@@ -19,7 +19,7 @@ workspace install's <workspace>/.tpu-agent-suite/environment.json, or a
 user-scope install's ~/.tpu-agent-suite/environment.json. The workspace is
 consulted first, and the central store when the package is not installed
 there; a ledger naming another package is not this one's install (see
-utils.resolve_environment).
+paths.resolve_environment).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import pathlib
 import sys
 from typing import Any
 
-from framework import utils
+from framework import jsonio, paths, utils
 
 from .drivers import (ComputeConfigError, ComputeDriver, NotConfigured,
                       describe_discovery_errors, get_driver,
@@ -86,7 +86,7 @@ def find_environment_data(workspace: Path | str | None = None,
                           package: str | None = None) -> dict[str, Any]:
     """Resolve environment.json via the single ownership-keyed resolver.
 
-    One implementation lives in utils.resolve_environment; this wrapper
+    One implementation lives in paths.resolve_environment; this wrapper
     adapts the return shape (data alone, {} when the package is not
     installed anywhere) and makes the compute layer's two edge decisions
     explicitly, so the resolver itself never guesses: no package means there
@@ -96,7 +96,7 @@ def find_environment_data(workspace: Path | str | None = None,
     if not package:
         return {}
     ws = workspace if workspace is not None else pathlib.Path.cwd()
-    data, _source_path = utils.resolve_environment(package, ws)
+    data, _source_path = paths.resolve_environment(package, ws)
     return data
 
 
@@ -146,6 +146,7 @@ def unknown_profile_error(name: str, source: str,
         "default":
         f"Default compute profile '{name}' (environment.json 'default')",
         "config use": f"Compute profile '{name}'",
+        "config remove": f"Compute profile '{name}'",
     }[source]
     return ComputeConfigError(
         f"{what} is not defined in environment.json "
@@ -181,10 +182,10 @@ def _run_compute_profile(run_id: str | None) -> str | None:
     if not run_id:
         return None
     try:
-        run_file = utils.get_run_root(run_id) / "run.json"
+        run_file = paths.get_run_root(run_id) / "run.json"
     except utils.TpuAgentSuiteError:
         return None
-    profile = utils.load_json_doc(run_file).get("compute_profile")
+    profile = jsonio.load_json_or_empty(run_file).get("compute_profile")
     return profile.strip() if isinstance(profile,
                                          str) and profile.strip() else None
 
@@ -251,9 +252,8 @@ def resolve_driver(
     cancelled. `--backend` and driver flags then override that profile's
     backend and params.
 
-    Without `--backend`, a command outside a job whose stored profile
-    `compute setup apply` would not save as it stands, or no profile at
-    all, is COMPUTE_NOT_CONFIGURED.
+    Without `--backend`, if no profile exists or the profile is invalid even
+    after applying driver flags, COMPUTE_NOT_CONFIGURED is raised.
     """
     env_data = find_environment_data(workspace, package)
     profiles = normalize_environment_profiles(env_data)[0]
@@ -311,7 +311,16 @@ def resolve_driver(
         )
     if not backend_override and not record:
         from . import setup  # setup imports this module
-        checked = setup.validate_profile(name, profiles[name])
+
+        # Validate with setup-field CLI overrides applied (e.g. `--image`).
+        # Run-only flags like `--cpu-requests` are ignored so they aren't rejected.
+        fields = driver_cls.SETUP_FIELDS.all_fields()
+        checked = setup.validate_profile(
+            name, profiles[name], {
+                k: v
+                for k, v in (param_overrides or {}).items()
+                if v is not None and k in fields
+            })
         if checked["status"] != "ok":
             missing = [q["name"] for q in checked["missing"]]
             invalid = [e["name"] for e in checked["invalid"]]

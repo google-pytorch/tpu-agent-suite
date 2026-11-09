@@ -16,20 +16,23 @@ version = "1.0"
 
 [task]
 name = "nightly-functional/smart-hf-search"
-description = "Find top 5 popular HuggingFace models under 8B parameters using smart_hf_search."
+description = "Find top 5 popular HuggingFace models under 8B parameters using smart-hf-search."
 
 [metadata]
 category = "nightly-functional"
 
 [agent]
-timeout_sec = 300.0
+timeout_sec = 900.0
 
 [verifier]
 timeout_sec = 300.0
 
 [environment]
-skills_dir = "/workspace/skills"
+build_timeout_sec = 600.0
 workdir = "/workspace"
 cpus = 2
 memory_mb = 8192
 storage_mb = 10240
+
+[environment.env]
+TASK_AGENT_PERSONA = "tpu-model-onboarding"

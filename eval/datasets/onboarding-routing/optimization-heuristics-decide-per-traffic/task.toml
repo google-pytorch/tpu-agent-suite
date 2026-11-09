@@ -1,0 +1,38 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+version = "1.0"
+
+artifacts = [
+  { source = "/workspace", destination = 'workspace' },
+  { source = "/root/.tpu-agent-suite/runs", destination = "tpu_agent_suite_runs" },
+]
+
+[task]
+name = "onboarding-routing/optimization-heuristics-decide-per-traffic"
+description = "For google/gemma-4-31B-it on tpu7x 2x2x1 (baseline TP 8 x DP 1), tpu-diagnostics proposed serving changes from the baseline's traces (serving_candidates); its candidates.json is /workspace/optimization-heuristics/candidates.json. tpu-model-onboarding then measured both candidates beside the baseline at the baseline's points with serving_benchmark: the baseline's summary.json is /workspace/bench/baseline_summary.json, and the candidates' are /workspace/bench/m-tp4xdp2_summary.json and /workspace/bench/m-tp2xdp4_summary.json. Their candidate_report, the per-point comparison report.py wrote from those summaries, is /workspace/bench/candidate_report.json. I serve both short and long prompts and want the best throughput; I have not settled on one kind of traffic. Decide which configuration to keep. This session has no TPU and no compute backend, so do not run or submit any compute job. Write /logs/artifacts/answer.json with keys `per_regime` (an object mapping each ISL/OSL regime, as \"1024:1024\" or \"8192:1024\", to \"keep baseline\" or \"keep <cand_id>\"), `single_config` (the one configuration to name when only one can run: \"keep baseline\" or \"keep <cand_id>\"), `answer` and `reference`."
+
+[metadata]
+category = "onboarding-routing"
+
+[agent]
+timeout_sec = 1800.0
+
+[verifier]
+timeout_sec = 300.0
+
+[environment]
+workdir = "/workspace"
+cpus = 2
+memory_mb = 8192
+storage_mb = 10240

@@ -1,0 +1,16 @@
+{
+  "deployments": [
+    {
+      "model_id": "google/gemma-4-31B-it",
+      "engine": "vllm",
+      "port": 8000,
+      "tensor_parallel_size": 4,
+      "data_parallel_size": 2,
+      "max_model_len": 10240,
+      "parallelism": {
+        "source": "recommended",
+        "reason": "test fixture"
+      }
+    }
+  ]
+}

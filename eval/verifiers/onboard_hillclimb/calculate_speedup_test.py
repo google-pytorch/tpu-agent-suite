@@ -592,6 +592,622 @@ class CalculateSpeedupTest(unittest.TestCase):
         script_path = Path(__file__).resolve().parent / "calculate_speedup.py"
         self.assertTrue(script_path.is_file())
 
+    def test_manifest_output_tokens_per_s_and_raw_output_tps_unified(
+            self) -> None:
+        """Verifies that manifests using output_tokens_per_s and raw files using output_tps are parsed correctly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / "artifacts"
+            # Raw file using "output_tps" and "completed_prompts"
+            raw_base = artifacts / "raw" / "base_1k1k_c1.json"
+            raw_base.parent.mkdir(parents=True, exist_ok=True)
+            raw_base.write_text(json.dumps({
+                "concurrency": 1,
+                "isl": 1024,
+                "osl": 1024,
+                "completed_prompts": 4,
+                "failed_prompts": 0,
+                "output_tps": 180.0,
+            }),
+                                encoding="utf-8")
+
+            raw_opt = artifacts / "raw" / "opt_1k1k_c1.json"
+            raw_opt.write_text(json.dumps({
+                "concurrency": 1,
+                "isl": 1024,
+                "osl": 1024,
+                "num_successful": 4,
+                "failed": 0,
+                "output_tokens_per_s": 270.0,
+            }),
+                               encoding="utf-8")
+
+            # Manifest using "output_tokens_per_s"
+            manifest = {
+                "baseline": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tokens_per_s": 180.0,
+                    "raw_output_path": "raw/base_1k1k_c1.json",
+                }],
+                "optimized": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 270.0,
+                    "raw_output_path": "raw/opt_1k1k_c1.json",
+                }],
+            }
+            (artifacts / "benchmark_results.json").write_text(json.dumps(
+                manifest, indent=2),
+                                                              encoding="utf-8")
+
+            discovery = speedup_mod.discover_or_verify_runs(artifacts)
+            self.assertFalse(discovery.inferred)
+            self.assertEqual(len(discovery.baseline_runs), 1)
+            self.assertEqual(len(discovery.optimized_runs), 1)
+            self.assertAlmostEqual(discovery.baseline_runs[0].output_tps,
+                                   180.0)
+            self.assertAlmostEqual(discovery.optimized_runs[0].output_tps,
+                                   270.0)
+
+    def test_auto_discover_runs_searches_logs_artifacts_when_workspace(
+            self) -> None:
+        """Trial root searches logs/artifacts, and container /workspace searches _CONTAINER_ARTIFACTS_DIR."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            ws_dir = tmp_root / "workspace"
+            ws_dir.mkdir()
+            logs_artifacts = tmp_root / "logs" / "artifacts"
+            logs_artifacts.mkdir(parents=True)
+
+            self._write_raw_json(
+                logs_artifacts / "raw_benchmarks" / "baseline" / "c1.json",
+                output_tps=100.0,
+                concurrency=1,
+            )
+            self._write_raw_json(
+                logs_artifacts / "raw_benchmarks" / "optimized" / "c1.json",
+                output_tps=150.0,
+                concurrency=1,
+            )
+
+            base, opt, _ = speedup_mod.auto_discover_runs(tmp_root)
+            self.assertEqual(len(base), 1)
+            self.assertEqual(len(opt), 1)
+            self.assertAlmostEqual(base[0].output_tps, 100.0)
+            self.assertAlmostEqual(opt[0].output_tps, 150.0)
+
+            with patch.object(speedup_mod, "_CONTAINER_ARTIFACTS_DIR",
+                              logs_artifacts):
+                c_base, c_opt, _ = speedup_mod.auto_discover_runs(
+                    Path("/workspace"))
+                self.assertEqual(len(c_base), 1)
+                self.assertEqual(len(c_opt), 1)
+
+    def test_manifest_fallback_to_auto_discover_when_zero_runs(self) -> None:
+        """When manifest has 0 verified runs, discover_or_verify_runs falls back to auto_discover_runs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Manifest points to non-existent raw file
+            manifest = {
+                "baseline": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 100.0,
+                    "raw_output_path": "non_existent.json",
+                }],
+                "optimized": [],
+            }
+            (root / "benchmark_results.json").write_text(json.dumps(manifest,
+                                                                    indent=2),
+                                                         encoding="utf-8")
+
+            # But raw benchmarks exist on disk in auto-discoverable layout
+            self._write_raw_json(
+                root / "raw_benchmarks" / "baseline" / "bench_c1.json",
+                output_tps=100.0,
+                concurrency=1,
+            )
+            self._write_raw_json(
+                root / "raw_benchmarks" / "optimized" / "bench_c1.json",
+                output_tps=150.0,
+                concurrency=1,
+            )
+
+            discovery = speedup_mod.discover_or_verify_runs(root)
+            self.assertTrue(discovery.inferred)
+            self.assertEqual(len(discovery.baseline_runs), 1)
+            self.assertEqual(len(discovery.optimized_runs), 1)
+
+    def test_parse_raw_benchmark_with_nested_replicates_and_metrics(
+            self) -> None:
+        """Verifies raw benchmark files with nested replicates and metrics (agent suite format) are parsed correctly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / "artifacts"
+            artifacts.mkdir(parents=True, exist_ok=True)
+            raw_base = artifacts / "raw" / "isl1024_osl1024_c1_r1.json"
+            raw_base.parent.mkdir(parents=True, exist_ok=True)
+            raw_payload = {
+                "cell":
+                "isl1024_osl1024_c1",
+                "isl":
+                1024,
+                "osl":
+                1024,
+                "concurrency":
+                1,
+                "status":
+                "ok",
+                "replicates": [{
+                    "output_tokens_per_s": 148.3,
+                    "completed": 4,
+                    "failed": 0,
+                    "ttft_p50_ms": 42.5,
+                    "itl_p50_ms": 11.2,
+                }],
+                "metrics": {
+                    "output_tokens_per_s": {
+                        "mean": 148.3,
+                        "stdev": 0.0,
+                        "values": [148.3],
+                    },
+                    "completed": {
+                        "mean": 4.0,
+                        "stdev": 0.0,
+                        "values": [4],
+                    },
+                    "failed": {
+                        "mean": 0.0,
+                        "stdev": 0.0,
+                        "values": [0],
+                    },
+                },
+            }
+            raw_base.write_text(json.dumps(raw_payload, indent=2),
+                                encoding="utf-8")
+
+            # 1. Test parse_raw_benchmark_file directly
+            parsed = speedup_mod.parse_raw_benchmark_file(raw_base)
+            self.assertIsNotNone(parsed)
+            self.assertIsNone(parsed.error)
+            self.assertEqual(parsed.detected_regime, "1k/1k")
+            self.assertEqual(parsed.detected_concurrency, 1)
+            self.assertIsNotNone(parsed.metrics)
+            self.assertAlmostEqual(parsed.metrics.output_tps, 148.3)
+            self.assertEqual(parsed.metrics.completed, 4)
+            self.assertEqual(parsed.metrics.failed, 0)
+            self.assertAlmostEqual(parsed.metrics.ttft_p50, 42.5)
+            self.assertAlmostEqual(parsed.metrics.itl_p50, 11.2)
+
+            # 2. Test BenchmarkRunMetrics.from_dict directly
+            metrics = speedup_mod.BenchmarkRunMetrics.from_dict(raw_payload)
+            self.assertAlmostEqual(metrics.output_tps, 148.3)
+            self.assertEqual(metrics.completed, 4)
+            self.assertEqual(metrics.failed, 0)
+            self.assertAlmostEqual(metrics.ttft_p50, 42.5)
+            self.assertAlmostEqual(metrics.itl_p50, 11.2)
+
+            # 3. Test verification via manifest
+            manifest = {
+                "baseline": [{
+                    "regime":
+                    "1k/1k",
+                    "concurrency":
+                    1,
+                    "output_tps":
+                    148.3,
+                    "raw_output_path":
+                    "raw/isl1024_osl1024_c1_r1.json",
+                }],
+                "optimized": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 200.0,
+                    "raw_output_path": "raw/opt.json",
+                }],
+            }
+            self._write_raw_json(
+                artifacts / "raw" / "opt.json",
+                output_tps=200.0,
+                concurrency=1,
+            )
+            (artifacts / "benchmark_results.json").write_text(json.dumps(
+                manifest, indent=2),
+                                                              encoding="utf-8")
+
+            discovery = speedup_mod.discover_or_verify_runs(artifacts)
+            self.assertFalse(discovery.inferred)
+            self.assertEqual(len(discovery.baseline_runs), 1)
+            self.assertEqual(len(discovery.optimized_runs), 1)
+            self.assertAlmostEqual(discovery.baseline_runs[0].output_tps,
+                                   148.3)
+            self.assertAlmostEqual(discovery.optimized_runs[0].output_tps,
+                                   200.0)
+            self.assertEqual(discovery.verification_errors, [])
+
+    def test_complete_manifest_preferred_over_specialist_onboarding_manifest(
+            self) -> None:
+        """Complete manifest with baseline and optimized runs is preferred over Stage 1 onboarding manifest."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / "artifacts"
+            artifacts.mkdir(parents=True, exist_ok=True)
+
+            self._write_raw_json(
+                artifacts / "raw" / "base_c1.json",
+                output_tps=100.0,
+                concurrency=1,
+            )
+            self._write_raw_json(
+                artifacts / "raw" / "opt_c1.json",
+                output_tps=150.0,
+                concurrency=1,
+            )
+
+            # 1. Specialist subdirectory with onboarding-only manifest
+            specialist_dir = artifacts / "tpu-model-onboarding"
+            specialist_dir.mkdir(parents=True, exist_ok=True)
+            specialist_manifest = {
+                "stage":
+                "baseline",
+                "baseline": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 100.0,
+                    "raw_output_path": "raw/base_c1.json",
+                }],
+            }
+            (specialist_dir / "benchmark_results.json").write_text(
+                json.dumps(specialist_manifest, indent=2), encoding="utf-8")
+
+            # 2. Complete top-level manifest with baseline and optimized runs
+            top_manifest = {
+                "baseline": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 100.0,
+                    "raw_output_path": "raw/base_c1.json",
+                }],
+                "optimized": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 150.0,
+                    "raw_output_path": "raw/opt_c1.json",
+                }],
+            }
+            top_manifest_path = artifacts / "benchmark_results.json"
+            top_manifest_path.write_text(json.dumps(top_manifest, indent=2),
+                                         encoding="utf-8")
+
+            # Complete manifest should be selected
+            self.assertEqual(speedup_mod.find_manifest_file(root),
+                             top_manifest_path)
+
+            discovery = speedup_mod.discover_or_verify_runs(root)
+            self.assertFalse(discovery.inferred)
+            self.assertEqual(len(discovery.baseline_runs), 1)
+            self.assertEqual(len(discovery.optimized_runs), 1)
+            self.assertEqual(discovery.verification_errors, [])
+            self.assertAlmostEqual(discovery.baseline_runs[0].output_tps,
+                                   100.0)
+            self.assertAlmostEqual(discovery.optimized_runs[0].output_tps,
+                                   150.0)
+
+    def test_downloaded_trial_artifacts_logs_artifacts_manifest(self):
+        """Verifies that manifests in <trial_dir>/artifacts/logs/artifacts are discovered and verified."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_dir = root / "artifacts" / "logs" / "artifacts"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            raw_dir = manifest_dir / "raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+
+            (raw_dir / "base_c1.json").write_text(
+                json.dumps({
+                    "completed": 10,
+                    "failed": 0,
+                    "request_throughput": 50.0,
+                    "output_throughput": 100.0,
+                    "input_lens": [1024] * 10,
+                    "output_lens": [1024] * 10,
+                }),
+                encoding="utf-8",
+            )
+            (raw_dir / "opt_c1.json").write_text(
+                json.dumps({
+                    "completed": 10,
+                    "failed": 0,
+                    "request_throughput": 75.0,
+                    "output_throughput": 150.0,
+                    "input_lens": [1024] * 10,
+                    "output_lens": [1024] * 10,
+                }),
+                encoding="utf-8",
+            )
+
+            manifest = {
+                "baseline": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 100.0,
+                    "raw_output_path": "raw/base_c1.json",
+                }],
+                "optimized": [{
+                    "regime":
+                    "1k/1k",
+                    "concurrency":
+                    1,
+                    "output_tps":
+                    150.0,
+                    "raw_output_path":
+                    "/logs/artifacts/raw/opt_c1.json",
+                }],
+            }
+            manifest_path = manifest_dir / "benchmark_results.json"
+            manifest_path.write_text(json.dumps(manifest, indent=2),
+                                     encoding="utf-8")
+
+            # Manifest should be discovered
+            found = speedup_mod.find_manifest_file(root)
+            self.assertEqual(found, manifest_path)
+
+            # Runs should be verified, not inferred
+            discovery = speedup_mod.discover_or_verify_runs(root)
+            self.assertFalse(discovery.inferred)
+            self.assertEqual(len(discovery.baseline_runs), 1)
+            self.assertEqual(len(discovery.optimized_runs), 1)
+            self.assertEqual(discovery.verification_errors, [])
+
+            # Speedup calculation works
+            res = speedup_mod.DeterministicSpeedupEvaluator(
+                discovery.baseline_runs,
+                discovery.optimized_runs,
+                inferred=discovery.inferred,
+            ).evaluate(target_regimes=["1k/1k"])
+            self.assertAlmostEqual(res["final_speedup"], 1.5, places=4)
+
+    def test_root_tpu_agent_suite_path_resolution_and_permission_safety(
+            self) -> None:
+        """Verifies that /root/.tpu-agent-suite/... container paths resolve safely without PermissionError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Harbor downloaded trial layout with artifacts/logs/artifacts
+            base_rel = "02_baseline_bench/raw/1k1k_c1/isl1024_osl1024_c1_r1.json"
+            opt_rel = "03_optimized_bench/raw/1k1k_c1/isl1024_osl1024_c1_r1.json"
+
+            base_file = root / "artifacts" / "logs" / "artifacts" / base_rel
+            opt_file = root / "artifacts" / "logs" / "artifacts" / opt_rel
+            base_file.parent.mkdir(parents=True, exist_ok=True)
+            opt_file.parent.mkdir(parents=True, exist_ok=True)
+
+            base_file.write_text(
+                json.dumps({
+                    "completed": 10,
+                    "failed": 0,
+                    "request_throughput": 50.0,
+                    "output_throughput": 100.0,
+                    "input_lens": [1024] * 10,
+                    "output_lens": [1024] * 10,
+                }),
+                encoding="utf-8",
+            )
+            opt_file.write_text(
+                json.dumps({
+                    "completed": 10,
+                    "failed": 0,
+                    "request_throughput": 80.0,
+                    "output_throughput": 160.0,
+                    "input_lens": [1024] * 10,
+                    "output_lens": [1024] * 10,
+                }),
+                encoding="utf-8",
+            )
+
+            manifest_dir = root / "artifacts" / "logs" / "artifacts"
+            manifest = {
+                "baseline": [{
+                    "regime":
+                    "1k/1k",
+                    "concurrency":
+                    1,
+                    "output_tps":
+                    100.0,
+                    "raw_output_path":
+                    f"/root/.tpu-agent-suite/runs/20261020T142625Z-c4c5a7a82c36/artifacts/{base_rel}",
+                }],
+                "optimized": [{
+                    "regime":
+                    "1k/1k",
+                    "concurrency":
+                    1,
+                    "output_tps":
+                    160.0,
+                    "raw_output_path":
+                    f"/root/.tpu-agent-suite/runs/20261020T142625Z-c4c5a7a82c36/artifacts/{opt_rel}",
+                }],
+            }
+            manifest_path = manifest_dir / "benchmark_results.json"
+            manifest_path.write_text(json.dumps(manifest, indent=2),
+                                     encoding="utf-8")
+
+            # 1. Direct resolution test
+            resolved_base = speedup_mod.resolve_raw_output_path(
+                manifest["baseline"][0]["raw_output_path"],
+                manifest_path,
+                root,
+            )
+            self.assertEqual(resolved_base, base_file)
+
+            # 2. Manifest discovery and verification
+            discovery = speedup_mod.discover_or_verify_runs(root)
+            self.assertFalse(discovery.inferred)
+            self.assertEqual(len(discovery.baseline_runs), 1)
+            self.assertEqual(len(discovery.optimized_runs), 1)
+            self.assertEqual(discovery.verification_errors, [])
+
+            # 3. Deterministic speedup evaluation
+            speedup = speedup_mod.tpu_speedup(root)
+            self.assertAlmostEqual(speedup, 1.6, places=4)
+
+    def test_root_tpu_agent_suite_missing_file_no_permission_error(
+            self) -> None:
+        """Verifies that missing /root/.tpu-agent-suite/... files do not raise PermissionError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_dir = root / "artifacts" / "logs" / "artifacts"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "baseline": [{
+                    "regime":
+                    "1k/1k",
+                    "concurrency":
+                    1,
+                    "output_tps":
+                    100.0,
+                    "raw_output_path":
+                    "/root/.tpu-agent-suite/runs/xyz/artifacts/nonexistent.json",
+                }],
+            }
+            manifest_path = manifest_dir / "benchmark_results.json"
+            manifest_path.write_text(json.dumps(manifest, indent=2),
+                                     encoding="utf-8")
+
+            # Should not raise PermissionError; should gracefully record verification error
+            discovery = speedup_mod.discover_or_verify_runs(root)
+            self.assertEqual(len(discovery.baseline_runs), 0)
+            self.assertTrue(
+                any("Raw output file not found" in err
+                    for err in discovery.verification_errors))
+            speedup = speedup_mod.tpu_speedup(root)
+            self.assertEqual(speedup, 0.0)
+
+    def test_specialist_manifest_two_levels_deep_resolved_with_parent_paths(
+            self) -> None:
+        """Verifies that specialist manifests 2 levels deep are discovered and raw paths resolved via parent roots."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Specialist manifest 2 levels deep under artifacts: tpu-model-onboarding/inference/
+            spec_dir = root / "artifacts" / "tpu-model-onboarding" / "inference"
+            spec_dir.mkdir(parents=True, exist_ok=True)
+
+            raw_dir = root / "artifacts" / "raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / "base.json").write_text(
+                json.dumps({
+                    "completed": 10,
+                    "failed": 0,
+                    "request_throughput": 50.0,
+                    "output_throughput": 100.0,
+                    "input_lens": [1024] * 10,
+                    "output_lens": [1024] * 10,
+                }),
+                encoding="utf-8",
+            )
+            (raw_dir / "opt.json").write_text(
+                json.dumps({
+                    "completed": 10,
+                    "failed": 0,
+                    "request_throughput": 75.0,
+                    "output_throughput": 150.0,
+                    "input_lens": [1024] * 10,
+                    "output_lens": [1024] * 10,
+                }),
+                encoding="utf-8",
+            )
+
+            manifest = {
+                "baseline": [{
+                    "regime": "1k/1k",
+                    "concurrency": 1,
+                    "output_tps": 100.0,
+                    "raw_output_path": "raw/base.json",
+                }],
+                "optimized": [{
+                    "regime":
+                    "1k/1k",
+                    "concurrency":
+                    1,
+                    "output_tps":
+                    150.0,
+                    "raw_output_path":
+                    "/logs/artifacts/raw/opt.json",
+                }],
+            }
+            manifest_path = spec_dir / "benchmark_results.json"
+            manifest_path.write_text(json.dumps(manifest, indent=2),
+                                     encoding="utf-8")
+
+            # 1. Manifest 2 levels deep should be discovered
+            found = speedup_mod.find_manifest_file(root)
+            self.assertEqual(found, manifest_path)
+
+            # 2. Raw outputs should be resolved via manifest_dir.parent.parent or search roots
+            discovery = speedup_mod.discover_or_verify_runs(root)
+            self.assertFalse(discovery.inferred)
+            self.assertEqual(len(discovery.baseline_runs), 1)
+            self.assertEqual(len(discovery.optimized_runs), 1)
+            self.assertEqual(discovery.verification_errors, [])
+
+            # 3. Speedup calculation succeeds
+            speedup = speedup_mod.tpu_speedup(root)
+            self.assertAlmostEqual(speedup, 1.5, places=4)
+
+    def test_search_stays_within_given_root(self) -> None:
+        """Discovery searches strictly under the given root without climbing to parent directories."""
+        with tempfile.TemporaryDirectory() as tmp:
+            trial_dir = Path(tmp) / "trial"
+            ws_dir = trial_dir / "workspace"
+            ws_dir.mkdir(parents=True)
+            self._write_raw_json(
+                trial_dir / "artifacts" / "raw_benchmarks" / "baseline" /
+                "b.json",
+                output_tps=100.0,
+            )
+            self._write_raw_json(
+                trial_dir / "artifacts" / "raw_benchmarks" / "optimized" /
+                "o.json",
+                output_tps=150.0,
+            )
+
+            # Passing workspace/ does not climb up to sibling artifacts/
+            ws_base, ws_opt, _ = speedup_mod.auto_discover_runs(ws_dir)
+            self.assertEqual(ws_base, [])
+            self.assertEqual(ws_opt, [])
+
+            # Passing trial_dir searches downward into artifacts/
+            self.assertAlmostEqual(speedup_mod.tpu_speedup(trial_dir), 1.5)
+
+    def test_artifacts_preferred_with_workspace_fallback(self) -> None:
+        """Uses artifacts runs first and falls back to workspace when artifacts has none."""
+        with tempfile.TemporaryDirectory() as tmp:
+            trial_dir = Path(tmp) / "trial"
+            art_dir = trial_dir / "artifacts"
+            ws_dir = trial_dir / "workspace"
+            art_dir.mkdir(parents=True)
+
+            # 1. Empty artifacts/ -> falls back to workspace/ (1.2x)
+            self._write_raw_json(
+                ws_dir / "raw_benchmarks" / "baseline" / "b.json",
+                output_tps=100.0,
+            )
+            self._write_raw_json(
+                ws_dir / "raw_benchmarks" / "optimized" / "o.json",
+                output_tps=120.0,
+            )
+            self.assertAlmostEqual(speedup_mod.tpu_speedup(trial_dir), 1.2)
+
+            # 2. Populated artifacts/ -> takes priority over workspace/ (1.5x)
+            self._write_raw_json(
+                art_dir / "raw_benchmarks" / "baseline" / "b.json",
+                output_tps=100.0,
+            )
+            self._write_raw_json(
+                art_dir / "raw_benchmarks" / "optimized" / "o.json",
+                output_tps=150.0,
+            )
+            self.assertAlmostEqual(speedup_mod.tpu_speedup(trial_dir), 1.5)
+
 
 if __name__ == "__main__":
     unittest.main()

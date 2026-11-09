@@ -18,9 +18,7 @@
 # Key modifications from original:
 #   1. Deterministic hillclimb_success: Computed directly from verified speedup
 #      (>= 1.01) rather than an LLM judge.
-#   2. Manifest provenance tracking: Records details["speedup"]["inferred"]
-#      based on benchmark_results.json presence.
-#   3. Fallback weights: Pre-populates default weights dictionary so scoring
+#   2. Fallback weights: Pre-populates default weights dictionary so scoring
 #      succeeds reliably even if reward.toml is missing in test environments.
 
 # Output columns in /logs/verifier/reward.json:
@@ -92,7 +90,7 @@ if [ "$EXIT_CODE" -eq 0 ]; then
   fi
   "${PYTHON[@]}" - <<'PY' || echo "[!] Could not apply the cheating gate; keeping rewardkit's reward."
 import json
-import numpy as np
+import math
 from pathlib import Path
 
 out = Path("/logs/verifier/reward.json")
@@ -112,29 +110,38 @@ def find_raw(node, name):
     return None
 
 
+def find_criterion(node, name):
+    if isinstance(node, dict):
+        if node.get("name") == name and ("value" in node or "raw" in node):
+            return node
+        node = list(node.values())
+    if isinstance(node, list):
+        for child in node:
+            res = find_criterion(child, name)
+            if res is not None:
+                return res
+    return None
+
+
 try:
-    details_path = out.with_name("reward-details.json")
-    details = json.loads(details_path.read_text())
+    details = json.loads(out.with_name("reward-details.json").read_text())
     raw = find_raw(details.get("speedup"), "tpu_speedup")
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         # rewardkit stores the ratio rescaled to 0-1 (divided by the
         # criterion's max); report the ratio itself (1.0 = baseline).
         scores["speedup"] = round(float(raw), 4)
-    if isinstance(details.get("speedup"), dict):
-        details["speedup"]["inferred"] = not any(
-            p.is_file()
-            for p in (
-                *Path("/logs/artifacts").glob("*/benchmark_results.json"),
-                *Path("/workspace/artifacts").glob("*/benchmark_results.json"),
-                Path("/logs/artifacts/benchmark_results.json"),
-                Path("/workspace/artifacts/benchmark_results.json"),
-                Path("/workspace/benchmark_results.json"),
-            )
-        )
-        details_path.write_text(json.dumps(details, indent=2))
     steps = find_raw(details.get("execution_report"), "steps")
     if isinstance(steps, (int, float)) and not isinstance(steps, bool):
         scores["optimization_steps"] = int(steps)
+    eff_node = details.get("efficiency")
+    for ename in ("trajectory_score", "valid_tool_calls", "framework_directed_penalty"):
+        enode = find_criterion(eff_node, ename)
+        if enode is not None:
+            ev = enode.get("value")
+            if not isinstance(ev, (int, float)) or isinstance(ev, bool):
+                ev = enode.get("raw")
+            if isinstance(ev, (int, float)) and not isinstance(ev, bool):
+                scores[ename] = round(float(ev), 4)
 except (OSError, ValueError):
     pass
 
@@ -185,16 +192,24 @@ if all(isinstance(scores.get(p), (int, float)) for p in parts):
     hillclimb_raw = 1.0 if speedup_val >= 1.01 else 0.0
     hillclimb = hillclimb_raw * onboarding
     scores["hillclimb_success_raw"] = hillclimb_raw
-    scores["efficiency_raw"] = scores["efficiency"]
-    speedup_score_raw = float(
-        np.clip(
-            np.log(np.maximum(speedup_val, 1.0)) / np.log(target_speedup_w_headroom),
+    trajectory_score = float(scores.get("trajectory_score", 1.0))
+    valid_tool_calls = float(scores.get("valid_tool_calls", scores["efficiency"]))
+    framework_directed_penalty = float(scores.get("framework_directed_penalty", 1.0))
+    scores["trajectory_score"] = round(trajectory_score, 4)
+    scores["valid_tool_calls"] = round(valid_tool_calls, 4)
+    scores["framework_directed_penalty"] = round(framework_directed_penalty, 4)
+    efficiency_raw = trajectory_score * valid_tool_calls * framework_directed_penalty
+    scores["efficiency_raw"] = round(efficiency_raw, 4)
+    speedup_score_raw = min(
+        1.0,
+        max(
             0.0,
-            1.0,
-        )
+            math.log(max(float(speedup_val), 1.0))
+            / math.log(target_speedup_w_headroom),
+        ),
     )
     speedup_score = speedup_score_raw * onboarding * hillclimb
-    efficiency = scores["efficiency"] * onboarding * hillclimb
+    efficiency = efficiency_raw * onboarding * hillclimb
     scores["hillclimb_success"] = round(hillclimb, 4)
     scores["speedup_score"] = round(speedup_score, 4)
     scores["efficiency"] = round(efficiency, 4)
@@ -211,6 +226,9 @@ output_cols = [
     "hillclimb_success",
     "speedup_score",
     "efficiency",
+    "trajectory_score",
+    "valid_tool_calls",
+    "framework_directed_penalty",
     "target_speedup",
     "speedup",
     "cheating",

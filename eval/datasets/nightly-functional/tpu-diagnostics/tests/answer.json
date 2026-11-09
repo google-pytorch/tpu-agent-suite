@@ -1,0 +1,9 @@
+{
+  "bound_by": "HBM",
+  "operational_intensity": 288.0455,
+  "peak_flop_rate_gflops": 946700.0,
+  "peak_hbm_bw_gibs": 1525.5,
+  "ridge_point_published": 577.963,
+  "ridge_point_recomputed": 577.96,
+  "is_above_ridge": false
+}

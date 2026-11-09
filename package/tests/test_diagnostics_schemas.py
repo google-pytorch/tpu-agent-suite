@@ -37,7 +37,9 @@ _REPO_ROOT = _PACKAGE_ROOT.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from framework import compiler, runtime, utils  # noqa: E402
+from framework import agent_contracts, jsonio, utils  # noqa: E402
+from framework.builder import load_package  # noqa: E402
+from framework.builder import resolve_manifest_composition  # noqa: E402
 
 RUN_ID = "20260921T120000Z-abcdef012345"
 REQUEST = "schemas/profiling-request.json"
@@ -110,19 +112,19 @@ class TestDiagnosticsSchemas(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.request = utils.load_json(_PACKAGE_ROOT / REQUEST)
-        cls.result = utils.load_json(_PACKAGE_ROOT / RESULT)
+        cls.request = jsonio.load_json(_PACKAGE_ROOT / REQUEST)
+        cls.result = jsonio.load_json(_PACKAGE_ROOT / RESULT)
 
     def _result_errors(self, payload: dict) -> list[str]:
         """Both halves the SubagentStop hook applies: shape, then status."""
         return (utils.validate_instance(payload, self.result) +
-                runtime.check_status_payload(self.result, payload))
+                agent_contracts.check_status_payload(self.result, payload))
 
     # -- registration and binding --------------------------------------------
 
     def test_schemas_are_registered(self):
         """Every schemas/*.json is registered; package.release.json lists none."""
-        registered = set(compiler.load_package(_PACKAGE_ROOT)["schemas"])
+        registered = set(load_package(_PACKAGE_ROOT)["schemas"])
         for rel in (REQUEST, RESULT):
             with self.subTest(schema=rel):
                 self.assertTrue((_PACKAGE_ROOT / rel).is_file())
@@ -142,7 +144,8 @@ class TestDiagnosticsSchemas(unittest.TestCase):
                     self.assertEqual(utils.validate_instance(example, schema),
                                      [])
                     self.assertEqual(
-                        runtime.check_status_payload(schema, example), [])
+                        agent_contracts.check_status_payload(schema, example),
+                        [])
 
     def test_examples_cover_a_capture_and_a_comparison(self):
         """The two shapes a single `trace_path` could not carry."""
@@ -154,9 +157,9 @@ class TestDiagnosticsSchemas(unittest.TestCase):
         self.assertTrue(any(len(t) >= 2 for t in traces))
 
     def test_tpu_diagnostics_binds_the_pair(self):
-        manifest = compiler.resolve_manifest_composition(
+        manifest = resolve_manifest_composition(
             _PACKAGE_ROOT,
-            utils.load_json(_PACKAGE_ROOT / "package.release.json"))
+            jsonio.load_json(_PACKAGE_ROOT / "package.release.json"))
         agent = {a["name"]: a for a in manifest["agents"]}["tpu-diagnostics"]
         self.assertEqual(agent.get("accepts"), REQUEST)
         self.assertEqual(agent.get("produces"), RESULT)
@@ -295,7 +298,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
 
     def test_profiler_and_kernel_take_the_same_serving_config(self):
         """tpu-agent copies one onboarding object into both requests."""
-        kernel = utils.load_json(
+        kernel = jsonio.load_json(
             _PACKAGE_ROOT /
             "schemas/kernel-request.json")["properties"]["serving_config"]
         profiler = self.request["properties"]["server"]["properties"][
@@ -511,7 +514,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
         kernel-request requires `fusion` and `fused_with`, so a row allowed
         to omit them could be copied into a request the boundary refuses.
         """
-        fusion_context = utils.load_json(
+        fusion_context = jsonio.load_json(
             _PACKAGE_ROOT /
             "schemas/kernel-request.json")["properties"]["fusion_context"]
         rows = [
@@ -533,7 +536,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
 
     def test_a_hot_op_rows_call_shapes_copy_into_a_served_call(self):
         """tpu-agent hands `call_shapes` to tpu-kernel-development as `served_calls`."""
-        served_calls = utils.load_json(
+        served_calls = jsonio.load_json(
             _PACKAGE_ROOT /
             "schemas/kernel-request.json")["properties"]["served_calls"]
         rows = [
@@ -560,7 +563,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
         the profiler records that from the server's metrics, and tpu-agent
         copies it into the served-call case unchanged.
         """
-        served_calls = utils.load_json(
+        served_calls = jsonio.load_json(
             _PACKAGE_ROOT /
             "schemas/kernel-request.json")["properties"]["served_calls"]
         row = {
@@ -574,7 +577,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
                 "outputs": ["bf16[8,16,4,2,128]{4,3,2,1,0}"],
             },
         }
-        load = {
+        trace_load = {
             "sent": "512 requests, in/out 2048/256, concurrency 32",
             "runtime_values": {
                 "requests_running": {
@@ -584,14 +587,14 @@ class TestDiagnosticsSchemas(unittest.TestCase):
                 },
             },
         }
-        trace = dict(_trace(captured=True), hot_ops=[row], load=load)
+        trace = dict(_trace(captured=True), hot_ops=[row], load=trace_load)
         self.assertEqual(self._result_errors(_reported(trace)), [])
         case = {
             "label": "decode",
             "call_shapes": row["call_shapes"],
             "per_call_us": row["per_call_us"],
-            "load": load["sent"],
-            "runtime_values": load["runtime_values"],
+            "load": trace_load["sent"],
+            "runtime_values": trace_load["runtime_values"],
         }
         self.assertEqual(
             utils.validate_instance({"cases": [case]}, served_calls), [])
@@ -604,7 +607,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
         gate/up call reached tpu-kernel-development, and the harness took the other five
         from the report's prose. `source_file` ties them together.
         """
-        served_calls = utils.load_json(
+        served_calls = jsonio.load_json(
             _PACKAGE_ROOT /
             "schemas/kernel-request.json")["properties"]["served_calls"]
         gmm = "vllm_torchtpu/kernels/megablox/gmm_v2.py"
@@ -680,7 +683,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
             utils.validate_instance({"cases": cases}, served_calls), [])
 
     def test_a_traces_load_owes_what_was_sent(self):
-        for label, load in [
+        for label, trace_load in [
             ("no sent", {
                 "runtime_values": {}
             }),
@@ -693,7 +696,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
             }),
         ]:
             with self.subTest(case=label):
-                trace = dict(_trace(captured=True), load=load)
+                trace = dict(_trace(captured=True), load=trace_load)
                 self.assertTrue(self._result_errors(_reported(trace)))
 
     def test_profiler_keeps_the_layout_and_reads_server_metrics(self):

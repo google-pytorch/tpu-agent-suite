@@ -31,7 +31,9 @@ sys_path_root = pathlib.Path(__file__).resolve().parents[2]
 if str(sys_path_root) not in sys.path:
     sys.path.insert(0, str(sys_path_root))
 
-from framework import compiler, installer, utils  # noqa: E402
+from framework import installer, jsonio  # noqa: E402
+from framework.builder import resolve_manifest_composition  # noqa: E402
+from framework.builder import translate  # noqa: E402
 
 Path = pathlib.Path
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
@@ -49,8 +51,9 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
         cls.prev_tpu_agent_suite_home = os.environ.get("TPU_AGENT_SUITE_HOME")
         os.environ["TPU_AGENT_SUITE_HOME"] = str(cls.tpu_agent_suite_home)
 
-        cls.manifest = compiler.resolve_manifest_composition(
-            PACKAGE_DIR, utils.load_json(PACKAGE_DIR / "package.release.json"))
+        cls.manifest = resolve_manifest_composition(
+            PACKAGE_DIR,
+            jsonio.load_json(PACKAGE_DIR / "package.release.json"))
         cls.entry_name = cls.manifest["skills"][0]["name"]
         cls.pkg_name = cls.manifest["name"]
 
@@ -84,7 +87,7 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
         dist_dir = self.temp_dir / "dist_antigravity"
         workspace = self._create_workspace("ws_antigravity")
 
-        compiler.translate(PACKAGE_DIR, "antigravity", dist_dir)
+        translate(PACKAGE_DIR, "antigravity", dist_dir)
         installer.install(
             dist_dir,
             destination=workspace,
@@ -95,7 +98,7 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
 
         plugin_json = workspace / ".agents" / "plugin.json"
         self.assertTrue(plugin_json.is_file(), "Missing .agents/plugin.json")
-        plugin_meta = utils.load_json(plugin_json)
+        plugin_meta = jsonio.load_json(plugin_json)
         self.assertEqual(plugin_meta["name"], self.pkg_name)
 
         skill_md = workspace / ".agents" / "skills" / self.entry_name / "SKILL.md"
@@ -123,7 +126,7 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
         dist_dir = self.temp_dir / "dist_claude"
         workspace = self._create_workspace("ws_claude")
 
-        compiler.translate(PACKAGE_DIR, "claude-code", dist_dir)
+        translate(PACKAGE_DIR, "claude-code", dist_dir)
         installer.install(
             dist_dir,
             destination=workspace,
@@ -150,7 +153,7 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
         settings_file = workspace / ".claude" / "settings.json"
         self.assertTrue(settings_file.is_file(),
                         "Missing .claude/settings.json")
-        settings = utils.load_json(settings_file)
+        settings = jsonio.load_json(settings_file)
         self.assertIn("approved_directories", settings)
 
         self.assertTrue((workspace / "CLAUDE.md").is_file(),
@@ -164,7 +167,7 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
         dist_dir = self.temp_dir / "dist_codex"
         workspace = self._create_workspace("ws_codex")
 
-        compiler.translate(PACKAGE_DIR, "codex", dist_dir)
+        translate(PACKAGE_DIR, "codex", dist_dir)
         installer.install(
             dist_dir,
             destination=workspace,
@@ -204,7 +207,7 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
         dist_dir = self.temp_dir / "dist_cursor"
         workspace = self._create_workspace("ws_cursor")
 
-        compiler.translate(PACKAGE_DIR, "cursor", dist_dir)
+        translate(PACKAGE_DIR, "cursor", dist_dir)
         installer.install(
             dist_dir,
             destination=workspace,
@@ -235,7 +238,7 @@ class TestRuntimeHostRequirements(unittest.TestCase):
         temp_dir = Path(tempfile.mkdtemp(prefix="torchtpu_runtime_reqs_"))
         self.addCleanup(shutil.rmtree, temp_dir, ignore_errors=True)
         dist_dir = temp_dir / "dist"
-        compiler.translate(PACKAGE_DIR, "claude-code", dist_dir, skills=skills)
+        translate(PACKAGE_DIR, "claude-code", dist_dir, skills=skills)
         return (dist_dir / "requirements-client.txt").read_text()
 
     def test_the_release_ships_what_the_runtime_imports(self):

@@ -23,17 +23,21 @@ does.
 ## What ships
 
 `framework/` is one Python package, and every build ships it as is, minus the
-build tools that never leave the repository (the compiler, the linter, the
-frontmatter parser, `definitions/` and `templates/`). A file has the same path
-in the repository and in a build, and its imports have one form,
+build tools that never leave the repository (`compiler.py` and `builder/`, the
+linter, the frontmatter parser, `definitions/` and `templates/`). A file has
+the same path in the repository and in a build, and its imports have one form,
 `from framework import utils`.
 
 | Path | What it is |
 | --- | --- |
 | `framework/runtime.py` | The command-line entry point for everything on this page. |
+| `framework/hooks/` | Hook dispatch: reading the harness's event, running the hook, and replying. |
+| `framework/agent_contracts.py` | Contract checks for delegations and subagent results. |
+| `framework/run_state.py` | Run namespaces and the session records that point at them. |
 | `framework/compute/` | The compute commands and their backend drivers. |
 | `framework/study.py` | The store and commands for long-running studies. |
 | `framework/journal.py` | The session journal: one experiment timeline per run. |
+| `framework/bg_ledger.py` | The per-agent ledger of background work and the idle gate: a subagent does not finish while a child or command it launched is still running. |
 | `framework/trajectory/` | The trajectory export. |
 | `framework/utils.py` | Shared helpers: schema validation, safe path handling, locating runs and packages. |
 | `framework/schemas/` | The schemas the runtime checks hooks, studies and contracts against. |
@@ -85,7 +89,7 @@ expect back, so the runtime sits in between:
 - It converts the hook's decision (`allow` or `deny`, with a reason) back into
   the format the harness expects.
 
-The runtime also provides four built-in hooks that a package can enable in its
+The runtime also provides five built-in hooks that a package can enable in its
 `package.release.json`:
 
 | Built-in | What it does |
@@ -94,6 +98,7 @@ The runtime also provides four built-in hooks that a package can enable in its
 | `validate-schema` | Checks each delegation request against the callee's `accepts` schema, and each agent result against its `produces` schema. |
 | `reap-jobs` | When a session ends, cancels compute jobs that it left running. |
 | `record-event` | Appends lifecycle events to the study a run belongs to. |
+| `track-background` | Records each background agent or command an agent launches, refuses a background delegation from an agent with no shell to wait with, and clears the record when the session ends. The stop gate reads the record to tell a pause from a finished subagent. |
 
 A hook can fail without reaching a decision: it may crash, time out, or print
 something that is not valid output. Each hook declares what such a failure
@@ -144,7 +149,7 @@ schema allows, and each status names the fields that must accompany it. A
 
 Agents never write SSH, `kubectl` or job-polling logic into their prompts. They
 call one command family, and the run's compute profile decides which backend
-runs the work: `local`, `gce_tpu_vm`, `gke_pod`, `gke_job` or `gke_xpk`. The
+runs the work: `local`, `gce_tpu_vm`, `gke_pod` or `gke_job`. The
 profile is `--profile` if given, else the one the run uses, else the default
 in the package's `environment.json`.
 

@@ -6,10 +6,10 @@ A zero-install utility to grade or re-evaluate Harbor model onboarding and hillc
 
 ## Working Directory
 
-Always execute commands from the **root of the `torchtpu-agents` repository**:
+Always execute commands from the **root of the `tpu-agent-suite` repository**:
 
 ```bash
-cd <your torchtpu-agents checkout>
+cd <your tpu-agent-suite checkout>
 ```
 
 *(All commands below assume you are standing in the repository root).*

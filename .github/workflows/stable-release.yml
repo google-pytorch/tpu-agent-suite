@@ -12,243 +12,164 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Stable build of the standalone per-harness release archives. Unlike the
-# nightly, nothing is stamped: the version is exactly what
-# package/package.release.json says, so the archives come out as
-#   tpu-agent-suite-<harness>-v<version>.tar.gz
-# and are published once, to
-#   gs://gh_zips/releases/v<version>/          (never overwritten)
-#   GitHub Release v<version>                  (tag created if missing)
-# The bucket (project tpu-nexus-767207) is private; readers need
-# storage.objectViewer on it.
+# Stable build of the standalone per-harness release archives, with the
+# version taken as-is from package/package.release.json, so the archives come
+# out as tpu-agent-suite-<harness>-v<version>.tar.gz and are published to
+# GitHub Releases.
 #
-# Run it manually from the commit to release. Bump the version in
-# package.release.json in the PR you intend to release: if tag v<version>
-# already exists at another commit the run refuses. The `publish` job needs
-# the repository's Actions "Workflow permissions" to allow write tokens.
-#
-# The two publish targets are not atomic. If GCS succeeded and the GitHub
-# Release step failed, either create the Release by hand from the run
-# artifact (`gh release create v<version> --target <sha> *.tar.gz SHA256SUMS`)
-# or delete gs://gh_zips/releases/v<version>/ and re-dispatch.
-#
-# PR runs and dry runs build and smoke-test but never publish; the `build`
-# job holds only a read token.
+# Releases may only be cut from `main`, a `release/*` branch, or a `v<version>`
+# tag matching `package/package.release.json`.
 name: stable-release
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Build and smoke-test only; publish nothing'
+      publish_release:
+        description: 'Publish compiled release archives to GitHub Releases'
         type: boolean
-        default: false
-  pull_request:
-    paths:
-      - 'Makefile'
-      - '.github/workflows/stable-release.yml'
+        default: true
+      draft_release:
+        description: 'Create the GitHub Release as a Draft for review before publishing'
+        type: boolean
+        default: true
 permissions:
   contents: read
 jobs:
-  build:
+  check-ref:
+    name: check-ref
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
+    env:
+      REF: ${{ github.ref }}
+      PUBLISH_RELEASE: ${{ inputs.publish_release }}
     steps:
+      - name: Require main, release/*, or a v<version> tag
+        run: |
+          case "$REF" in
+            refs/heads/main|refs/heads/release/*|refs/tags/v[0-9]*)
+              echo "Releasing from allowed ref pattern: $REF" ;;
+            *)
+              echo "::error::Stable releases may only be cut from main, release/*, or a v<version> tag (got $REF)."
+              exit 1 ;;
+          esac
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Set up Python
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
-        with:
-          python-version: '3.12'
-      - name: Install dependencies
-        run: pip install -r cicd-requirements.txt
 
-      # package.release.json is the single source of the release version: it
-      # flows into every build manifest and into the archive filenames. A
-      # stable release must carry a plain X.Y.Z, not a nightly .devN stamp.
-      - name: Read release version
+      - name: Read version and verify tag matches package.release.json
         id: version
         run: |
-          python - <<'PY'
-          import json, os, re
-          version = json.load(open("package/package.release.json"))["version"]
-          assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
-              f"{version!r} is not a stable X.Y.Z version")
+          python3 - <<'PY'
+          import json, os, pathlib, re, sys
+          version = json.loads(pathlib.Path("package/package.release.json").read_text())["version"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+              print(f"::error::{version!r} is not a stable X.Y.Z version")
+              sys.exit(1)
+          ref = os.environ["REF"]
+          if ref.startswith("refs/tags/") and ref != f"refs/tags/v{version}":
+              print(f"::error::Tag {ref} does not match package.release.json version v{version}.")
+              sys.exit(1)
+          print(f"Verified version {version} for ref {ref}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"version={version}\n")
-              out.write(f"tag=v{version}\n")
-          print(f"Releasing {version} as tag v{version}")
           PY
 
-      # Refuse before building anything that cannot be published: the tag,
-      # if it exists, must already point at this commit, and the GitHub
-      # Release must not exist yet. Dry runs check too, so an operator can
-      # learn a version is taken without publishing. Only a 404 means the
-      # tag is absent; any other failure stops the run, since a tag that
-      # exists unseen would make `gh release create --target` bind the
-      # Release to the wrong commit. The GCS directory is checked at publish.
-      - name: Check the release does not already exist
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" 2>&1)"; then
-            sha="$(jq -r .object.sha <<<"$ref")"
-            if [ "$(jq -r .object.type <<<"$ref")" = "tag" ]; then
-              sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq .object.sha)"
-            fi
-            if [ "$sha" != "$GITHUB_SHA" ]; then
-              echo "::error::tag ${TAG} points at ${sha}, not at ${GITHUB_SHA}; bump the version or run from the tag"
-              exit 1
-            fi
-            echo "Tag ${TAG} already points at ${GITHUB_SHA}; reusing it"
-          elif grep -q 'HTTP 404' <<<"$ref"; then
-            echo "Tag ${TAG} does not exist; it will be created at ${GITHUB_SHA}"
-          else
-            echo "::error::could not query tag ${TAG}: ${ref}"
-            exit 1
-          fi
-          if out="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" 2>&1)"; then
-            echo "::error::GitHub Release ${TAG} already exists"
-            exit 1
-          elif ! grep -q 'release not found' <<<"$out"; then
-            echo "::error::could not query release ${TAG}: ${out}"
-            exit 1
-          fi
-
-      - name: Test
-        run: make test
-
-      - name: Build release archives
-        run: make archives
-
-      # Install from an extracted archive exactly as an end user would, so a
-      # broken self-contained installer fails the release instead of shipping.
-      # The runner has no Claude Code, so skip the installer's probe of its CLI.
-      - name: Smoke test the claude-code archive
+      - name: Validate release-notes/v<version>.md
+        if: env.PUBLISH_RELEASE == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          archive="dist/archives/tpu-agent-suite-claude-code-v${VERSION}.tar.gz"
-          test -f "$archive"
-          work="$(mktemp -d)"
-          tar -xzf "$archive" -C "$work"
-          dist="$work/tpu-agent-suite-claude-code-v${VERSION}"
-          mkdir -p "$work/project"
-          git init -q "$work/project"
-          HOME="$work/home" python3 "$dist/framework/installer.py" \
-            install --destination "$work/project" \
-            --non-interactive --skip-host-check --skip-harness-check
-          # Install sets up no compute; the runtime saves a profile.
-          central=("$work"/home/.tpu-agent-suite/packages/tpu-agent-suite@*)
-          (cd "$work/project" && HOME="$work/home" python3 \
-            "${central[0]}/framework/runtime.py" compute \
-            --package "$(basename "${central[0]}")" \
-            setup apply --profile default --answers '{"backend": "local"}')
-
-      - name: Write checksums
-        run: |
-          set -euo pipefail
-          cd dist/archives
-          sha256sum -- *.tar.gz > SHA256SUMS
-          cat SHA256SUMS
-
-      # The artifact is what `publish` ships, so the published bytes are the
-      # ones smoke-tested above. It is also a copy on the run page for
-      # debugging, and the only output of PR and dry runs.
-      - name: Upload release archives
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: tpu-agent-suite-${{ steps.version.outputs.version }}
-          path: |
-            dist/archives/*.tar.gz
-            dist/archives/SHA256SUMS
-          if-no-files-found: error
-          retention-days: 30
-
-  # Separate job so the write token never exists in a run triggered by a
-  # pull request, whose Makefile and workflow the `build` job executes.
-  publish:
-    needs: build
-    if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write  # create the tag and the GitHub Release
-    env:
-      GCS_RELEASE_ROOT: gs://gh_zips/releases
-      VERSION: ${{ needs.build.outputs.version }}
-      TAG: ${{ needs.build.outputs.tag }}
-      HAS_GCP_SA_KEY: ${{ secrets.GCP_SA_KEY != '' }}
-    steps:
-      # A manual release with no credentials must fail, not go green
-      # having published nothing.
-      - name: Require publishing credentials
-        if: env.HAS_GCP_SA_KEY != 'true'
-        run: |
-          echo "::error::GCP_SA_KEY is not configured; nothing would be published"
-          exit 1
-
-      - name: Download release archives
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: tpu-agent-suite-${{ needs.build.outputs.version }}
-          path: dist/archives
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@71f986410dfbc7added4569d411d040a91dc6935 # v2.1.8
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      # GCS first: it is the documented install location, and an existing
-      # directory means this version already shipped. The directory is named
-      # by the tag, matching the bucket's existing stable layout. There is no
-      # `latest/` for stable releases; the version directory is the permanent
-      # address.
-      - name: Publish to GCS
-        run: |
-          set -euo pipefail
-          echo "Publishing as: $(jq -r .client_email "$GOOGLE_APPLICATION_CREDENTIALS")"
-          cd dist/archives
-          dest="${GCS_RELEASE_ROOT}/${TAG}"
-          # --no-clobber skips existing objects and still exits 0, so a colliding
-          # version would re-mirror the old build as if it were new. Only
-          # "matched no objects" means the directory is absent; a permission
-          # or transient error must not be read as absent.
-          if out="$(gcloud storage ls "$dest/" 2>&1)"; then
-            echo "::error::$dest already exists; ${VERSION} is already published"
-            exit 1
-          elif ! grep -q 'matched no objects' <<<"$out"; then
-            echo "::error::could not list $dest: ${out}"
+          notes="release-notes/v${VERSION}.md"
+          if [ ! -s "$notes" ]; then
+            echo "::error::$notes is missing or empty. Add release notes (see release-notes/TEMPLATE.md) in the version-bump PR."
             exit 1
           fi
-          gcloud storage cp --no-clobber ./*.tar.gz SHA256SUMS "$dest/"
-          {
-            echo "## Stable release \`${VERSION}\`"
-            echo
-            echo "| Archive | Location |"
-            echo "| :--- | :--- |"
-            for f in *.tar.gz; do echo "| \`$f\` | \`$dest/$f\` |"; done
-          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -qE 'vX\.Y\.Z|<!--' "$notes"; then
+            echo "::error::$notes still contains template placeholders (vX.Y.Z or HTML comments)."
+            exit 1
+          fi
 
-      # `--target` makes gh create the tag at this commit when it does not
-      # exist; when it does, the check in `build` already proved it matches.
-      - name: Create GitHub Release
+      - name: Upload release notes
+        if: env.PUBLISH_RELEASE == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-notes-${{ steps.version.outputs.version }}
+          path: release-notes/v${{ steps.version.outputs.version }}.md
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: check-ref
+    uses: ./.github/workflows/release-archives.yml
+
+  publish-release:
+    name: publish-release
+    needs: [check-ref, release]
+    if: inputs.publish_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+      DRAFT_RELEASE: ${{ inputs.draft_release }}
+      REPO: ${{ github.repository }}
+      PUBLIC_HARNESSES: claude-code antigravity
+    steps:
+      - name: Download verified release archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tpu-agent-suite-${{ needs.release.outputs.version }}
+          path: release-assets
+
+      - name: Download release notes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes-${{ needs.release.outputs.version }}
+          path: release-notes
+
+      - name: Publish release archives to GitHub Releases
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          url="$(gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "$TAG" \
-            --generate-notes \
-            dist/archives/*.tar.gz dist/archives/SHA256SUMS)"
+          notes="$PWD/release-notes/v${VERSION}.md"
+          cd release-assets
+
+          mkdir -p ../public-assets
+          for harness in $PUBLIC_HARNESSES; do
+            f="tpu-agent-suite-${harness}-v${VERSION}.tar.gz"
+            if [ ! -f "$f" ]; then
+              echo "::error::expected public archive $f was not built"
+              exit 1
+            fi
+            grep -E "^[0-9a-f]{64}  ${f}\$" SHA256SUMS >> ../public-assets/SHA256SUMS
+            cp -- "$f" ../public-assets/
+          done
+          cd ../public-assets
+          sha256sum -c SHA256SUMS
+          ls -lh -- *.tar.gz SHA256SUMS
+
+          tag="v${VERSION}"
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists in $REPO"
+            exit 1
+          fi
+          draft_flag=()
+          state="Published"
+          if [ "$DRAFT_RELEASE" = "true" ]; then
+            draft_flag=(--draft)
+            state="Draft"
+          fi
+          gh release create "$tag" \
+            --repo "$REPO" \
+            --title "TPU Agent Suite ${tag}" \
+            --notes-file "$notes" \
+            "${draft_flag[@]}" \
+            ./*.tar.gz SHA256SUMS
           {
+            echo "## GitHub Release \`${tag}\` (${state})"
             echo
-            echo "GitHub Release: ${url}"
+            echo "Published to \`${REPO}\` Releases (harnesses: ${PUBLIC_HARNESSES}):"
+            echo
+            for f in *.tar.gz SHA256SUMS; do echo "- \`$f\`"; done
           } >> "$GITHUB_STEP_SUMMARY"

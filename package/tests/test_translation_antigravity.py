@@ -37,7 +37,8 @@ from test_translation_base import TranslationParityBase  # noqa: E402
 from test_translation_base import parse_yaml_frontmatter
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from framework import compiler, utils  # noqa: E402
+from framework import jsonio, utils  # noqa: E402
+from framework.builder import harness_rules, translators  # noqa: E402
 
 Path = pathlib.Path
 
@@ -45,9 +46,8 @@ Path = pathlib.Path
 # owns it. `test_tool_vocabulary_is_pinned` below asserts the literal values,
 # so a change to the mapping still has to be made deliberately and shows up as
 # one failing assertion rather than passing silently through both sides.
-ANTIGRAVITY_TOOL_MAP = compiler.GOOGLE_HARNESS_TOOL_MAPS["antigravity"]
-DELEGATION_TOOL = compiler.ANTIGRAVITY_DELEGATION_TOOL
-DELEGATION_TOOLS = compiler.GOOGLE_DELEGATION_TOOLS
+ANTIGRAVITY_TOOL_MAP = translators.GOOGLE_HARNESS_TOOL_MAPS["antigravity"]
+DELEGATION_TOOLS = harness_rules.GOOGLE_DELEGATION_TOOLS
 
 
 class TestAntigravityTranslationParity(TranslationParityBase,
@@ -57,9 +57,7 @@ class TestAntigravityTranslationParity(TranslationParityBase,
     HARNESS = "antigravity"
     TARGET_ID = "antigravity-1.0"
     VERSION_RANGE = ">=1.0.0,<2.0.0"
-    # Antigravity declares no version probe; the plan must say so explicitly
-    # rather than inheriting another harness's command.
-    VERSION_COMMAND = None
+    VERSION_COMMAND = ["agy", "--version"]
     # Antigravity discovers subagents at `.agents/agents`; `.agent/` is a
     # customization root for skills and is never scanned for agents.
     SKILL_INSTALL_DEST = ".agents/skills/tpu-agent"
@@ -73,14 +71,14 @@ class TestAntigravityTranslationParity(TranslationParityBase,
         plugin_json_path = self.dist_dir / "plugin.json"
         self.assertTrue(plugin_json_path.is_file(), "Missing plugin.json")
 
-        plugin = utils.load_json(plugin_json_path)
+        plugin = jsonio.load_json(plugin_json_path)
         self.assertEqual(plugin["name"], self.manifest["name"])
         self.assertEqual(plugin["version"], self.manifest["version"])
         self.assertEqual(plugin["description"], self.manifest["description"])
 
     def test_install_plan_writes_only_workspace_memory(self):
         """Antigravity needs no settings merge or TOML write, only the memory block."""
-        plan = utils.load_json(self.dist_dir / "tpu-agent-suite-install.json")
+        plan = jsonio.load_json(self.dist_dir / "tpu-agent-suite-install.json")
         self.assertEqual(plan["json_merges"], [])
         self.assertEqual(plan["toml_sets"], [])
 
@@ -110,10 +108,10 @@ class TestAntigravityTranslationParity(TranslationParityBase,
         """The Antigravity tool names are what Antigravity actually accepts.
 
         The one place the vocabulary is written out literally. Everything else
-        imports `compiler.ANTIGRAVITY_TOOL_MAP`, so without this a rename would
-        propagate to both the generator and its tests and no assertion would
-        notice. Changing a name here is fine -- it just has to be deliberate,
-        and reviewed against Antigravity's own tool list.
+        imports `translators.GOOGLE_HARNESS_TOOL_MAPS`, so without this a
+        rename would propagate to both the generator and its tests and no
+        assertion would notice. Changing a name here is fine -- it just has to
+        be deliberate, and reviewed against Antigravity's own tool list.
         """
         self.assertEqual(
             ANTIGRAVITY_TOOL_MAP, {
@@ -126,7 +124,8 @@ class TestAntigravityTranslationParity(TranslationParityBase,
                 "web_search": ["search_web"],
                 "web_fetch": ["read_url_content"],
             })
-        self.assertEqual(DELEGATION_TOOL, "invoke_subagent")
+        self.assertEqual(DELEGATION_TOOLS,
+                         ["invoke_subagent", "manage_subagents"])
         self.assertEqual(
             sorted(ANTIGRAVITY_TOOL_MAP), sorted(utils.PORTABLE_TOOLS),
             "Every portable tool needs an Antigravity mapping, and no mapping "
@@ -150,9 +149,11 @@ class TestAntigravityTranslationParity(TranslationParityBase,
                 # stops a subagent no longer needed. The root -- the skill's
                 # twin, which `--agent` starts from -- also gets `schedule`
                 # for the heartbeat that keeps a headless run alive.
-                expected.extend(DELEGATION_TOOLS)
-                if compiler.is_root_agent(self.manifest, agent):
-                    expected.extend(compiler.GOOGLE_ROOT_TOOLS)
+                extra = list(DELEGATION_TOOLS)
+                if harness_rules.is_root_agent(self.manifest, agent):
+                    extra += harness_rules.GOOGLE_ROOT_TOOLS
+                # A root with `shell` already has `manage_task` from its map.
+                expected.extend(t for t in extra if t not in expected)
 
             path = self.dist_dir / "agents" / f"{agent['name']}.md"
             fields = parse_yaml_frontmatter(path.read_text(encoding="utf-8"))

@@ -268,11 +268,6 @@ def read_json(path: Path) -> dict[str, Any]:
 # question back; no check runs on a repository it guessed.
 
 
-@criterion(description="tpu-agent delegated the check to tpu-model-onboarding")
-def delegated_to_model_onboarding(workspace: Path) -> bool:
-    return "tpu-model-onboarding" in delegation_targets(workspace)
-
-
 @criterion(description="Preflight resolved the loose name with --resolve")
 def resolved_name(workspace: Path) -> bool:
     return any(

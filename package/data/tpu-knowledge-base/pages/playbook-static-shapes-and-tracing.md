@@ -6,12 +6,12 @@ tags:
 - static-shapes
 - torch-compile
 - openxla
-- mark-step
+- synchronization
 - cache-hits
 created: 2026-08-08
-updated: 2026-08-28
+updated: 2026-11-05
 sources: 1
-human_reviewed: true
+human_reviewed: false
 aliases:
 - static_shapes
 - openxla_caching
@@ -20,7 +20,7 @@ target_imports:
 ---
 # Static Shapes & OpenXLA Graph Tracing
 
-This playbook describes how to configure static input shapes, padding boundaries, and execution step barriers (`mark_step`) to achieve >97% steady-state OpenXLA compilation cache hit rates on Google Cloud TPUs.
+This playbook describes how to configure static input shapes, padding boundaries, and step synchronization barriers to achieve >97% steady-state OpenXLA compilation cache hit rates on Google Cloud TPUs.
 
 ---
 

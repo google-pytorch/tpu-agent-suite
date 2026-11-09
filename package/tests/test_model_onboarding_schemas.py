@@ -25,7 +25,8 @@ _REPO_ROOT = _PACKAGE_ROOT.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from framework import compiler, utils  # noqa: E402
+from framework import jsonio, utils  # noqa: E402
+from framework.builder import resolve_manifest_composition  # noqa: E402
 
 
 class TestModelOnboardingSchemas(unittest.TestCase):
@@ -53,9 +54,9 @@ class TestModelOnboardingSchemas(unittest.TestCase):
     def test_all_schemas_exist_and_are_registered_in_package_json(self):
         # Every schemas/*.json is registered by the compiler; the manifest
         # lists none itself.
-        manifest = compiler.resolve_manifest_composition(
+        manifest = resolve_manifest_composition(
             _PACKAGE_ROOT,
-            utils.load_json(_PACKAGE_ROOT / "package.release.json"))
+            jsonio.load_json(_PACKAGE_ROOT / "package.release.json"))
         registered_schemas = set(manifest.get("schemas", []))
 
         for schema_rel in self.MODEL_ONBOARDING_SCHEMAS:
@@ -68,7 +69,7 @@ class TestModelOnboardingSchemas(unittest.TestCase):
 
     def test_schema_definitions_are_structurally_valid(self):
         for schema_rel in self.MODEL_ONBOARDING_SCHEMAS:
-            schema = utils.load_json(_PACKAGE_ROOT / schema_rel)
+            schema = jsonio.load_json(_PACKAGE_ROOT / schema_rel)
             errors = utils.validate_schema_definition(schema)
             self.assertEqual(
                 errors, [],
@@ -76,7 +77,7 @@ class TestModelOnboardingSchemas(unittest.TestCase):
 
     def test_schema_examples_validate_against_their_schemas(self):
         for schema_rel in self.MODEL_ONBOARDING_SCHEMAS:
-            schema = utils.load_json(_PACKAGE_ROOT / schema_rel)
+            schema = jsonio.load_json(_PACKAGE_ROOT / schema_rel)
             examples = schema.get("examples", [])
             self.assertTrue(
                 len(examples) > 0,
@@ -89,9 +90,9 @@ class TestModelOnboardingSchemas(unittest.TestCase):
                 )
 
     def test_model_onboarding_agents_bind_expected_schemas(self):
-        manifest = compiler.resolve_manifest_composition(
+        manifest = resolve_manifest_composition(
             _PACKAGE_ROOT,
-            utils.load_json(_PACKAGE_ROOT / "package.release.json"))
+            jsonio.load_json(_PACKAGE_ROOT / "package.release.json"))
         agent_map = {a["name"]: a for a in manifest["agents"]}
 
         for agent_name, (
@@ -118,9 +119,9 @@ class TestModelOnboardingSchemas(unittest.TestCase):
         registered as an agent again would bring back the nesting this package
         was flattened to avoid.
         """
-        manifest = compiler.resolve_manifest_composition(
+        manifest = resolve_manifest_composition(
             _PACKAGE_ROOT,
-            utils.load_json(_PACKAGE_ROOT / "package.release.json"))
+            jsonio.load_json(_PACKAGE_ROOT / "package.release.json"))
         agent_names = {a["name"] for a in manifest["agents"]}
         self.assertLessEqual(set(self.EXPECTED_AGENT_SCHEMAS), agent_names)
         step_documents = {
@@ -132,8 +133,8 @@ class TestModelOnboardingSchemas(unittest.TestCase):
         self.assertEqual(step_documents & agent_names, set())
 
     def test_schema_validation_rejects_malformed_payloads(self):
-        schema = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                 "onboarding-request.json")
+        schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "onboarding-request.json")
         # Empty payload still fails: prompt is required.
         errors = utils.validate_instance({}, schema)
         self.assertTrue(
@@ -145,10 +146,18 @@ class TestModelOnboardingSchemas(unittest.TestCase):
             "mode": "train"
         }, schema)
         self.assertTrue(len(errors) > 0, "Invalid mode should be rejected")
+        # The optimization round's candidate measurement has its own mode.
+        self.assertEqual(
+            utils.validate_instance(
+                {
+                    "prompt": "x",
+                    "accelerator_type": "tpu7x",
+                    "mode": "candidate"
+                }, schema), [])
 
         # Unwiring needs the model, the preflight report and the target.
-        schema = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                 "unwiring-request.json")
+        schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "unwiring-request.json")
         complete = {
             "model_id": "state-spaces/mamba-2.8b-hf",
             "cuda_kernels_report": "/tmp/cuda_kernels_report.json",
@@ -163,21 +172,25 @@ class TestModelOnboardingSchemas(unittest.TestCase):
             utils.validate_instance(dict(complete, target="training"), schema),
             "Unknown target should be rejected")
 
-    def test_model_onboarding_request_accepts_plain_text_delegation(self):
-        """tpu-agent delegates in natural language; that must not be denied."""
-        schema = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                 "onboarding-request.json")
+    def test_model_onboarding_request_needs_the_accelerator_type(self):
+        """The prompt can be plain text, but the TPU it targets is required:
+        tpu-agent probes it (query understanding) before delegating."""
+        schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "onboarding-request.json")
         for payload in (
             {
-                "prompt": "Help me onboard Llama-3 to TPU"
+                "prompt": "Help me onboard Llama-3 to TPU",
+                "accelerator_type": "tpu7x"
             },
             {
                 "prompt": "Run Llama 3 8B on TPU",
+                "accelerator_type": "tpu-v6e-slice",
                 "run_id": "20260924T163000Z-abc"
             },
                 # No mode: tpu-model-onboarding must be able to ask the user.
             {
                 "prompt": "Run Llama 3 8B on TPU",
+                "accelerator_type": "tpu7x",
                 "model": {
                     "model_id": "meta-llama/Llama-3.1-8B"
                 }
@@ -185,6 +198,14 @@ class TestModelOnboardingSchemas(unittest.TestCase):
         ):
             self.assertEqual(utils.validate_instance(payload, schema), [],
                              f"Should accept {payload}")
+        for payload in ({
+                "prompt": "Help me onboard Llama-3 to TPU"
+        }, {
+                "prompt": "Help me onboard Llama-3 to TPU",
+                "accelerator_type": ""
+        }):
+            self.assertTrue(utils.validate_instance(payload, schema),
+                            f"Should reject {payload}")
 
     FAILURE_RESULTS = {
         "unwiring-result.json": [
@@ -208,7 +229,7 @@ class TestModelOnboardingSchemas(unittest.TestCase):
     def test_result_schemas_accept_failure_without_deliverables(self):
         """A failed run has no results file, script, manifest or metrics to report."""
         for schema_rel, payloads in self.FAILURE_RESULTS.items():
-            schema = utils.load_json(_PACKAGE_ROOT / "schemas" / schema_rel)
+            schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" / schema_rel)
             for payload in payloads:
                 self.assertEqual(utils.validate_instance(payload, schema), [],
                                  f"{schema_rel} should accept {payload}")
@@ -230,16 +251,16 @@ class TestModelOnboardingSchemas(unittest.TestCase):
                 "parity_verdict": "LOOKS_FINE"
             }),
         ):
-            schema = utils.load_json(_PACKAGE_ROOT / "schemas" / schema_rel)
+            schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" / schema_rel)
             self.assertTrue(utils.validate_instance(payload, schema),
                             f"{schema_rel} should reject {payload}")
 
     def test_model_onboarding_result_hands_off_the_serving_configuration(self):
         """The manifest and recipe paths copy into tpu-kernel-development's request."""
-        result = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                 "onboarding-result.json")
-        request = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                  "kernel-request.json")
+        result = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "onboarding-result.json")
+        request = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                   "kernel-request.json")
         inference = "/runs/r/artifacts/tpu-model-onboarding/inference"
         output_files = {
             "deployments_json": f"{inference}/deployments.json",
@@ -265,9 +286,12 @@ class TestModelOnboardingSchemas(unittest.TestCase):
         self.assertIn("`output_files.launch_recipe`", text)
 
     def test_checkpoint_bucket_is_an_optional_gs_url(self):
-        schema = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                 "onboarding-request.json")
-        base = {"prompt": "Run Qwen/Qwen3-8B on TPU"}
+        schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "onboarding-request.json")
+        base = {
+            "prompt": "Run Qwen/Qwen3-8B on TPU",
+            "accelerator_type": "tpu7x"
+        }
         self.assertEqual(utils.validate_instance(base, schema), [])
         self.assertEqual(
             utils.validate_instance(
@@ -291,16 +315,19 @@ class TestModelOnboardingSchemas(unittest.TestCase):
         self.assertIn("`matchesPrefix`", text)
         self.assertIn("{{script:tpu-model-onboarding/stage_checkpoint.py}}",
                       text)
+        self.assertIn("return `needs_input`", text)
+        self.assertIn(
+            "`{{runtime}} compute setup plan --fields staging_bucket`", text)
         self.assertIn("Step 5c: Record the benchmark", text)
         self.assertIn("{{schema:bench-request.json}}", text)
         self.assertIn("`output_files.bench_request`", text)
 
     def test_bench_request_hands_off_through_the_result(self):
         """A bench_request path fits output_files, and each route validates."""
-        result = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                 "onboarding-result.json")
-        bench = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                "bench-request.json")
+        result = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "onboarding-result.json")
+        bench = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                 "bench-request.json")
         inference = "/runs/r/artifacts/tpu-model-onboarding/inference"
         self.assertEqual(
             utils.validate_instance(
@@ -330,10 +357,44 @@ class TestModelOnboardingSchemas(unittest.TestCase):
             utils.validate_instance(dict(minimal, route="yeet"), bench),
             "An unknown route should be rejected")
 
+    def test_model_onboarding_result_output_files_accepts_unnamed_paths(self):
+        """output_files takes extra named paths, as long as each is a string."""
+        schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "onboarding-result.json")
+        inference = "/runs/r/artifacts/tpu-model-onboarding/inference"
+        base = {"status": "success", "summary": "ok"}
+        self.assertEqual(
+            utils.validate_instance(
+                dict(base,
+                     output_files={
+                         "benchmark_report": f"{inference}/report.md",
+                         "server_log": f"{inference}/server.log",
+                     }), schema), [])
+        for bad in (
+            {
+                "server_log": 1
+            },
+            {
+                "server_log": [f"{inference}/server.log"]
+            },
+            {
+                "server_log": {
+                    "path": f"{inference}/server.log"
+                }
+            },
+                # Declared names keep their own type check.
+            {
+                "benchmark_report": 1
+            },
+        ):
+            self.assertTrue(
+                utils.validate_instance(dict(base, output_files=bad), schema),
+                f"Should reject output_files={bad}")
+
     def test_model_onboarding_result_artifacts_is_path_list(self):
         """Named paths live in output_files; artifacts is a path string list."""
-        schema = utils.load_json(_PACKAGE_ROOT / "schemas" /
-                                 "onboarding-result.json")
+        schema = jsonio.load_json(_PACKAGE_ROOT / "schemas" /
+                                  "onboarding-result.json")
         items = schema["properties"]["artifacts"]["items"]
         self.assertEqual(items.get("type"), "string")
 

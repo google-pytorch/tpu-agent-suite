@@ -32,18 +32,15 @@ import threading
 from typing import Any, Iterator, Mapping
 from zoneinfo import ZoneInfo
 
-from framework import utils
+from framework import jsonio, paths, utils
 
 Path = pathlib.Path
 
 TpuAgentSuiteError = utils.TpuAgentSuiteError
 TPU_AGENT_SUITE_VERSION = utils.TPU_AGENT_SUITE_VERSION
-format_json = utils.format_json
-load_json = utils.load_json
 runtime_schema_path = utils.runtime_schema_path
 utc_now_iso = utils.utc_now_iso
 validate_instance = utils.validate_instance
-write_json = utils.write_json
 
 # A run is one session. A study is the long-running optimization effort that
 # spends many of them, and it is the thing that has to survive a session
@@ -110,10 +107,10 @@ def study_lock(study_id: str) -> Iterator[None]:
     its subdirectory before `start_study` runs.
     """
     if study_id == "__store__":
-        lock_path = utils.get_studies_root() / STUDY_LOCK_FILE
+        lock_path = paths.get_studies_root() / STUDY_LOCK_FILE
     else:
         utils.validate_study_id(study_id)
-        lock_path = utils.get_studies_root() / f".{study_id}.lock"
+        lock_path = paths.get_studies_root() / f".{study_id}.lock"
 
     lock_key = str(lock_path)
     with _THREAD_LOCKS_GUARD:
@@ -159,7 +156,7 @@ def load_study_protocol_schema() -> dict[str, Any]:
     code is what validates it, and because a study must be openable without
     depending on which packages happen to be installed at that moment.
     """
-    return load_json(runtime_schema_path(STUDY_PROTOCOL_SCHEMA))
+    return jsonio.load_json(runtime_schema_path(STUDY_PROTOCOL_SCHEMA))
 
 
 def validate_study_protocol(protocol: dict[str, Any]) -> list[str]:
@@ -245,7 +242,7 @@ def start_study(study_id: str,
         raise TpuAgentSuiteError("invalid study protocol:\n  " +
                                  "\n  ".join(protocol_errors))
 
-    study_root = utils.get_study_root(study_id)
+    study_root = paths.get_study_root(study_id)
     with study_lock(study_id):
         if study_root.exists():
             raise TpuAgentSuiteError(
@@ -268,7 +265,7 @@ def start_study(study_id: str,
             "amendments": [],
             "runs": [],
         }
-        write_json(study_root / STUDY_DOCUMENT, document)
+        jsonio.write_json(study_root / STUDY_DOCUMENT, document)
         return document
 
 
@@ -334,14 +331,14 @@ def append_study_event(study_id: str, kind: str,
     """Append a machine-authored lifecycle event to a study's event stream."""
     utils.validate_study_id(study_id)
     record = {"at": utc_now_iso(), "kind": kind, **fields}
-    return _append_jsonl(utils.get_study_root(study_id) / STUDY_EVENTS, record)
+    return _append_jsonl(paths.get_study_root(study_id) / STUDY_EVENTS, record)
 
 
 def read_study_events(study_id: str, limit: int = 0) -> list[dict[str, Any]]:
     """Read a study's lifecycle events, oldest first; `limit` keeps the newest."""
     utils.validate_study_id(study_id)
-    return utils.read_jsonl(
-        utils.get_study_root(study_id) / STUDY_EVENTS, limit)
+    return jsonio.read_jsonl(
+        paths.get_study_root(study_id) / STUDY_EVENTS, limit)
 
 
 def append_study_journal(study_id: str, entry: dict[str,
@@ -350,22 +347,14 @@ def append_study_journal(study_id: str, entry: dict[str,
     utils.validate_study_id(study_id)
     record = {"at": utc_now_iso(), **entry}
     return _append_jsonl(
-        utils.get_study_root(study_id) / STUDY_JOURNAL, record)
+        paths.get_study_root(study_id) / STUDY_JOURNAL, record)
 
 
 def read_study_journal(study_id: str, limit: int = 0) -> list[dict[str, Any]]:
     """Read a study's overflow journal, oldest first; `limit` keeps the newest."""
     utils.validate_study_id(study_id)
-    return utils.read_jsonl(
-        utils.get_study_root(study_id) / STUDY_JOURNAL, limit)
-
-
-def open_study_ids() -> list[str]:
-    """Study ids that are still open, freshest first."""
-    return [
-        d["study_id"] for d in list_studies()
-        if d.get("status") == STUDY_STATUS_OPEN and "study_id" in d
-    ]
+    return jsonio.read_jsonl(
+        paths.get_study_root(study_id) / STUDY_JOURNAL, limit)
 
 
 def studies_for_event(run_id: str = "") -> list[str]:
@@ -397,12 +386,9 @@ def studies_for_event(run_id: str = "") -> list[str]:
     return [study_id]
 
 
-STUDY_ROUND_SCHEMA = "study-round.json"
-
-
 def load_study_round_schema() -> dict[str, Any]:
     """Load the round-record schema that ships beside the runtime."""
-    return load_json(runtime_schema_path(STUDY_ROUND_SCHEMA))
+    return jsonio.load_json(runtime_schema_path(STUDY_ROUND_SCHEMA))
 
 
 def check_round_against_protocol(record: dict[str, Any],
@@ -581,7 +567,7 @@ STUDY_BASELINE_SCHEMA = "study-baseline.json"
 
 def load_study_baseline_schema() -> dict[str, Any]:
     """Load the baseline schema that ships beside the runtime."""
-    return load_json(runtime_schema_path(STUDY_BASELINE_SCHEMA))
+    return jsonio.load_json(runtime_schema_path(STUDY_BASELINE_SCHEMA))
 
 
 def set_baseline(study_id: str, baseline: dict[str, Any]) -> dict[str, Any]:
@@ -825,12 +811,12 @@ def study_view(document: dict[str, Any]) -> dict[str, Any]:
 
 def load_study(study_id: str) -> dict[str, Any]:
     """Read a study's study state, failing loudly when it is absent."""
-    doc_path = utils.get_study_root(study_id) / STUDY_DOCUMENT
+    doc_path = paths.get_study_root(study_id) / STUDY_DOCUMENT
     if not doc_path.is_file():
         raise TpuAgentSuiteError(
-            f"study {study_id!r} is not in {utils.get_studies_root()} --"
+            f"study {study_id!r} is not in {paths.get_studies_root()} --"
             " start it first")
-    return load_json(doc_path)
+    return jsonio.load_json(doc_path)
 
 
 _ARM_VERDICT_PRIORITY = {
@@ -1011,7 +997,8 @@ def save_study(document: dict[str, Any]) -> dict[str, Any]:
     with study_lock(study_id):
         _enforce_study_state_caps(document)
         document["updated_at"] = utc_now_iso()
-        write_json(utils.get_study_root(study_id) / STUDY_DOCUMENT, document)
+        jsonio.write_json(
+            paths.get_study_root(study_id) / STUDY_DOCUMENT, document)
         return document
 
 
@@ -1083,7 +1070,7 @@ def list_studies() -> list[dict[str, Any]]:
     with an `error` field rather than skipped: a study that vanishes from the
     board because its file broke is the failure this listing exists to catch.
     """
-    root = utils.get_studies_root()
+    root = paths.get_studies_root()
     if not root.is_dir():
         return []
     out: list[dict[str, Any]] = []
@@ -1095,9 +1082,9 @@ def list_studies() -> list[dict[str, Any]]:
             out.append({"study_id": child.name, "error": "no study.json"})
             continue
         try:
-            out.append(load_json(doc_path))
+            out.append(jsonio.load_json(doc_path))
         except (TpuAgentSuiteError, ValueError, OSError) as exc:
-            # load_json wraps a decode failure in TpuAgentSuiteError, so catching
+            # jsonio.load_json wraps a decode failure in TpuAgentSuiteError, so catching
             # only the stdlib errors would let one corrupt study state take the
             # whole board down -- the opposite of what this listing is for.
             out.append({"study_id": child.name, "error": str(exc)})
@@ -1535,49 +1522,60 @@ def dispatch_study_command(args: Any) -> None:
     action = args.study_action
     if action == "start":
         print(
-            format_json(
+            jsonio.format_json(
                 start_study(study_id=args.study_id,
-                            protocol=load_json(args.protocol),
+                            protocol=jsonio.load_json(args.protocol),
                             package=args.package,
                             target=args.target,
                             owner=args.owner)))
     elif action == "status":
-        print(format_json(study_view(load_study(args.study_id))))
+        print(jsonio.format_json(study_view(load_study(args.study_id))))
     elif action == "list":
         print(
-            format_json([
+            jsonio.format_json([
                 study_view(d) if "study_id" in d and "runs" in d else d
                 for d in list_studies()
             ]))
     elif action == "events":
-        print(format_json(read_study_events(args.study_id, limit=args.limit)))
+        print(
+            jsonio.format_json(
+                read_study_events(args.study_id, limit=args.limit)))
     elif action == "journal":
-        print(format_json(read_study_journal(args.study_id, limit=args.limit)))
+        print(
+            jsonio.format_json(
+                read_study_journal(args.study_id, limit=args.limit)))
     elif action == "attach-run":
-        print(format_json(attach_run_to_study(args.study_id, args.run_id)))
+        print(
+            jsonio.format_json(attach_run_to_study(args.study_id,
+                                                   args.run_id)))
     elif action == "record-round":
         print(
-            format_json(record_round(args.study_id,
-                                     load_json(args.round_file))))
+            jsonio.format_json(
+                record_round(args.study_id,
+                             jsonio.load_json(args.round_file))))
     elif action == "set-protocol":
         print(
-            format_json(
-                set_protocol(args.study_id, load_json(args.protocol),
+            jsonio.format_json(
+                set_protocol(args.study_id, jsonio.load_json(args.protocol),
                              args.reason)))
     elif action == "set-baseline":
         print(
-            format_json(set_baseline(args.study_id, load_json(args.baseline))))
+            jsonio.format_json(
+                set_baseline(args.study_id, jsonio.load_json(args.baseline))))
     elif action == "notes":
         print(render_study_notes(args.study_id), end="")
     elif action == "append-journal":
         print(
-            format_json(
-                append_study_journal(args.study_id, load_json(args.row))))
+            jsonio.format_json(
+                append_study_journal(args.study_id,
+                                     jsonio.load_json(args.row))))
     elif action == "close":
-        print(format_json(close_study(args.study_id, outcome=args.outcome)))
+        print(
+            jsonio.format_json(close_study(args.study_id,
+                                           outcome=args.outcome)))
     elif action == "claim-arm":
         print(
-            format_json(
+            jsonio.format_json(
                 claim_arm(args.study_id,
                           arm_id=args.arm,
                           worker_id=args.worker_id,
@@ -1585,7 +1583,7 @@ def dispatch_study_command(args: Any) -> None:
                           claim_ttl_seconds=args.claim_ttl_seconds)))
     elif action == "release-arm":
         print(
-            format_json(
+            jsonio.format_json(
                 release_arm(args.study_id,
                             arm_id=args.arm,
                             status=args.status,

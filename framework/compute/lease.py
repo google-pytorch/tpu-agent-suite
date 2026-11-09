@@ -33,7 +33,7 @@ import sys
 import time
 from typing import Any, Callable
 
-from framework import utils
+from framework import jsonio, paths, utils
 
 from .config import RUNTIME
 from .drivers import jobs
@@ -115,11 +115,11 @@ def is_alive(holder: dict[str, Any]) -> bool:
 
 
 def _path(run_id: str, name: str) -> Path:
-    return utils.get_run_root(run_id) / name
+    return paths.get_run_root(run_id) / name
 
 
 def _doc(run_id: str, name: str) -> dict[str, Any]:
-    return utils.load_json_doc(_path(run_id, name))
+    return jsonio.load_json_or_empty(_path(run_id, name))
 
 
 def read_owner(run_id: str) -> dict[str, Any]:
@@ -143,7 +143,7 @@ def claim(run_id: str, owner: dict[str, Any] | None, workspace: Path,
     if owner is None:
         _path(run_id, OWNER_FILE).unlink(missing_ok=True)
         return
-    utils.write_json(
+    jsonio.write_json(
         _path(run_id, OWNER_FILE), {
             **owner, "workspace": str(workspace),
             "package": package,
@@ -174,8 +174,8 @@ def session_run(pid: int | None = None) -> tuple[str, Path] | None:
     if me is None:
         return None
     found: list[tuple[str, str, Path]] = []
-    for owner_file in utils.get_runs_root().glob(f"*/{OWNER_FILE}"):
-        owner = utils.load_json_doc(owner_file)
+    for owner_file in paths.get_runs_root().glob(f"*/{OWNER_FILE}"):
+        owner = jsonio.load_json_or_empty(owner_file)
         if not owner.get("workspace") or any(
                 owner.get(key) != me[key]
                 for key in ("pid", "started", "host")):
@@ -246,7 +246,7 @@ def reap_orphaned_jobs(
             _path(run_id, SWEEP_FILE).unlink(missing_ok=True)
             continue
         sweeps = _failed_sweeps(run_id) + 1
-        utils.write_json(_path(run_id, SWEEP_FILE), {"failed": sweeps})
+        jsonio.write_json(_path(run_id, SWEEP_FILE), {"failed": sweeps})
         note = " (giving up on the run)" if sweeps >= SWEEP_ATTEMPTS else ""
         failed.update({jid: why + note for jid, why in run_failed.items()})
     return reaped, failed
@@ -301,11 +301,11 @@ def watch(
     nothing when another watcher has the run, or the run is unleased, deleted
     or has no batch jobs left to guard; the next `submit` starts a watcher.
     """
-    run_root = utils.get_run_root(run_id)
+    run_root = paths.get_run_root(run_id)
     if not run_root.is_dir() or _watcher_alive(run_id):
         return [], {}
     me = _holder(os.getpid(), jobs.process_started(os.getpid()))
-    utils.write_json(run_root / WATCHER_FILE, me)
+    jsonio.write_json(run_root / WATCHER_FILE, me)
     try:
         lost_at: float | None = None
         while run_root.is_dir() and _batch_jobs(run_id):

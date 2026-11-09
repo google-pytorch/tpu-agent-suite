@@ -1,0 +1,81 @@
+Copyright 2026 Google LLC
+Licensed under the Apache License, Version 2.0; see LICENSE at the repository root.
+
+vllm_torchtpu patch: let TPU_RPA_DECODE_BLOCK_SIZES set the RPA v3 decode
+block sizes, per layer kind.
+
+The variable holds `sliding=<bkv>:<bkv_c>,global=<bkv>:<bkv_c>` in tokens (KV
+block and compute chunk). Layers with a sliding window take the `sliding`
+entry, the others the `global` one; an entry left out, or one whose chunk does
+not divide its block, leaves the kernel's own decode blocks. Unset, nothing
+changes. The patch carries no sizes: the caller chooses them.
+
+Applies to the non-batched RPA v3 path (no --attention-backend CUSTOM) of the
+plugin in vLLM 0.31.0 (layers/core/attention_interface.py); checked against
+sha256:8e22f91d.
+
+--- a/vllm_torchtpu/layers/core/attention_interface.py	2026-10-16 06:12:13.830205128 +0000
++++ b/vllm_torchtpu/layers/core/attention_interface.py	2026-10-16 06:12:13.831707811 +0000
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ import functools
+ import math
++import os
+ from collections.abc import Callable
+ from typing import Any, cast
+ 
+@@ -330,6 +331,39 @@
+     )
+ 
+ 
++def _decode_block_override(
++    page_size: int, pages_per_seq: int, sliding_window: int | None
++) -> tuple[int, int, int, int] | None:
++    """Decode (bq, bkv, bq_c, bkv_c) from TPU_RPA_DECODE_BLOCK_SIZES, or None.
++
++    The variable holds `sliding=<bkv>:<bkv_c>,global=<bkv>:<bkv_c>` in tokens;
++    either entry may be left out. A layer with a sliding window takes the
++    `sliding` entry, any other layer the `global` one. Sizes are rounded to the
++    page size and clipped to the sequence capacity, and the compute chunk must
++    divide the block; an entry that does not is ignored, leaving the kernel's
++    own decode blocks.
++    """
++    spec = os.environ.get("TPU_RPA_DECODE_BLOCK_SIZES", "").strip()
++    if not spec:
++        return None
++    want = "sliding" if sliding_window is not None else "global"
++    max_kv = page_size * pages_per_seq
++    for item in spec.split(","):
++        name, _, sizes = item.strip().partition("=")
++        if name.strip() != want:
++            continue
++        try:
++            bkv, bkv_c = (int(v) for v in sizes.split(":"))
++        except ValueError:
++            return None
++        bkv = min(max_kv, -(-bkv // page_size) * page_size)
++        bkv_c = min(bkv, -(-bkv_c // page_size) * page_size)
++        if bkv <= 0 or bkv_c <= 0 or bkv % bkv_c:
++            return None
++        return (1, bkv, 1, bkv_c)
++    return None
++
++
+ def sharded_ragged_paged_attention(
+     mesh: Mesh,
+     q: jax.Array,
+@@ -427,6 +461,14 @@
+         block_kwargs["m_block_sizes"] = _capped(rpa_default.RpaCase.MIXED)
+         if attention_chunk_size is not None:
+             block_kwargs["p_block_sizes"] = _capped(rpa_default.RpaCase.PREFILL)
++    elif not use_hd64 and func is rpa_default.ragged_paged_attention:
++        override = _decode_block_override(
++            kv_cache.shape[page_size_axis],
++            page_indices.shape[0] // kv_lens.shape[0],
++            attention_chunk_size,
++        )
++        if override is not None:
++            block_kwargs["d_block_sizes"] = override
+ 
+     def _ragged_paged_attention(*args):
+         return func(

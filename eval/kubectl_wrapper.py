@@ -842,7 +842,7 @@ def _exec_with_injected_selector_or_labels(parsed: ParsedCommand,
 
 def _is_all_namespaces_pods_json(parsed: ParsedCommand) -> bool:
     """True when the command is `kubectl get pods --all-namespaces -o json`
-    without a selector or target name (used by `GkeJobDriver._chips_in_use`)."""
+    without a selector or target name (used by `gke_job.status.chips_in_use`)."""
     if parsed.subcommand != "get" or not parsed.all_namespaces:
         return False
     if parsed.selector is not None or len(parsed.positionals) != 1:
@@ -1087,7 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"error: {sub} requires a target resource name\n")
             return 1
 
-        # Special case for `compute inspect` (`GkeJobDriver._chips_in_use`):
+        # Special case for `compute inspect` (`gke_job.status.chips_in_use`):
         if _is_all_namespaces_pods_json(parsed):
             return _handle_all_namespaces_pods_json(parsed, trial_id, env)
 

@@ -10,6 +10,7 @@ source_ids:
 - xla-scoped-vmem
 - openxla-tiled-layout
 - openxla-sparsecore
+- tpu-info-chips
 generation_recipe: overview.recipe.json
 ---
 
@@ -35,14 +36,14 @@ Under vendor-claimed peak ratings, a single TPU7x chip provides 2307 TFLOPs of B
 
 The TPU7x memory architecture is organized into three principal layers:
 
-- **High-Bandwidth Memory (HBM):** Total on-package HBM capacity is 192 GiB per chip in the comparison table; the architectural prose uses 192 GB per chip and 96 GB per chiplet [^cloud-tpu-7x]. Total aggregate HBM bandwidth is rated at 7380 GBps per chip (described alternatively as approximately 7.37 TB/s) [^cloud-tpu-7x]. HBM holds primary model parameters, optimizer states, heap objects, and SparseCore embedding tables [^cloud-tpu-7x] [^openxla-sparsecore].
+- **High-Bandwidth Memory (HBM):** Total on-package HBM capacity is 192 GiB per chip, 96 GiB per chiplet [^cloud-tpu-7x] [^tpu-info-chips]. *(knowledge base note: the tpu_info chip table also gives 192 GiB per chip, which the runtime exposes as two devices of 96 GiB.)* Total aggregate HBM bandwidth is rated at 7380 GBps per chip (described alternatively as approximately 7.37 TB/s) [^cloud-tpu-7x]. HBM holds primary model parameters, optimizer states, heap objects, and SparseCore embedding tables [^cloud-tpu-7x] [^openxla-sparsecore].
 - **Vector Memory (VMEM) vs. Physical SRAM:** Each TensorCore couples to high-bandwidth on-chip static random-access memory (SRAM) operating as Vector Memory (VMEM), providing scratchpad staging directly for the MXU [^cloud-tpu-7x] [^xla-scoped-vmem]. While the total physical SRAM capacity is not disclosed, the usable software allocation limit for instruction-scoped VMEM managed by the XLA compiler is strictly bounded to 65,472 KiB or 67,043,328 bytes (63.9375 MiB, derived; the source labels this approximately 63.9 MB) [^xla-scoped-vmem]. Exceeding this usable ceiling during custom kernel compilation triggers an `E1001: Scoped Vmem OOM` error [^xla-scoped-vmem].
 - **Host Memory:** Four TPU chips interface to host CPU memory via PCIe, providing a path to offload activations and optimizer states under heavy memory pressure, though at lower transfer speeds than HBM [^cloud-tpu-7x].
 
 | Memory Tier | Allocation / Capacity | Bandwidth / Scope |
 | :--- | :--- | :--- |
-| HBM (Chip Total) | 192 GiB in the table; 192 GB in prose [^cloud-tpu-7x] | 7380 GBps (~7.37 TB/s) [^cloud-tpu-7x] |
-| HBM (Per Chiplet) | 96 GB [^cloud-tpu-7x] | Dedicated local address space [^cloud-tpu-7x] |
+| HBM (Chip Total) | 192 GiB [^cloud-tpu-7x] [^tpu-info-chips] | 7380 GBps (~7.37 TB/s) [^cloud-tpu-7x] |
+| HBM (Per Chiplet) | 96 GiB [^cloud-tpu-7x] [^tpu-info-chips] | Dedicated local address space [^cloud-tpu-7x] |
 | Usable Scoped VMEM Limit | 65,472 KiB / 67,043,328 bytes (63.9375 MiB, derived) [^xla-scoped-vmem] | Compiler-managed per-instruction limit [^xla-scoped-vmem] |
 | Physical On-Chip VMEM SRAM | Unspecified [^cloud-tpu-7x] [^xla-scoped-vmem] | Higher bandwidth than HBM to MXU [^cloud-tpu-7x] |
 
@@ -116,3 +117,5 @@ See [the generation-specific memory and buffer reference](memory-buffers.md) for
 [^openxla-sparsecore]: [OpenXLA SparseCore](https://github.com/openxla/xla/blob/main/docs/sparsecore.md). architecture-reference. SparseCore organization, scratch sizing and embedding stack estimates. URL checked 2026-10-03.
 
 <!-- sources:generated:end -->
+
+[^tpu-info-chips]: [tpu_info chip table](https://github.com/AI-Hypercomputer/cloud-accelerator-diagnostics/blob/main/tpu_info/tpu_info/device.py). code-reference. `TpuChip`: HBM per chip in GiB (`hbm_gib`) and devices per chip, the table `compute inspect` sizes from; checked at commit 35b5377566aa. URL checked 2026-10-27.

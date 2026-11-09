@@ -129,7 +129,7 @@ _EXIT_CODES = {"completed": 0, "failed": 1, "invalid_input": 2}
 
 def hypothesis_bank_path(study_id: str) -> pathlib.Path:
     """Path of the hypothesis bank sidecar for `study_id`."""
-    return study.utils.get_study_root(study_id) / HYPOTHESIS_BANK_FILE
+    return study.paths.get_study_root(study_id) / HYPOTHESIS_BANK_FILE
 
 
 def load_hypothesis_bank(study_id: str) -> dict[str, Any]:
@@ -137,7 +137,7 @@ def load_hypothesis_bank(study_id: str) -> dict[str, Any]:
 
     Each part defaults to empty when the file is absent or malformed.
     """
-    raw = study.utils.load_json_doc(hypothesis_bank_path(study_id))
+    raw = study.jsonio.load_json_or_empty(hypothesis_bank_path(study_id))
     hypotheses = raw.get("hypotheses")
     arms = raw.get("arms")
     retired = raw.get("retired")
@@ -264,13 +264,9 @@ def _reason_code(reason: str) -> str:
 
 
 def _generate_run_id() -> str:
-    """A fresh run id from the framework's generator.
-
-    Imported on first use: the runtime module pulls in compute and trajectory,
-    which `--help` and the common path (an explicit --run-id) never need.
-    """
-    from framework import runtime
-    return runtime.generate_run_id()
+    """Generate a fresh run ID (imported lazily to avoid loading `compute` on `--help`)."""
+    from framework import run_state
+    return run_state.generate_run_id()
 
 
 def _request_id(run_id: Any) -> str:
@@ -1041,8 +1037,8 @@ def admit_hypotheses(
                 # orphan entries are inert (no study arm references them),
                 # whereas the reverse order would leave open arms without
                 # their recipe.
-                study.utils.write_json(hypothesis_bank_path(study_id),
-                                       bank_view)
+                study.jsonio.write_json(hypothesis_bank_path(study_id),
+                                        bank_view)
                 written = bank_view
                 doc.setdefault("arms", []).extend(entry for item in admitted
                                                   for entry in item["entries"])
@@ -1088,7 +1084,7 @@ def admit_hypotheses(
                         })
             pruned = _pruned_bank(written, _arm_ids(doc.get("arms")))
             if pruned != written:
-                study.utils.write_json(hypothesis_bank_path(study_id), pruned)
+                study.jsonio.write_json(hypothesis_bank_path(study_id), pruned)
             if admitted:
                 study.append_study_event(
                     study_id,

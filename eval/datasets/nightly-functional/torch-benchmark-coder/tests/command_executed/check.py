@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import glob
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +31,13 @@ _CMD_TOOLS = {
     "Bash",
     "exec",
 }
-_SUBAGENT_TOOLS = {
-    "invoke_subagent",
-    "subagent",
-    "call_subagent",
-    "delegate",
+_WRITE_TOOLS = {
+    "write_file",
+    "write",
+    "create_file",
+    "edit_file",
+    "edit",
+    "multiedit",
 }
 
 
@@ -115,84 +117,66 @@ def _collect_all_calls() -> list[dict[str, Any]]:
     return calls
 
 
-def _has_artifact(workspace: Path, patterns: list[str]) -> bool:
+def _is_valid_benchmark_script(content: str, require_ast: bool = True) -> bool:
+    if not content.strip(
+    ) or "Bespoke loader not implemented" in content or "torch_xla" in content:
+        return False
+    if require_ast:
+        try:
+            ast.parse(content)
+        except SyntaxError:
+            return False
+    return ("AutoModelForCausalLM" in content and "AutoTokenizer" in content
+            and "run_benchmark_pass" in content
+            and ("get_device" in content or "torch_tpu" in content
+                 or 'device("tpu")' in content or "device('tpu')" in content))
+
+
+@criterion(description=(
+    "Verify torch-benchmark-coder Causal LM synthesis was executed"))
+def check_command_executed(workspace: Path) -> bool:
     search_dirs = [
         workspace,
         Path("/root/.tpu-agent-suite/runs"),
         Path.home() / ".tpu-agent-suite/runs",
     ]
     for s_dir in search_dirs:
-        if not s_dir.exists():
-            continue
-        for pat in patterns:
-            try:
-                matches = list(s_dir.glob(pat)) + list(
-                    s_dir.glob(f"*/artifacts/{pat}"))
-                for m in matches:
-                    if m.is_file() and m.stat().st_size > 0:
+        try:
+            if not s_dir.exists():
+                continue
+            for m in s_dir.glob("**/benchmark_tpu.py"):
+                if m.is_file() and "/skills/" not in str(
+                        m) and "/packages/" not in str(m):
+                    if _is_valid_benchmark_script(
+                            m.read_text(encoding="utf-8", errors="ignore")):
                         return True
-            except Exception:
-                pass
-    return False
+        except Exception:
+            pass
 
-
-@criterion(description=(
-    "Verify torch_benchmark_coder scripts or benchmark synthesis commands were executed"
-))
-def check_command_executed(workspace: Path) -> bool:
-    target_file = workspace / "benchmark_tpu.py"
-    if target_file.is_file() and target_file.stat().st_size > 0:
-        return True
-
-    if _has_artifact(workspace, [
-            "*benchmark_tpu*.py", "*torch_benchmark_coder*",
-            "*torch-benchmark-coder*", "*torch_coder*", "*torch-coder*"
-    ]):
-        return True
-
-    target_names = {
-        "torch_benchmark_coder",
-        "torch-benchmark-coder",
-        "torch benchmark coder",
-        "torch_coder",
-        "torch-coder",
-        "torch coder",
-        "benchmark_tpu",
-        "benchmark",
-    }
-    regex = re.compile(
-        r"benchmark_tpu|run_benchmarks|torch_benchmark_coder|torch-benchmark-coder|torch_coder|torch-coder"
-    )
-
-    calls = _collect_all_calls()
-    for tc in calls:
+    for tc in _collect_all_calls():
         tool_name = (tc.get("function_name") or tc.get("name") or "").lower()
-        args = tc.get("arguments") or tc.get("args") or {}
+        args = (tc.get("arguments") or tc.get("args") or tc.get("input") or {})
+        if not isinstance(args, dict):
+            continue
+        if tool_name in _WRITE_TOOLS:
+            path = str(
+                args.get("Path") or args.get("path") or args.get("file_path")
+                or args.get("TargetFile") or args.get("AbsolutePath") or "")
+            content = str(
+                args.get("Content") or args.get("content")
+                or args.get("file_text") or args.get("CodeContent")
+                or args.get("Replacement") or args.get("new_string") or "")
+            is_edit = tool_name in {"edit_file", "edit", "multiedit"}
+            if path.endswith(
+                    "benchmark_tpu.py") and _is_valid_benchmark_script(
+                        content, require_ast=not is_edit):
+                return True
         if tool_name in _CMD_TOOLS:
             cmd = str(
                 args.get("command") or args.get("CommandLine")
                 or args.get("cmd") or args.get("command_line") or "")
-            if regex.search(cmd):
-                return True
-        if tool_name in _SUBAGENT_TOOLS:
-            subagents = args.get("Subagents") or args.get("subagents") or []
-            if isinstance(subagents, list):
-                for sub in subagents:
-                    if isinstance(sub, dict):
-                        t_name = str(
-                            sub.get("TypeName") or sub.get("type_name")
-                            or sub.get("Role") or sub.get("role")
-                            or "").lower()
-                        prompt = str(
-                            sub.get("Prompt") or sub.get("prompt")
-                            or "").lower()
-                        if any(n in t_name for n in target_names) or any(
-                                n in prompt for n in target_names):
-                            return True
-                        if regex.search(prompt) or regex.search(t_name):
-                            return True
-            args_str = str(args).lower()
-            if any(n in args_str for n in target_names):
+            if "benchmark_tpu.py" in cmd and _is_valid_benchmark_script(
+                    cmd, require_ast=False):
                 return True
 
     return False

@@ -373,7 +373,8 @@ class TestPlan(SweepCase):
         for bad in (["--isl-osl", "1024:1024,1024:1024"
                      ], ["--isl-osl", "1024:1024", "--base-url",
                          "http://x"], ["--isl-osl", "1024:1024", "--profile"],
-                    ["--isl-osl", "1024:1024", "--no-such-flag"]):
+                    ["--isl-osl", "1024:1024", "--no-such-flag"
+                     ], ["--workload", "agentx", "--concurrency", "1"]):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 self.plan(client=bad)
 

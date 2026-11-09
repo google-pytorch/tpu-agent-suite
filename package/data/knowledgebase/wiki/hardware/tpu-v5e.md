@@ -3,9 +3,9 @@ title: "TPU v5e"
 type: hardware
 tags: [hardware]
 created: 2026-08-22
-updated: 2026-09-04
-sources: 1
-human_reviewed: true
+updated: 2026-10-27
+sources: 2
+human_reviewed: false
 ---
 
 Fifth-generation efficiency chip: single-TensorCore, 2D-torus, 256-chip pods; combined
@@ -17,7 +17,7 @@ latency). Specs from [Cloud TPU v5e docs](../sources/2026-08-cloud-tpu-v5e-docs.
 | Spec | Value |
 |---|---|
 | Peak compute / chip | 197 TFLOPs bf16; 393 TOPs int8 (2×) |
-| HBM | 16 GB, 800 GiBps |
+| HBM | 16 GiB, 800 GiBps |
 | TensorCores / chip | 1; 4 MXUs |
 | [ICI](../concepts/ici.md) | 400 GBps bidi per chip, 4 ports; 2D torus |
 | Pod | 256 chips (16x16); 50.63 bf16 PFLOPs; all-reduce 51.2 TB/s; bisection 1.6 TB/s |
@@ -40,3 +40,4 @@ latency). Specs from [Cloud TPU v5e docs](../sources/2026-08-cloud-tpu-v5e-docs.
 ## Sources
 
 - [Google Cloud TPU v5e documentation](../sources/2026-08-cloud-tpu-v5e-docs.md)
+- HBM capacity unit (GiB): [tpu_info chip table](../sources/2026-10-tpu-info-chip-table.md)

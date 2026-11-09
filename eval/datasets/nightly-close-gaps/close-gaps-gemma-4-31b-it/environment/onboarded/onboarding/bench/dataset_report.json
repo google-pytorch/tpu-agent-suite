@@ -1,0 +1,28 @@
+{
+ "source": "anon8231489123/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json",
+ "tokenizer": "google/gemma-4-31B-it",
+ "bos_counted": false,
+ "sets": {
+  "sharegpt_isl1024_c512": {
+   "isl": 1024,
+   "count": 2048,
+   "unique": 2048,
+   "rejected_slices": 0,
+   "file": "sharegpt_isl1024_c512.jsonl"
+  },
+  "sharegpt_isl1024_c256": {
+   "isl": 1024,
+   "count": 768,
+   "unique": 768,
+   "rejected_slices": 0,
+   "file": "sharegpt_isl1024_c256.jsonl"
+  },
+  "sharegpt_isl8192_c64": {
+   "isl": 8192,
+   "count": 256,
+   "unique": 256,
+   "rejected_slices": 0,
+   "file": "sharegpt_isl8192_c64.jsonl"
+  }
+ }
+}

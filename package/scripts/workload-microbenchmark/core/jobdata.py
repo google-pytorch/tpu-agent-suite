@@ -19,248 +19,41 @@ split warmup vs profiling, and (optionally) step costs read from the server log.
 small enough to commit next to a reference config, which is what lets `selftest`
 re-derive every reference offline.
 
-Input is a job directory, `<jobs root>/<job-id>/`: the serving job's Kubernetes JobSet manifest
-as `recipe.yaml`, its benchmark and server outputs under `outputs/`, and optionally its server
-container logs under `logs/`. The root is `DEFAULT_ROOT` (`cli.py --jobs`, default
-`<work>/jobs`). This module fetches nothing: the agent fetches the job's files first
-(`compute job artifacts`), then points here.
+Input is a job directory, `<jobs root>/<job-id>/`. Where the server's settings and the client's
+results come from are two separate choices, each made in one place:
+- server (`read_recipe`): for a server this package started (`compute submit --serve`), vLLM's
+  own log. An AgentX job's JobSet manifest, `recipe.yaml`, is read by `jobdata_agentx`, which
+  builds on this module and passes its own readers to `snapshot`.
+- client (`read_requests`): aiperf's per-request records (`profile_export.jsonl`, with the server
+  counters and the step slices beside them); else the cells of the package's own
+  `serving_benchmark.py` (`summary.json`), from which the requests are modelled.
+Benchmark and server outputs are under `outputs/`, server container logs optionally under
+`logs/`. The root is `DEFAULT_ROOT` (`cli.py --jobs`, default `<work>/jobs`). This module fetches
+nothing: the agent fetches the job's files first (`compute job artifacts`), then points here.
 """
 
 from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import re
-import shlex
 import statistics
 from typing import Any
-
-import yaml
 
 DEFAULT_ROOT = os.path.join(os.getcwd(), ".work", "jobs")
 
 # ---------------------------------------------------------------- recipe
 
 
-def _containers(recipe: dict) -> list[dict]:
-    out = []
-    for rj in recipe.get("spec", {}).get("replicatedJobs", []):
-        pod = rj["template"]["spec"]["template"]["spec"]
-        for c in pod.get("containers", []):
-            out.append({"replicated_job": rj["name"], **c})
-    return out
-
-
-#: Runs before the recipe script. fd 3 is opened on the capture file *before* restricted mode,
-#: because rbash refuses redirection to files but allows `>&3`. Restricted mode also refuses
-#: commands with a `/`, `cd`, `exec` and changing PATH; PATH is an empty directory, so every
-#: external command (gcloud, ray, python, sleep, tee) is a no-op that succeeds.
-_PRELUDE = r'''exec 3>"$WMB_CAPTURE"
-unset WMB_CAPTURE
-builtin set -r
-command_not_found_handle() { return 0; }
-set() {
-  local a=() x skip=0
-  for x in "$@"; do
-    if [ $skip = 1 ]; then skip=0; continue; fi
-    case $x in -o|+o|-?*o|+?*o) skip=1;; -?*|+?*) ;; *) a+=("$x");; esac
-  done
-  [ ${#a[@]} -gt 0 ] && builtin set -- "${a[@]}"
-  return 0
-}
-exec() { [ $# -gt 0 ] && "$@"; return 0; }
-vllm() {
-  local n
-  for n in "$@"; do printf 'A\037%s\0' "$n" >&3; done
-  for n in $(compgen -e); do printf 'E\037%s=%s\0' "$n" "${!n}" >&3; done
-  builtin kill -KILL 0
-}
-'''
-
-#: `> file`, `>> file`, `&> file`, `2>/dev/null`; not fd duplication (`2>&1`, `>&2`).
-#: rbash turns any file redirect into a failed command, which is harmless everywhere except
-#: on the `vllm` call itself, so only lines that call it are stripped.
-_FILE_REDIRECT = re.compile(
-    r"""(?<=\s)(?:\d|&)?>>?\|?[ \t]*(?!&)(?:"[^"\n]*"|'[^'\n]*'|[^\s;|&)"'<>]+)"""
-)
-_CALLS_VLLM = re.compile(r"(^|[\s;(])vllm\s|VLLM_ARGS\[@\]")
-
-#: Set by bash or by the prelude, not by the recipe.
-_SHELL_ENV = {"PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"}
-
-
-def _eval_script(
-        script: str,
-        env: dict[str, str],
-        timeout_s: float = 30) -> tuple[list[str], dict[str, str]] | None:
-    """Run the recipe script in restricted bash until it calls `vllm`, and return the argv
-    and the exported environment at that call, exactly as bash expanded them: `export`s,
-    `${X:-default}`, `if` branches, line continuations, arrays, `VAR=x vllm ...` prefixes.
-    Returns None if the script never reaches `vllm` (e.g. `python -m vllm...`).
-
-    Filesystem tests (`[ -d /vllm-cache/... ]`) see this machine, not the pod."""
-    import signal
-    import subprocess
-    import tempfile
-    body = "\n".join(
-        _FILE_REDIRECT.sub("", line) if _CALLS_VLLM.search(line) else line
-        for line in script.splitlines())
-    with tempfile.TemporaryDirectory() as tmp:
-        cap, empty = os.path.join(tmp, "capture"), os.path.join(tmp, "bin")
-        os.mkdir(empty)
-        path = os.path.join(tmp, "recipe.sh")
-        with open(path, "w") as f:
-            f.write(_PRELUDE + "\n" + body + "\n")
-        run_env = {**env, "PATH": empty, "HOME": tmp, "WMB_CAPTURE": cap}
-        with open(os.path.join(tmp, "stderr"), "w") as err:
-            p = subprocess.Popen(["/bin/bash", path],
-                                 cwd=tmp,
-                                 env=run_env,
-                                 stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=err,
-                                 start_new_session=True)
-            try:
-                p.wait(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                pass
-            finally:
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                p.wait()
-        recs = []
-        if os.path.exists(cap):
-            with open(cap, "rb") as f:
-                recs = f.read().decode(errors="replace").split("\0")
-    argv = [r[2:] for r in recs if r.startswith("A\x1f")]
-    if not argv:
-        return None
-    out_env = {}
-    for r in recs:
-        if r.startswith("E\x1f") and "=" in r:
-            k, v = r[2:].split("=", 1)
-            if k not in _SHELL_ENV:
-                out_env[k] = v
-    return argv, out_env
-
-
-def _args_from_tokens(tokens: list[str]) -> tuple[dict[str, Any], list[str]]:
-    if "serve" in tokens:
-        tokens = tokens[tokens.index("serve") + 1:]
-    model = tokens[0] if tokens and not tokens[0].startswith("-") else None
-    args: dict[str, Any] = {}
-    i = 1 if model else 0
-    while i < len(tokens):
-        t = tokens[i]
-        if not t.startswith("--"):
-            i += 1
-            continue
-        if "=" in t:
-            k, v = t[2:].split("=", 1)
-            args[k] = v
-            i += 1
-        elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-            args[t[2:]] = tokens[i + 1]
-            i += 2
-        else:
-            args[t[2:]] = True
-            i += 1
-    return args, ([model] if model else [])
-
-
-def _parse_serve_args(script: str) -> tuple[dict[str, Any], list[str]]:
-    """Fallback when `_eval_script` cannot reach `vllm`: pull `vllm serve` arguments out of
-    the script text. Handles a `VLLM_ARGS=( ... )` array whose expansion may carry extra flags
-    (`"${VLLM_ARGS[@]}" --no-dcp-q-replicate`), and a one-line `vllm serve ...`. Does not
-    expand shell variables or follow `\\` continuations.
-    """
-    tokens: list[str] = []
-    m = re.search(r"VLLM_ARGS=\(\s*\n(.*?)\n\s*\)", script, re.S)
-    if m:
-        body = "\n".join(line for line in m.group(1).splitlines()
-                         if not line.strip().startswith('"${')
-                         and "OFFLOAD_ARGS" not in line)
-        tokens = shlex.split(body)
-        tail = re.search(r'"\$\{VLLM_ARGS\[@\]\}"([^|\n]*)', script)
-        if tail:
-            # stop at the first shell redirection: `--flag 2>&1 | tee log`
-            tokens += [
-                t for t in shlex.split(re.split(r"\s\d?>", tail.group(1))[0])
-            ]
-    else:
-        line = next((s for s in script.splitlines() if "vllm serve" in s), "")
-        tokens = shlex.split(re.split(r"\s\d?>|\|", line)[0])
-    return _args_from_tokens(tokens)
-
-
 def read_recipe(job_dir: str) -> dict[str, Any]:
-    recipe = yaml.safe_load(open(os.path.join(job_dir, "recipe.yaml")))
-    server = bench = None
-    for c in _containers(recipe):
-        script = (c.get("args") or [""])[0]
-        if "vllm serve" in script or "VLLM_ARGS" in script:
-            server = (c, script)
-        elif "aiperf" in script or "vllm bench" in script or "REPLAY_CMD" in script:
-            bench = (c, script)
-    if server is None:
-        raise ValueError(f"{job_dir}: no container runs `vllm serve`")
-    c, script = server
-    cenv = {
-        e["name"]: e.get("value")
-        for e in c.get("env", []) if "value" in e
-    }
-    benv = {
-        e["name"]: e.get("value")
-        for e in (bench[0].get("env", []) if bench else []) if "value" in e
-    }
-    # the server runs on node 0 (multi-host recipes branch on the jobset index)
-    ev = _eval_script(script, {
-        "JOBSET_JOB_INDEX": "0",
-        **{
-            k: str(v)
-            for k, v in cenv.items()
-        }
-    })
-    if ev:
-        argv, env = ev
-        args, model = _args_from_tokens(argv)
-        if "JOBSET_JOB_INDEX" not in cenv:
-            env.pop("JOBSET_JOB_INDEX", None)
-    else:
-        args, model = _parse_serve_args(script)
-        env = dict(cenv)
-    meta = recipe.get("metadata", {})
-    return {
-        "job_id":
-        meta.get("name"),
-        "owner":
-        _annotated_user(meta.get("annotations") or {}),
-        "image":
-        c.get("image"),
-        "model_path":
-        model[0] if model else None,
-        "server_args":
-        args,
-        "env":
-        env,
-        # what the script itself set or changed at the `vllm` call, on top of container env
-        "env_container":
-        cenv,
-        "env_from_script": {
-            k: v
-            for k, v in env.items() if cenv.get(k) != v
-        },
-        "serve_parse":
-        "bash-eval" if ev else "regex-fallback (script exports not applied)",
-        "bench_env":
-        benv,
-        "slice_workers":
-        next((rj.get("replicas") for rj in recipe["spec"]["replicatedJobs"]
-              if rj["name"] == c["replicated_job"]), None),
-    }
+    """The served command and env, from the vLLM log of a server this package started."""
+    log = _serve_log(job_dir)
+    if not log:
+        raise FileNotFoundError(
+            f"{job_dir}: no vLLM server log with a `non-default args` line")
+    return _recipe_from_vllm_log(job_dir, log)
 
 
 # ---------------------------------------------------------------- aiperf records
@@ -274,10 +67,16 @@ def _find(job_dir: str, pattern: str) -> str | None:
 
 
 def read_requests(job_dir: str) -> list[dict[str, Any]]:
+    """The client's per-request records: aiperf's `profile_export.jsonl`, else requests modelled
+    from the cells of a `serving_benchmark.py` run (`summary.json`)."""
     path = _find(job_dir, "profile_export.jsonl")
     if not path:
+        cells = read_summary_cells(job_dir)
+        if cells:
+            return _summary_requests(cells)
         raise ValueError(
-            f"{job_dir}: no profile_export.jsonl (not an aiperf job?)")
+            f"{job_dir}: no profile_export.jsonl (aiperf) and no serving_benchmark.py "
+            "summary.json under outputs/")
     rows = []
     for line in open(path):
         d = json.loads(line)
@@ -304,6 +103,79 @@ def read_requests(job_dir: str) -> list[dict[str, Any]]:
         r["t0"] = round(r["t0"] - t0, 3)
         if r["t1"]:
             r["t1"] = round(r["t1"] - t0, 3)
+    return rows
+
+
+# ---------------------------------------------------------------- serving_benchmark.py summary
+
+
+def read_summary_cells(job_dir: str) -> list[dict[str, Any]] | None:
+    """The cells of a run of the package's own client (scripts/common/serving_benchmark.py,
+    `summary.json`): fixed input / output lengths at a fixed concurrency, every prompt new. It keeps
+    no per-request records, only each replicate's totals."""
+    path = _find(job_dir, "summary.json")
+    if not path:
+        return None
+    d = json.load(open(path))
+    if not isinstance(d, dict) or "cells" not in d or "settings" not in d:
+        return None
+    out = []
+    for c in d["cells"]:
+        reps = [
+            r for r in c.get("replicates", [])
+            if r.get("completed") and r.get("duration_s")
+        ]
+        if c.get("status") != "ok" or not reps:
+            continue
+        ttft = [
+            r["ttft_mean_ms"] for r in reps
+            if r.get("ttft_mean_ms") is not None
+        ]
+        out.append({
+            "cell": c["cell"],
+            "isl": c["isl"],
+            "osl": c["osl"],
+            "concurrency": c["concurrency"],
+            "requests": int(sum(r["completed"] for r in reps)),
+            "duration_s": sum(r["duration_s"] for r in reps),
+            "ttft_ms": statistics.mean(ttft) if ttft else None,
+        })
+    return out or None
+
+
+def _summary_requests(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Requests MODELLED from a summary's cells: each cell's prompts back to back on
+    `concurrency` slots, each lasting the cell's duration x concurrency / completed (a closed
+    loop), cells one after another. Every prompt is new, so none extends another."""
+    rows, t = [], 0.0
+    for c in cells:
+        n, conc = c["requests"], c["concurrency"]
+        dur = c["duration_s"] * conc / n
+        for i in range(n):
+            t0 = t + (i // conc) * dur
+            rows.append({
+                "conv":
+                f"{c['cell']}-{i}",
+                "turn":
+                0,
+                "kind":
+                "modelled from summary.json",
+                "phase":
+                "profiling",
+                "t0":
+                round(t0, 3),
+                "t1":
+                round(t0 + dur, 3),
+                "isl":
+                c["isl"],
+                "osl":
+                c["osl"],
+                "ttft_ms":
+                c["ttft_ms"] if c["ttft_ms"] is not None else 0.0,
+                "error":
+                False,
+            })
+        t += math.ceil(n / conc) * dur
     return rows
 
 
@@ -550,13 +422,16 @@ _SCHED = re.compile(
     r"running_reqs=(\d+)")
 
 #: Startup facts read from the server log. The TPU runtime resolves a hybrid (GDN / mamba)
-#: model's page size itself (`--block-size` is only a floor), and logs it with the block count.
+#: model's page size itself (`--block-size` is only a floor), and logs it with the block count;
+#: every model's page is also logged by vllm_torchtpu as "Using KV cache block size: N"
+#: (platforms/tpu_platform.py), e.g. 256 under the batched-RPA CUSTOM backend.
 _LOG_FACTS = {
     "kv_pool_tokens":
     (re.compile(r"GPU KV cache size: ([\d,]+) tokens"), "GPU KV cache size"),
     "block_size_resolved":
-    (re.compile(r"TPU block_size derivation path: .*final_block_size=(\d+)"),
-     "final_block_size="),
+    (re.compile(r"(?:TPU block_size derivation path: .*final_block_size=|"
+                r"Using KV cache block size: )(\d+)"),
+     ("final_block_size=", "Using KV cache block size: ")),
     "kv_num_blocks":
     (re.compile(r"\bnum_blocks=(\d+) num_groups=\d+"), "num_blocks="),
 }
@@ -621,6 +496,8 @@ def _server_logs(job_dir: str) -> list[str]:
         return [path]
     hits = glob.glob(
         os.path.join(job_dir, "logs", "*", "*", "vllm-server.log*"))
+    if not hits and _serve_log(job_dir):
+        return [_serve_log(job_dir)]
     return sorted(hits, key=os.path.getsize, reverse=True)
 
 
@@ -638,7 +515,8 @@ def read_log(job_dir: str, scan_steps: bool) -> dict[str, Any]:
               if gz else open(path, errors="replace")) as f:
             for i, line in enumerate(f):
                 for key, (rx, cheap) in _LOG_FACTS.items():
-                    if key not in out and cheap in line:
+                    if key not in out and any(c in line for c in (
+                            cheap if isinstance(cheap, tuple) else (cheap, ))):
                         m = rx.search(line)
                         if m:
                             out[key] = int(m.group(1).replace(",", ""))
@@ -672,6 +550,138 @@ def read_log(job_dir: str, scan_steps: bool) -> dict[str, Any]:
         out["prefill_step_pairs"] = len(gaps)
         out["prefill_budget_tokens"] = budget
     return out
+
+
+# ---------------------------------------------------------------- vLLM server log
+
+#: A job with no `recipe.yaml` (a server started through the package's launcher) is read from
+#: vLLM's own log: the API server logs the arguments it was given that differ from the defaults
+#: (vllm/entrypoints/utils.py: "non-default args: {...}"), and the engine logs its resolved config
+#: ("Initializing a V1 LLM engine ... with config: ..."). Neither records the environment.
+ARGS_MARK = "non-default args: "
+ENGINE_MARK = "with config: "
+#: `non-default args` keys that are not `vllm serve` flags.
+_ARGS_SKIP = {"model_tag", "model", "served_model_name", "dispatch_function"}
+
+
+def _open_log(path: str):
+    import gzip
+    return (gzip.open(path, "rt", errors="replace")
+            if path.endswith(".gz") else open(path, errors="replace"))
+
+
+def _serve_log(job_dir: str) -> str | None:
+    """The vLLM server log (the one holding the `non-default args` line), anywhere under the job
+    directory, largest first."""
+    for path in sorted(glob.glob(os.path.join(job_dir, "**", "*.log*"),
+                                 recursive=True),
+                       key=os.path.getsize,
+                       reverse=True):
+        with _open_log(path) as f:
+            for i, line in enumerate(f):
+                if ARGS_MARK in line:
+                    return path
+                if i > 100_000:
+                    break
+    return None
+
+
+def parse_args_line(line: str) -> dict[str, Any] | None:
+    """The dict of a `non-default args: {...}` line (pure, unit-tested). Values that are not
+    Python literals (config objects such as `ProfilerConfig(...)`) are kept as their source
+    text, so one such value does not lose the rest."""
+    import ast
+    if ARGS_MARK not in line:
+        return None
+    text = line.split(ARGS_MARK, 1)[1].strip()
+    try:
+        node = ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return None
+    if not isinstance(node, ast.Dict):
+        return None
+    out: dict[str, Any] = {}
+    for k, v in zip(node.keys, node.values):
+        try:
+            key = ast.literal_eval(k)
+        except (ValueError, SyntaxError):
+            continue
+        try:
+            out[key] = ast.literal_eval(v)
+        except (ValueError, SyntaxError):
+            out[key] = ast.unparse(v)
+    return out
+
+
+def _engine_flag(line: str, name: str) -> str | None:
+    m = re.search(rf"\b{name}=([^,\s]+)", line.split(ENGINE_MARK, 1)[-1])
+    return m.group(1) if m else None
+
+
+def _recipe_from_vllm_log(job_dir: str, log: str) -> dict[str, Any]:
+    """`read_recipe` for a server with no recipe.yaml: the args from vLLM's `non-default args`
+    line, as `vllm serve` flags (`tensor_parallel_size` -> `tensor-parallel-size`), and prefix
+    caching from the engine config line when the flag was left at vLLM's default. vLLM does not
+    log the environment, so `env` is empty: env the model needs comes from its model.py
+    `TWIN_ENV`, or `--override env.NAME=...`. The pod cannot see its image: `image` is None, and
+    `forward-cmd` then needs `--image` (container backends) or `--interpreter` (host backends)."""
+    raw: dict[str, Any] = {}
+    prefix = None
+    with _open_log(log) as f:
+        for line in f:
+            if not raw and ARGS_MARK in line:
+                raw = parse_args_line(line) or {}
+            elif prefix is None and ENGINE_MARK in line and "LLM engine" in line:
+                prefix = _engine_flag(line, "enable_prefix_caching")
+            if raw and prefix is not None:
+                break
+    model = raw.get("model") or raw.get("model_tag")
+    args = {
+        k.replace("_", "-"): v
+        for k, v in raw.items() if k not in _ARGS_SKIP
+    }
+    if "enable-prefix-caching" not in args and prefix in ("True", "False"):
+        args["enable-prefix-caching"] = prefix == "True"
+    return {
+        "job_id": os.path.basename(os.path.normpath(job_dir)),
+        "owner": None,
+        "image": None,
+        "model_path": model,
+        "server_args": args,
+        "env": {},
+        "env_container": {},
+        "env_from_script": {},
+        "serve_parse": "vllm-log",
+        "bench_env": {},
+        "slice_workers": None,
+        "launch_log": os.path.relpath(log, job_dir),
+    }
+
+
+def read_checkpoint_config(rec: dict[str, Any]) -> dict[str, Any] | None:
+    """The checkpoint's config.json for a server read from its vLLM log: the model path the
+    server was given, when it is a directory on this host, else this host's Hugging Face cache
+    for that model id. None when neither has it."""
+    model = rec.get("model_path")
+    if not model:
+        return None
+    path = os.path.join(model, "config.json")
+    if not os.path.isfile(path):
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            path = try_to_load_from_cache(
+                model,
+                "config.json",
+                revision=rec["server_args"].get("revision"))
+        except Exception:  # noqa: BLE001  (not installed, or not a repo id)
+            path = None
+    if not isinstance(path, str) or not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        return {
+            **json.load(f), "_source":
+            f"{path} (model path of the server's args)"
+        }
 
 
 # ---------------------------------------------------------------- snapshot
@@ -725,62 +735,32 @@ def dumps_snapshot(snap: Any, width: int = SNAPSHOT_WIDTH) -> str:
     return fmt(snap, 0) + "\n"
 
 
-def _annotated_user(annotations: dict[str, Any]) -> str | None:
-    """The submitting user, from the job platform's `<domain>/username` annotation."""
-    return next(
-        (v for k, v in sorted(annotations.items()) if k.endswith("/username")),
-        None)
-
-
-def read_checkpoint_config(rec: dict[str, Any]) -> dict[str, Any] | None:
-    """The checkpoint's config.json, from the GCS mirror the bench container names
-    (`GCS_MODEL_SRC`). Read once at onboarding and stored in the snapshot, so later
-    derivations are offline."""
-    import subprocess
-    src = rec.get("bench_env", {}).get("GCS_MODEL_SRC") or rec.get(
-        "env", {}).get("GCS_MODEL_SRC")
-    if not src:
-        # recipes that copy `<prefix>/$MODEL_NAME` (infx-qwen35-agentx) or take MODEL_ID
-        # (the generic bench recipes) instead of naming the mirror. The prefix is the job's
-        # MODEL_GCS_PREFIX, else WMB_MODEL_GCS_PREFIX (e.g. gs://<bucket>/ckpt/hf); with
-        # neither, there is no mirror to read.
-        env = {**rec.get("env_container", {}), **rec.get("env", {})}
-        mid = env.get("MODEL_NAME") or env.get("MODEL_ID")
-        prefix = env.get("MODEL_GCS_PREFIX") or os.environ.get(
-            "WMB_MODEL_GCS_PREFIX")
-        if prefix and mid and "/" in mid and not mid.startswith(
-            ("/", "gs://")):
-            src = f"{prefix.rstrip('/')}/{mid}"
-    if not src:
-        return None
-    r = subprocess.run(
-        ["gcloud", "storage", "cat", f"{src.rstrip('/')}/config.json"],
-        capture_output=True,
-        text=True)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"cannot read {src}/config.json: {r.stderr.strip()[:200]}")
-    cfg = json.loads(r.stdout)
-    cfg["_source"] = f"{src.rstrip('/')}/config.json"
-    return cfg
-
-
 def snapshot(job_id: str,
              root: str | None = None,
-             scan_log: bool = True) -> dict[str, Any]:
+             scan_log: bool = True,
+             read_recipe=read_recipe,
+             read_checkpoint_config=read_checkpoint_config) -> dict[str, Any]:
+    """The job's snapshot. `read_recipe` and `read_checkpoint_config` read the server's side;
+    the defaults read a server this package started, and `jobdata_agentx.snapshot` passes the
+    ones that also read an AgentX job's manifest."""
     job_dir = os.path.join(root or DEFAULT_ROOT, job_id)
     if not os.path.isdir(job_dir):
         raise FileNotFoundError(
             f"{job_dir} missing. Fetch the job's files into it first "
             f"(`compute job artifacts --job-id {job_id} --out-dir {job_dir}`)")
     rec = read_recipe(job_dir)
+    ckpt = read_checkpoint_config(rec)
+    # a serving_benchmark.py run: its cells, and the note that `requests` are modelled
+    aiperf = _find(job_dir, "profile_export.jsonl")
+    cells = None if aiperf else read_summary_cells(job_dir)
     return {
         "_what":
         "workload-microbenchmark job snapshot: the inputs a derivation reads",
         "job_id": job_id,
         "recipe": rec,
-        "checkpoint_config": read_checkpoint_config(rec),
+        "checkpoint_config": ckpt,
         "requests": read_requests(job_dir),
+        "summary_cells": cells,
         "server": read_server_metrics(job_dir),
         "step_slices": read_step_slices(job_dir),
         "log": read_log(job_dir, scan_log),

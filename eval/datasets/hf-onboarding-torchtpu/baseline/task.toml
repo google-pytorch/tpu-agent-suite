@@ -18,9 +18,7 @@ schema_version = "1.4"
 name = "torchtpu/hf-onboarding"
 
 [environment]
-# TODO(naming): image tag still reads 'hfmigrate'. Re-tag and push before renaming this string;
-# editing it here does not re-tag the image and every run then fails at pull time.
-docker_image = "us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/torchtpu-agent:mrasquinha-hfmigrate-20260914"
+docker_image = "us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/vllm-on-host@sha256:c0698b8b2b99f749f1599221152f9d651a5893317a724f2688b9c3db2c9a023c"
 env = { HF_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-0.6B" }
 
 [agent]

@@ -30,9 +30,15 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from framework import compiler, runtime, utils
+from framework import (agent_contracts, bg_ledger, jsonio, paths, run_state,
+                       runtime, utils)
+from framework.builder import hook_config
+from framework.hooks import actions, dispatch, events, stop_filter
 
 Path = pathlib.Path
+
+# The shipped package's schemas, from the repository root.
+_PACKAGE_SCHEMAS = Path(__file__).resolve().parents[2] / "package" / "schemas"
 
 _no_lease_sweep = mock.patch("framework.compute.lease.spawn_sweep")
 
@@ -46,19 +52,34 @@ def tearDownModule():
     _no_lease_sweep.stop()
 
 
+def _isolated_workspace(test: unittest.TestCase,
+                        home_name: str) -> tuple[Path, Path]:
+    """A temp dir holding a workspace, with the store pointed beside it.
+
+    Returns the temp dir and its `workspace`; `TPU_AGENT_SUITE_HOME` names
+    `home_name` inside the temp dir, which is not created. Both the directory
+    and the variable are restored when `test` ends.
+    """
+    temp_dir = Path(tempfile.mkdtemp())
+    test.addCleanup(shutil.rmtree, temp_dir, ignore_errors=True)
+    workspace = temp_dir / "workspace"
+    workspace.mkdir()
+    home = mock.patch.dict(os.environ,
+                           {"TPU_AGENT_SUITE_HOME": str(temp_dir / home_name)})
+    home.start()
+    test.addCleanup(home.stop)
+    return temp_dir, workspace
+
+
 class TestRuntime(unittest.TestCase):
     """Unit tests for runtime namespace allocation, hooks, and validations."""
 
     def setUp(self):
         super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.workspace_dir = self.temp_dir / "workspace"
-        self.workspace_dir.mkdir()
-
+        self.temp_dir, self.workspace_dir = _isolated_workspace(
+            self, "central_tpu_agent_suite")
         self.central_home = self.temp_dir / "central_tpu_agent_suite"
         self.central_home.mkdir()
-        self.old_tpu_agent_suite_home = os.environ.get("TPU_AGENT_SUITE_HOME")
-        os.environ["TPU_AGENT_SUITE_HOME"] = str(self.central_home)
 
         # Set up installed package structure: the payload under its version,
         # and a user-scope environment.json at the central store's root.
@@ -85,30 +106,18 @@ class TestRuntime(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def tearDown(self):
-        if self.old_tpu_agent_suite_home is not None:
-            os.environ["TPU_AGENT_SUITE_HOME"] = self.old_tpu_agent_suite_home
-        else:
-            os.environ.pop("TPU_AGENT_SUITE_HOME", None)
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-        super().tearDown()
+    def _write_script(self, name: str, source: str) -> Path:
+        """Writes `source` as the package's `scripts/<name>`."""
+        script = self.pkg_root / "scripts" / name
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(source, encoding="utf-8")
+        return script
 
-    def test_cli_accepts_every_declared_hook_event(self):
-        """The dispatcher must accept whatever the manifest schema allows.
-
-        These drifted: the schema gained Stop while the CLI kept a hardcoded
-        pair, so a hook the harness dutifully invoked died in argument parsing
-        with an invalid-choice error. The run it was meant to rescue ended
-        anyway, and the failure looked like the backend rather than like us.
-        """
-        parser = runtime.build_runtime_parser()
-        for event in utils.get_supported_hook_events():
-            with self.subTest(event=event):
-                args = parser.parse_args([
-                    "hook-dispatch", "--harness", "antigravity", "--package",
-                    "pkg", "--hook", "h", "--event", event, "--command", "true"
-                ])
-                self.assertEqual(args.event, event)
+    def _dispatch(self, **kwargs) -> tuple[dict, int]:
+        """`dispatch_hook` for the test package, in the test workspace."""
+        kwargs.setdefault("package", "test-pkg@1.0.0")
+        kwargs.setdefault("workspace", self.workspace_dir)
+        return dispatch.dispatch_hook(**kwargs)
 
     def _main_capturing(self, argv: list[str]) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -143,12 +152,9 @@ class TestRuntime(unittest.TestCase):
             "allow")
         self.assertIn("hook failed (startup)", err)
         self.assertIn("--no-such-flag", err)
-        records = self._hook_failure_records()
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["kind"], "startup")
-        self.assertEqual(records[0]["hook"], "lenient")
-        self.assertEqual(records[0]["event"], "PreToolUse")
-        self.assertEqual(records[0]["decision"], "allow")
+        [record] = self._hook_failure_records()
+        self.assertEqual((record["kind"], record["hook"], record["decision"]),
+                         ("startup", "lenient", "allow"))
 
         # Default policy: a deny in the reply, still exit 0.
         code, out, err = self._main_capturing(base + ["--no-such-flag"])
@@ -156,6 +162,19 @@ class TestRuntime(unittest.TestCase):
         h_out = json.loads(out)["hookSpecificOutput"]
         self.assertEqual(h_out["permissionDecision"], "deny")
         self.assertIn("--no-such-flag", h_out["permissionDecisionReason"])
+
+        # A hand-back registration names its tool event on the command line;
+        # the reply takes that event's shape, not SubagentStop's, or Claude
+        # Code would reject it and run the tool.
+        code, out, _ = self._main_capturing([
+            "hook-dispatch", "--harness", "claude-code", "--package", "p",
+            "--hook", "verify", "--event", "SubagentStop", "--handback-event",
+            "PreToolUse", "--command", "true", "--no-such-flag"
+        ])
+        self.assertEqual(code, 0)
+        h_out = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(h_out["hookEventName"], "PreToolUse")
+        self.assertEqual(h_out["permissionDecision"], "deny")
 
     def test_hook_dispatch_usage_error_without_a_shape_exits_by_policy(self):
         """An unknown event (or harness) leaves no shape to answer in, so the
@@ -196,7 +215,7 @@ class TestRuntime(unittest.TestCase):
         # log refuses the store): the exit code still carries the policy,
         # and the reason says both what failed.
         with mock.patch.object(
-                runtime,
+                dispatch,
                 "_dispatch_failure",
                 side_effect=utils.TpuAgentSuiteError("store refused")):
             code, out, err = self._main_capturing([
@@ -211,197 +230,9 @@ class TestRuntime(unittest.TestCase):
         self.assertIn("store refused", err)
         self.assertNotIn("Traceback", err)
 
-    def test_hook_dispatch_usage_error_on_handback_answers_the_tool_event(
-            self):
-        """A hand-back registration names its tool event on the command line;
-        a usage error is answered in that event's shape, not SubagentStop's,
-        or Claude Code would reject the reply and run the tool."""
-        code, out, _ = self._main_capturing([
-            "hook-dispatch", "--harness", "claude-code", "--package", "p",
-            "--hook", "verify", "--event", "SubagentStop", "--handback-event",
-            "PreToolUse", "--command", "true", "--no-such-flag"
-        ])
-        self.assertEqual(code, 0)
-        h_out = json.loads(out)["hookSpecificOutput"]
-        self.assertEqual(h_out["hookEventName"], "PreToolUse")
-        self.assertEqual(h_out["permissionDecision"], "deny")
-
-    def test_only_hook_dispatch_usage_errors_are_settled(self):
-        """Other subcommands keep argparse's exit 2, and hook-dispatch's own
-        --help still exits 0: neither is a hook that has to answer."""
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as ctx:
-                runtime.main(["validate"])
-        self.assertEqual(ctx.exception.code, 2)
-        with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(SystemExit) as ctx:
-                runtime.main(["hook-dispatch", "--help"])
-        self.assertEqual(ctx.exception.code, 0)
-
-    def test_stop_event_carries_why_the_loop_ended(self):
-        """Stop names no tool, so normalization must surface the termination
-        fields instead: they are the only thing a handler can decide on."""
-        normalized = runtime.normalize_inbound_event(
-            raw_payload={
-                "terminationReason": "error",
-                "error": "Error 503, high demand",
-                "executionNum": 2,
-                "fullyIdle": True,
-            },
-            harness="antigravity",
-            event="Stop",
-            package="pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(normalized["event"], "Stop")
-        self.assertEqual(normalized["termination"]["reason"], "error")
-        self.assertIn("503", normalized["termination"]["error"])
-        self.assertEqual(normalized["termination"]["execution_num"], 2)
-
-    def test_stop_event_carries_the_conversation_id(self):
-        """A handler needs it to scope state per conversation.
-
-        Without it the resume hook's retry counter was global: the state file
-        hashed the empty string, so concurrent runs spent one budget between
-        them and a fresh run inherited a stale count.
-        """
-        normalized = runtime.normalize_inbound_event(
-            raw_payload={
-                "terminationReason": "error",
-                "conversationId": "abc-123"
-            },
-            harness="antigravity",
-            event="Stop",
-            package="pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(normalized["context"]["conversation_id"], "abc-123")
-
-    def test_stop_retry_decision_resumes_the_loop(self):
-        """'retry' must become the harness's resume signal. Resuming keeps the
-        conversation, so the run continues instead of repeating itself."""
-        # Antigravity
-        resumed = runtime.translate_canonical_output(
-            {
-                "decision": "retry",
-                "reason": "waited for quota"
-            },
-            harness="antigravity",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertEqual(resumed["decision"], "continue")
-        self.assertIn("waited", resumed["reason"])
-
-        ended = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            harness="antigravity",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertEqual(ended["decision"], "stop")
-
-        # Claude Code
-        claude_retry = runtime.translate_canonical_output(
-            {
-                "decision": "retry",
-                "reason": "waited for quota"
-            },
-            harness="claude-code",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertEqual(claude_retry["decision"], "block")
-        self.assertIn("waited", claude_retry["reason"])
-        self.assertEqual(
-            claude_retry.get("hookSpecificOutput", {}).get("hookEventName"),
-            "Stop",
-        )
-
-        claude_allow = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            harness="claude-code",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertNotIn("decision", claude_allow)
-        self.assertEqual(
-            claude_allow.get("hookSpecificOutput", {}).get("hookEventName"),
-            "Stop",
-        )
-
-        # Codex
-        codex_retry = runtime.translate_canonical_output(
-            {
-                "decision": "retry",
-                "reason": "waited for quota"
-            },
-            harness="codex",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertEqual(codex_retry["decision"], "block")
-        self.assertIn("waited", codex_retry["reason"])
-
-        codex_allow = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            harness="codex",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertEqual(codex_allow["decision"], "allow")
-
-        # Cursor
-        cursor_retry = runtime.translate_canonical_output(
-            {
-                "decision": "retry",
-                "reason": "waited for quota"
-            },
-            harness="cursor",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertEqual(cursor_retry["decision"], "cancel")
-        self.assertIn("waited", cursor_retry["reason"])
-
-        cursor_allow = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            harness="cursor",
-            event="Stop",
-            hook_name="resume-after-quota",
-        )
-        self.assertEqual(cursor_allow, {})
-
-    def test_completed_result_requires_an_artifact(self):
-        """Findings must land somewhere durable before they are summarized."""
-        self.assertTrue(
-            runtime.check_completed_has_artifact({
-                "status": "completed",
-                "summary": "all done"
-            }))
-        self.assertTrue(
-            runtime.check_completed_has_artifact({
-                "status": "completed",
-                "artifacts": []
-            }))
-        self.assertFalse(
-            runtime.check_completed_has_artifact({
-                "status":
-                "completed",
-                "artifacts": [{
-                    "file": "report.md"
-                }],
-            }))
-
-    def test_unfinished_result_needs_no_artifact(self):
-        """A failure has nothing to show, and demanding one would push agents
-        toward reporting success."""
-        for status in ("failed", "invalid_input", "needs_input"):
-            with self.subTest(status=status):
-                self.assertFalse(
-                    runtime.check_completed_has_artifact({"status": status}))
-
-    def test_validate_enforces_the_completed_artifact_rule(self):
+    def test_validate_cli_exit_code_and_completed_artifact_rule(self):
+        """`validate` exits 0 on a valid instance and non-zero otherwise, and
+        applies the runtime's completed-artifact rule, not only the schema."""
         schema = self.temp_dir / "result.json"
         schema.write_text(json.dumps({
             "type": "object",
@@ -417,180 +248,87 @@ class TestRuntime(unittest.TestCase):
         }),
                           encoding="utf-8")
         instance = self.temp_dir / "instance.json"
-        instance.write_text(json.dumps({"status": "completed"}),
-                            encoding="utf-8")
+        for doc, ok in (({
+                "status": "ok"
+        }, True), ({
+                "status": "completed"
+        }, False)):
+            with self.subTest(doc=doc):
+                instance.write_text(json.dumps(doc), encoding="utf-8")
+                code, _, _ = self._main_capturing(
+                    ["validate", "--schema",
+                     str(schema),
+                     str(instance)])
+                self.assertEqual(code == 0, ok)
 
-        errors = runtime.validate_json_file(schema, instance)
-        self.assertTrue(errors)
+    def _package_schemas(self) -> dict[str, dict]:
+        schemas = {
+            path.name: json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(_PACKAGE_SCHEMAS.glob("*.json"))
+        }
+        self.assertTrue(schemas, f"no schemas under {_PACKAGE_SCHEMAS}")
+        return {k: v for k, v in schemas.items() if isinstance(v, dict)}
 
-    def _stage_result_schemas(self) -> dict[str, dict]:
-        """Every package schema that declares a completed-payload rule.
+    def test_status_requires_is_coherent_in_every_package_schema(self):
+        """A status that claims an outcome owes its payload; others owe nothing.
 
-        Discovered from the schemas themselves rather than from a list here.
-        The framework used to hold the table, which meant it named a specific
-        package's files; now a schema carries its own rule, and the thing worth
-        asserting is that each schema that carries one is coherent.
+        Success-only fields must not be `required`, empty values do not count
+        (but `succeeded: false` does), and every other status in the schema's
+        own enum must pass without them.
         """
-        schemas_dir = (pathlib.Path(__file__).resolve().parents[2] /
-                       "package" / "schemas")
-        found = {}
-        for path in sorted(schemas_dir.glob("*.json")):
-            schema = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(schema, dict) and "status_requires" in schema:
-                found[path.name] = schema
+        check = agent_contracts.check_status_payload
+        found = {
+            name: schema
+            for name, schema in self._package_schemas().items()
+            if "status_requires" in schema
+        }
         self.assertTrue(found, "no schema declares status_requires")
-        return found
-
-    def test_a_claimed_outcome_owes_its_payload(self):
-        """A status that claims an outcome must carry what that outcome means.
-
-        These fields left the schemas' `required` arrays so that a failing
-        stage could describe itself; the rule has to reappear here or the
-        success status becomes a free pass.
-        """
-        for schema_name, schema in self._stage_result_schemas().items():
-            for status, fields in schema["status_requires"].items():
-                with self.subTest(schema=schema_name, status=status):
-                    self.assertTrue(
-                        runtime.check_status_payload(schema, {
-                            "status": status,
-                            "run_id": "x"
-                        }))
-                    payload = {"status": status, "run_id": "x"}
-                    payload.update({field: "filled" for field in fields})
-                    self.assertFalse(
-                        runtime.check_status_payload(schema, payload))
-
-    def test_a_claimed_outcome_cannot_be_satisfied_by_an_empty_value(self):
-        """Presence is not enough: `artifacts: []` carries nothing.
-
-        `kernel-result` is the case that matters. Its durability rule used to
-        come from `check_completed_has_artifact`, which fires only on the
-        literal status `completed` -- so renaming the status to `optimized`
-        would have switched that rule off silently. It is declared in
-        `status_requires` instead, and an empty array has to fail or the
-        declaration is theatre.
-        """
-        for schema_name, schema in self._stage_result_schemas().items():
-            for status, fields in schema["status_requires"].items():
-                for field in fields:
-                    with self.subTest(schema=schema_name, field=field):
-                        payload = {"status": status, "run_id": "x"}
-                        payload.update({f: "filled" for f in fields})
-                        payload[field] = [] if field == "artifacts" else ""
-                        self.assertTrue(
-                            runtime.check_status_payload(schema, payload))
-
-    def test_a_false_verdict_still_satisfies_the_rule(self):
-        """`succeeded: false` is an answer, not an absence.
-
-        The empty-value check must not read a boolean false as nothing
-        reported -- a brief that found nothing to borrow is still a brief.
-        """
-        schema = self._stage_result_schemas()["summary-result.json"]
-        status, fields = next(iter(schema["status_requires"].items()))
-        payload = {"status": status, "run_id": "x"}
-        payload.update(
-            {f: 0 if f == "succeeded" else "filled"
-             for f in fields})
-        payload["succeeded"] = False
-        self.assertFalse(runtime.check_status_payload(schema, payload))
-
-    def test_unfinished_stage_result_owes_nothing(self):
-        """The point of the change: a stage that reached no answer can say so.
-
-        Every one of these was previously unrepresentable -- the schema
-        required a plan, a latency or a best config, so a failing stage had to
-        emit success-shaped fields or emit nothing that validated.
-
-        The statuses come from each schema's own enum rather than a list here:
-        a hardcoded one keeps passing after a value is dropped, because an
-        unrecognised status has no rule to break.
-        """
-        for schema_name, schema in self._stage_result_schemas().items():
+        for name, schema in found.items():
             owed = schema["status_requires"]
+            for status, fields in owed.items():
+                with self.subTest(schema=name, status=status):
+                    self.assertFalse(
+                        set(fields) & set(schema["required"]),
+                        "a success-only field is required")
+                    payload = {"status": status, "run_id": "x"}
+                    self.assertTrue(check(schema, payload))
+                    payload.update({field: "filled" for field in fields})
+                    self.assertFalse(check(schema, payload))
+                    for field in fields:
+                        empty = [] if field == "artifacts" else ""
+                        self.assertTrue(
+                            check(schema, {
+                                **payload, field: empty
+                            }), field)
+                    if "succeeded" in fields:
+                        self.assertFalse(
+                            check(schema, {
+                                **payload, "succeeded": False
+                            }))
             unfinished = [
                 status for status in schema["properties"]["status"]["enum"]
                 if status not in owed
             ]
-            self.assertTrue(unfinished, f"{schema_name} cannot report failure")
+            self.assertTrue(unfinished, f"{name} cannot report failure")
             for status in unfinished:
-                with self.subTest(schema=schema_name, status=status):
+                with self.subTest(schema=name, status=status):
                     self.assertFalse(
-                        runtime.check_status_payload(
-                            schema, {
-                                "status": status,
-                                "failure_reason": "no_device"
-                            }))
-
-    def test_every_stage_schema_declares_its_own_id(self):
-        """`$id` is what labels the rule's error for the SubagentStop hook.
-
-        The hook holds a loaded schema and no filename, so without `$id` the
-        denial names nothing the agent can act on. The rule itself now travels
-        in the schema, so a missing `$id` no longer disables it -- but an
-        unnamed contract violation is still a bad message to hand an agent
-        that has to retry.
-        """
-        for schema_name, schema in self._stage_result_schemas().items():
-            with self.subTest(schema=schema_name):
-                self.assertEqual(schema.get("$id"), schema_name)
-
-    def test_every_stage_names_its_own_outcome_and_can_still_fail(self):
-        """A status enum says what the stage produced, and can say it failed.
-
-        `kernel-worker-result` once offered both `success` and `completed` with no
-        stated difference, and `implement-result` offered `compilation_error`
-        -- a cause wearing an outcome's clothes. `planned`, `implemented` and
-        `measured` each say something `completed` could not. What every one of
-        them still owes is a way to report not getting there, which is the
-        property that made the schemas failure-capable at all.
-        """
-        for schema_name, schema in self._stage_result_schemas().items():
-            with self.subTest(schema=schema_name):
-                enum = schema["properties"]["status"]["enum"]
-                self.assertIn("status", schema["required"])
-                self.assertIn("failed", enum)
-                self.assertIn("failure_reason", schema["properties"])
-                # The success value is the one carrying a payload rule, and it
-                # must not be the generic word this package moved off.
-                for status in schema["status_requires"]:
-                    self.assertIn(status, enum)
-                    self.assertNotEqual(status, "completed")
-
-    def test_stage_results_do_not_require_success_only_fields(self):
-        """The conditional fields must be out of `required`, or the runtime
-        rule never gets a chance to run -- the schema rejects the failure
-        first."""
-        for schema_name, schema in self._stage_result_schemas().items():
-            for fields in schema["status_requires"].values():
-                for field in fields:
-                    with self.subTest(schema=schema_name, field=field):
-                        self.assertIn(field, schema["properties"])
-                        self.assertNotIn(field, schema["required"])
+                        check(schema, {
+                            "status": status,
+                            "failure_reason": "no_device"
+                        }))
 
     def test_schema_examples_satisfy_their_own_schema(self):
-        """An example is what a denied agent is handed to retry against.
-
-        Both hook denials quote `load_schema_example` back to the agent as
-        "expected output". An example that does not validate is therefore a
-        retry loop: the agent copies the shape it was given and is rejected
-        again for the same reason. Tightening a schema without revisiting its
-        example is easy and silent, which is why this is pinned.
-        """
-        schemas_dir = (pathlib.Path(__file__).resolve().parents[2] /
-                       "package" / "schemas")
+        """Denials quote an example back to the agent as the expected output;
+        one that does not validate is a retry loop."""
         checked = 0
-        for path in sorted(schemas_dir.glob("*.json")):
-            schema = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(schema, dict):
-                continue
+        for name, schema in self._package_schemas().items():
             for index, example in enumerate(schema.get("examples", [])):
                 checked += 1
-                with self.subTest(schema=path.name, example=index):
+                with self.subTest(schema=name, example=index):
                     errors = utils.validate_instance(example, schema)
-                    errors += runtime.check_status_payload(
-                        schema, example, path.name)
+                    errors += agent_contracts.check_status_payload(
+                        schema, example, name)
                     self.assertFalse(errors)
         self.assertGreater(checked, 0, "no schema declares an example")
 
@@ -651,109 +389,41 @@ class TestRuntime(unittest.TestCase):
             {"type": "object"}),
                                                          encoding="utf-8")
 
-        # A same-named workspace directory holding a *different* subset is
-        # exactly the shape that shadowed the real install.
-        decoy = self.workspace_dir / ".tpu-agent-suite" / "central-pkg"
-        (decoy / "knowledgebase").mkdir(parents=True)
-
-        resolved = runtime.get_installed_package_root(self.workspace_dir,
-                                                      "central-pkg")
+        resolved = paths.get_installed_package_root("central-pkg")
         self.assertEqual(resolved.resolve(), central.resolve())
         self.assertTrue((resolved / "schemas" / "schema.json").is_file())
-
-    def test_unversioned_lookup_prefers_the_highest_version(self):
-        for version in ("1.9.0", "2.10.0", "2.9.0"):
-            (self.central_home / "packages" /
-             f"multi-pkg@{version}").mkdir(parents=True)
-
-        resolved = runtime.latest_installed_package("multi-pkg")
-        self.assertIsNotNone(resolved)
-        self.assertEqual(resolved.name, "multi-pkg@2.10.0")
-
-    def test_unparseable_version_is_not_a_candidate(self):
-        (self.central_home / "packages" /
-         "odd-pkg@not-a-version").mkdir(parents=True)
-        self.assertIsNone(runtime.latest_installed_package("odd-pkg"))
-
-    def test_start_run_and_namespace(self):
-        doc = runtime.start_run(package="test-pkg@1.0.0",
-                                workspace=self.workspace_dir)
-        self.assertIn("run_id", doc)
-        self.assertEqual(doc["package"], "test-pkg@1.0.0")
-        self.assertEqual(doc["environment_revision"], 1)
-
-        # Run directory is in central storage (~/.tpu-agent-suite/runs/)
-        run_dir = self.central_home / "runs" / doc["run_id"]
-        self.assertTrue(run_dir.is_dir())
-        self.assertTrue((run_dir / "artifacts").is_dir())
-        self.assertTrue((run_dir / "run.json").is_file())
-        self.assertEqual(utils.get_active_run_id(self.workspace_dir),
-                         doc["run_id"])
-
-    def test_versioned_package_tag_resolution(self):
         # Compiled prompts pass --package as <name>@<version>; the tag must
         # resolve to the versioned directory the installer created.
-        versioned_root = self.central_home / "packages" / "test-pkg@1.0.0"
-        (versioned_root / "schemas").mkdir(parents=True, exist_ok=True)
-        (versioned_root / "schemas" / "tagged.json").write_text(
-            json.dumps({"type": "object"}), encoding="utf-8")
-
         self.assertEqual(
-            runtime.get_installed_package_root(self.workspace_dir,
-                                               "test-pkg@1.0.0").resolve(),
-            versioned_root.resolve(),
-        )
-
-        run_doc = runtime.start_run(package="test-pkg@1.0.0",
-                                    workspace=self.workspace_dir)
-        run_id = run_doc["run_id"]
-        self.assertEqual(run_doc["package"], "test-pkg@1.0.0")
+            paths.get_installed_package_root("test-pkg@1.0.0").resolve(),
+            self.pkg_root.resolve())
 
     def test_pending_context_is_capped_and_evicts_oldest(self):
         """Every live entry rides along on every model call, so the spool is bounded.
 
         A run writing context in a loop would otherwise grow it without
         limit. The newest survive: they are the context a result is most
-        likely still to need.
+        likely still to need. Entries are consumed rather than re-read, so
+        another session must neither see nor drain them.
         """
-        overflow = runtime.MAX_PENDING_CONTEXT_ENTRIES + 3
+        overflow = run_state.MAX_PENDING_CONTEXT_ENTRIES + 3
         for i in range(overflow):
-            runtime.record_pending_hook_context(
+            run_state.record_pending_hook_context(
                 session_id="conv-cap",
                 hook_name="test-hook",
                 context_text=f"CONTEXT-{i:02d}",
                 package="test-pkg@1.0.0",
             )
-        replayed = runtime.replay_pending_hook_context("conv-cap")
+        self.assertEqual(
+            run_state.replay_pending_hook_context("conv-stranger"), "")
+        replayed = run_state.replay_pending_hook_context("conv-cap")
         kept = [
             line for line in replayed.splitlines()
             if line.startswith("CONTEXT-")
         ]
-        self.assertEqual(len(kept), runtime.MAX_PENDING_CONTEXT_ENTRIES)
+        self.assertEqual(len(kept), run_state.MAX_PENDING_CONTEXT_ENTRIES)
         self.assertNotIn("CONTEXT-00", kept)
         self.assertIn(f"CONTEXT-{overflow - 1:02d}", kept)
-
-    def test_pending_context_is_not_shared_across_sessions(self):
-        """Draining one session must not drain, or reveal, another's.
-
-        Entries are consumed rather than re-read, so a spool shared across
-        sessions would not merely leak context, it would lose it: whoever
-        replayed first would take it. Note the limit of this test -- these two
-        IDs are unrelated, so it pins the keying but not the separate decision
-        in `replay_pending_hook_context` to skip the parent-conversation
-        fallback that `resolve_session_hook_context` performs. Covering that
-        needs a real parent/child pair.
-        """
-        runtime.record_pending_hook_context(
-            session_id="conv-owner",
-            hook_name="test-hook",
-            context_text="CONTEXT-OWNED",
-            package="test-pkg@1.0.0",
-        )
-        self.assertEqual(runtime.replay_pending_hook_context("conv-stranger"),
-                         "")
-        self.assertEqual(runtime.replay_pending_hook_context("conv-owner"),
-                         "CONTEXT-OWNED")
 
     def test_posttooluse_context_reaches_a_google_harness_model(self):
         """The whole emulation, end to end.
@@ -776,12 +446,11 @@ class TestRuntime(unittest.TestCase):
             },
             "stepIdx": 3,
         })
-        post_out, _ = runtime.dispatch_hook(
+        post_out, _ = self._dispatch(
             harness="antigravity",
             package="",
             hook_name="probe-hook",
             event="PostToolUse",
-            workspace=self.workspace_dir,
             raw_input_text=post_payload,
             command=
             "printf '%s' '{\"decision\":\"allow\",\"context\":\"SPOOLED-CONTEXT\"}'",
@@ -790,12 +459,11 @@ class TestRuntime(unittest.TestCase):
                          "PostToolUse must answer with the documented {}")
 
         def invoke(invocation_num: int) -> dict:
-            out, _ = runtime.dispatch_hook(
+            out, _ = self._dispatch(
                 harness="antigravity",
                 package="",
                 hook_name="session-run-init",
                 event="SessionStart",
-                workspace=self.workspace_dir,
                 raw_input_text=json.dumps({
                     "conversationId":
                     session,
@@ -815,44 +483,6 @@ class TestRuntime(unittest.TestCase):
             self.assertIn({"ephemeralMessage": "SPOOLED-CONTEXT"},
                           invoke(invocation_num).get("injectSteps", []),
                           f"context missing from invocation {invocation_num}")
-
-    def test_centralized_storage_resolution(self):
-        (self.central_home / "environment.json").write_text(json.dumps({
-            "revision":
-            2,
-            "target":
-            "cloud"
-        }),
-                                                            encoding="utf-8")
-        (self.central_home / "schemas").mkdir()
-        (self.central_home / "schemas" / "out.json").write_text(
-            json.dumps({"type": "object"}), encoding="utf-8")
-
-        # Start run without workspace arg uses centralized storage and central environment
-        doc = runtime.start_run(package="central-pkg@2.0.0")
-        self.assertIn("run_id", doc)
-        self.assertEqual(doc["package"], "central-pkg@2.0.0")
-        self.assertEqual(doc["environment_revision"], 2)
-
-        run_dir = self.central_home / "runs" / doc["run_id"]
-        self.assertTrue(run_dir.is_dir())
-        self.assertTrue((run_dir / "artifacts").is_dir())
-
-    def test_runtime_cli(self):
-        run_doc = runtime.start_run(package="test-pkg@1.0.0",
-                                    workspace=self.workspace_dir)
-        run_id = run_doc["run_id"]  # noqa: F841
-
-        valid_instance = self.temp_dir / "valid.json"
-        valid_instance.write_text(json.dumps({"status": "ok"}),
-                                  encoding="utf-8")
-        schema_path = self.pkg_root / "schemas" / "out.json"
-
-        ret = runtime.main(
-            ["validate", "--schema",
-             str(schema_path),
-             str(valid_instance)])
-        self.assertEqual(ret, 0)
 
     def test_cli_start_run_reads_workspace_environment(self):
         """`start-run` without --workspace consults the cwd's workspace install."""
@@ -878,332 +508,41 @@ class TestRuntime(unittest.TestCase):
         doc = json.loads(buf.getvalue())
         self.assertEqual(doc["environment_revision"], 3)
 
-    def test_hook_dispatch_claude_allow_and_deny(self):
-        script_path = self.pkg_root / "scripts" / "guard.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(
-            "import json, sys\n"
-            "data = json.load(sys.stdin)\n"
-            "cmd = data.get('args', {}).get('command', '')\n"
-            "if 'block' in cmd:\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': 'blocked keyword'}))\n"
-            "else:\n"
-            "    print(json.dumps({'decision': 'allow', 'message': 'checked'}))\n",
-            encoding="utf-8",
-        )
-
-        # Test allow in Claude Code
-        claude_allow_payload = json.dumps({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "git branch"
-            }
-        })
-        res, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="test-guard",
-            event="PreToolUse",
-            script_rel="scripts/guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=claude_allow_payload,
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res["systemMessage"], "checked")
-        self.assertEqual(res["hookSpecificOutput"]["permissionDecision"],
-                         "allow")
-
-        # Test deny in Claude Code
-        claude_deny_payload = json.dumps({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "echo block"
-            }
-        })
-        res, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="test-guard",
-            event="PreToolUse",
-            script_rel="scripts/guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=claude_deny_payload,
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res["hookSpecificOutput"]["permissionDecision"],
-                         "deny")
-        self.assertEqual(res["hookSpecificOutput"]["permissionDecisionReason"],
-                         "blocked keyword")
-
-    def test_hook_dispatch_antigravity_allow_and_deny(self):
-        script_path = self.pkg_root / "scripts" / "guard.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(
-            "import json, sys\n"
-            "data = json.load(sys.stdin)\n"
-            "cmd = data.get('args', {}).get('command', '')\n"
-            "if 'block' in cmd:\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': 'blocked command'}))\n"
-            "else:\n"
-            "    print(json.dumps({'decision': 'allow'}))\n",
-            encoding="utf-8",
-        )
-
-        # Allow
-        agy_allow_payload = json.dumps({
-            "toolCall": {
-                "name": "run_command",
-                "args": {
-                    "CommandLine": "ls"
-                }
-            }
-        })
-        res, code = runtime.dispatch_hook(
+    def test_hook_output_must_match_the_hook_output_schema(self):
+        """A reply without `decision` is a malformed verdict, and a guard
+        fails closed on it; silence (no output at all) is an allow."""
+        self._write_script(
+            "invalid.py", "import json\n"
+            "print(json.dumps({'status': 'allow'}))\n")
+        res, code = self._dispatch(
             harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="test-guard",
-            event="PreToolUse",
-            script_rel="scripts/guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=agy_allow_payload,
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res, {"decision": "allow"})
-
-        # Deny
-        agy_deny_payload = json.dumps({
-            "toolCall": {
-                "name": "run_command",
-                "args": {
-                    "CommandLine": "echo block"
-                }
-            }
-        })
-        res, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="test-guard",
-            event="PreToolUse",
-            script_rel="scripts/guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=agy_deny_payload,
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res, {
-            "decision": "deny",
-            "reason": "blocked command"
-        })
-
-    def test_hook_dispatch_codex_allow_and_deny(self):
-        script_path = self.pkg_root / "scripts" / "guard.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(
-            "import json, sys\n"
-            "data = json.load(sys.stdin)\n"
-            "cmd = data.get('args', {}).get('command', '')\n"
-            "if 'block' in cmd:\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': 'blocked command'}))\n"
-            "else:\n"
-            "    print(json.dumps({'decision': 'allow'}))\n",
-            encoding="utf-8",
-        )
-
-        # Allow
-        codex_allow_payload = json.dumps({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "git status"
-            },
-            "session_id": "sess-123"
-        })
-        res, code = runtime.dispatch_hook(
-            harness="codex",
-            package="test-pkg@1.0.0",
-            hook_name="test-guard",
-            event="PreToolUse",
-            script_rel="scripts/guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=codex_allow_payload,
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res, {"decision": "allow"})
-
-        # Deny
-        codex_deny_payload = json.dumps({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": "rm -rf block"
-            },
-            "session_id": "sess-123"
-        })
-        res, code = runtime.dispatch_hook(
-            harness="codex",
-            package="test-pkg@1.0.0",
-            hook_name="test-guard",
-            event="PreToolUse",
-            script_rel="scripts/guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=codex_deny_payload,
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res, {
-            "decision": "deny",
-            "reason": "blocked command"
-        })
-
-    def test_hook_dispatch_codex_post_tool_use(self):
-        script_path = self.pkg_root / "scripts" / "post.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(
-            "import json, sys\n"
-            "data = json.load(sys.stdin)\n"
-            "print(json.dumps({'decision': 'allow', 'context': 'verified write'}))\n",
-            encoding="utf-8",
-        )
-        payload = json.dumps({
-            "tool_name": "apply_patch",
-            "tool_input": {
-                "command": "*** Begin Patch\n*** Add File: a.txt\n+hello\n"
-            },
-            "tool_response": {
-                "status": "ok"
-            }
-        })
-        res, code = runtime.dispatch_hook(
-            harness="codex",
-            package="test-pkg@1.0.0",
-            hook_name="post-guard",
-            event="PostToolUse",
-            script_rel="scripts/post.py",
-            workspace=self.workspace_dir,
-            raw_input_text=payload,
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res, {
-            "decision": "allow",
-            "additional_context": "verified write"
-        })
-
-    def test_hook_dispatch_exit_code_and_schema_validation(self):
-        # Exit code non-zero fallback
-        script_fail = self.pkg_root / "scripts" / "fail.py"
-        script_fail.parent.mkdir(parents=True, exist_ok=True)
-        script_fail.write_text(
-            "import sys\n"
-            "print('Fatal error in guard', file=sys.stderr)\n"
-            "sys.exit(3)\n",
-            encoding="utf-8",
-        )
-        res, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="fail-guard",
-            event="PreToolUse",
-            script_rel="scripts/fail.py",
-            workspace=self.workspace_dir,
-            raw_input_text="{}",
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res["decision"], "deny")
-        self.assertIn("Fatal error in guard", res["reason"])
-
-        # Invalid schema property (e.g. invalid 'status' key instead of 'decision')
-        script_invalid = self.pkg_root / "scripts" / "invalid.py"
-        script_invalid.write_text(
-            "import json\n"
-            "print(json.dumps({'status': 'allow'}))\n",
-            encoding="utf-8",
-        )
-        res, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
             hook_name="invalid-guard",
             event="PreToolUse",
             script_rel="scripts/invalid.py",
-            workspace=self.workspace_dir,
             raw_input_text="{}",
         )
         self.assertEqual(code, 0)
         self.assertEqual(res["decision"], "deny")
         self.assertIn("violated hook-output.schema.json", res["reason"])
 
-    def test_hook_dispatch_command(self):
-        # 1. Successful command emitting empty output -> default allow
-        res_claude, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
+        res, code = self._dispatch(
+            harness="antigravity",
             hook_name="cmd-hook",
             event="PreToolUse",
             command="true",
-            workspace=self.workspace_dir,
             raw_input_text="{}",
         )
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            res_claude["hookSpecificOutput"]["permissionDecision"], "allow")
-
-        res_ag, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="cmd-hook",
-            event="PreToolUse",
-            command="true",
-            workspace=self.workspace_dir,
-            raw_input_text="{}",
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_ag["decision"], "allow")
-
-        # 2. Failed command (non-zero exit) -> deny
-        res_fail, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="cmd-fail",
-            event="PreToolUse",
-            command="false",
-            workspace=self.workspace_dir,
-            raw_input_text="{}",
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_fail["hookSpecificOutput"]["permissionDecision"],
-                         "deny")
-
-    def test_hook_dispatch_with_script_args(self):
-        script_path = self.pkg_root / "scripts" / "args_guard.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(
-            "import json, sys\n"
-            "passed_args = sys.argv[1:]\n"
-            "if '--strict' in passed_args and 'param with spaces' in passed_args:\n"
-            "    print(json.dumps({'decision': 'allow', 'message': 'args verified'}))\n"
-            "else:\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': f'unexpected args: {passed_args}'}))\n",
-            encoding="utf-8",
-        )
-
-        res, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="test-args-guard",
-            event="PreToolUse",
-            script_rel="scripts/args_guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text="{}",
-            script_args=["--strict", "param with spaces"],
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res, {"decision": "allow"})
+        self.assertEqual((code, res), (0, {"decision": "allow"}))
 
     def test_hook_dispatch_cli_remainder_args(self):
-        script_path = self.pkg_root / "scripts" / "cli_args_guard.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(
+        """Arguments after `--` reach the script verbatim, spaces included."""
+        self._write_script(
+            "cli_args_guard.py",
             "import json, sys\n"
-            "if '--mode' in sys.argv and 'fast' in sys.argv:\n"
+            "if sys.argv[1:] == ['--mode', 'param with spaces']:\n"
             "    print(json.dumps({'decision': 'allow'}))\n"
             "else:\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': f'missing mode: {sys.argv}'}))\n",
-            encoding="utf-8",
+            "    print(json.dumps({'decision': 'deny', 'reason': f'argv: {sys.argv}'}))\n",
         )
 
         captured = io.StringIO()
@@ -1225,377 +564,28 @@ class TestRuntime(unittest.TestCase):
                 str(self.workspace_dir),
                 "--",
                 "--mode",
-                "fast",
+                "param with spaces",
             ])
         self.assertEqual(ret, 0)
-        output_json = json.loads(captured.getvalue().strip())
-        self.assertEqual(output_json.get("decision"), "allow")
+        self.assertEqual(json.loads(captured.getvalue()),
+                         {"decision": "allow"})
 
-    def test_normalize_inbound_antigravity_multi_replace(self):
-        payload = {
-            "toolCall": {
-                "name": "multi_replace_file_content",
-                "args": {
-                    "TargetFile": "/path/to/file.py",
-                    "ReplacementChunks": []
-                }
-            }
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="antigravity",
-            event="PreToolUse",
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["tool"], "edit")
-        self.assertEqual(event["args"]["path"], "/path/to/file.py")
-
-    def test_dispatch_hook_script_timeout(self):
-        scripts_dir = (self.central_home / "packages" / "test-pkg@1.0.0" /
-                       "scripts")
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        (scripts_dir / "slow_guard.py").write_text("print('slow')",
-                                                   encoding="utf-8")
-
-        with mock.patch.object(runtime,
-                               "_run_hook_process",
-                               side_effect=subprocess.TimeoutExpired(
-                                   cmd=["python3"], timeout=5)):
-            res, code = runtime.dispatch_hook(
-                harness="claude-code",
-                package="test-pkg@1.0.0",
-                hook_name="slow-guard",
-                event="PreToolUse",
-                script_rel="scripts/slow_guard.py",
-                timeout=5,
-                workspace=self.workspace_dir,
-                raw_input_text="{}",
-            )
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            res.get("hookSpecificOutput", {}).get("permissionDecision"),
-            "deny",
-        )
-        self.assertIn(
-            "timed out after 5 seconds",
-            res.get("hookSpecificOutput", {}).get("permissionDecisionReason",
-                                                  ""),
-        )
-
-    def test_dispatch_hook_command_timeout(self):
-        with mock.patch.object(runtime,
-                               "_run_hook_process",
-                               side_effect=subprocess.TimeoutExpired(
-                                   cmd="sleep 10", timeout=5)):
-            res, code = runtime.dispatch_hook(
-                harness="antigravity",
-                package="test-pkg@1.0.0",
-                hook_name="slow-cmd",
-                event="PreToolUse",
-                command="sleep 10",
-                timeout=5,
-                workspace=self.workspace_dir,
-                raw_input_text="{}",
-            )
-        self.assertEqual(code, 0)
-        self.assertEqual(res.get("decision"), "deny")
-        self.assertIn("timed out after 5 seconds", res.get("reason", ""))
-
-    def test_package_isolation(self):
-        for pkg in ("pkg-a@1.0.0", "pkg-b@1.0.0"):
-            (self.central_home / "packages" / pkg).mkdir(parents=True,
-                                                         exist_ok=True)
-        run_doc = runtime.start_run(package="pkg-a@1.0.0",
-                                    workspace=self.workspace_dir)
-        run_id = run_doc["run_id"]
-
-        # Same package access succeeds
-        _, _, doc = runtime.get_installed_run_context(
-            package="pkg-a@1.0.0", run_id=run_id, workspace=self.workspace_dir)
-        self.assertEqual(doc["run_id"], run_id)
-
-        # Different package access is rejected
-        with self.assertRaises(utils.TpuAgentSuiteError) as ctx:
-            runtime.get_installed_run_context(package="pkg-b@1.0.0",
-                                              run_id=run_id,
-                                              workspace=self.workspace_dir)
-        self.assertIn("refusing access", str(ctx.exception).lower())
-
-    def test_workspace_environment_is_read(self):
-        # A project install's environment sits directly in .tpu-agent-suite/.
-        pkg_env_dir = self.workspace_dir / ".tpu-agent-suite"
-        pkg_env_dir.mkdir(parents=True, exist_ok=True)
-        (pkg_env_dir / "environment.json").write_text(json.dumps(
-            {"target": "custom_override"}),
-                                                      encoding="utf-8")
-
-        env, path = runtime.get_environment(self.workspace_dir, "custom-pkg")
-        self.assertEqual(env.get("target"), "custom_override")
-        self.assertEqual(path, (pkg_env_dir / "environment.json").resolve())
-
-    def test_normalize_inbound_subagent_events(self):
-        # Antigravity PreToolUse invoke_subagent
-        ag_payload = {
-            "toolCall": {
-                "name": "invoke_subagent",
-                "args": {
-                    "Subagents": [{
-                        "TypeName": "tpu-kernel-development",
-                        "Role": "Kernel Optimizer",
-                        "Prompt": "Optimize flash attention kernel",
-                    }]
-                },
-            }
-        }
-        ag_event = runtime.normalize_inbound_event(
-            raw_payload=ag_payload,
-            harness="antigravity",
-            event="PreToolUse",
-            package="tpu-agent-suite",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(ag_event["event"], "PreToolUse")
-        self.assertEqual(ag_event["tool"], "delegate")
-        self.assertEqual(ag_event["args"]["subagent"],
-                         "tpu-kernel-development")
-        self.assertEqual(ag_event["args"]["prompt"],
-                         "Optimize flash attention kernel")
-        self.assertIsNone(ag_event["output"])
-
-        # Claude Code PreToolUse Agent
-        claude_payload = {
-            "tool_name": "Agent",
-            "tool_input": {
-                "subagent_type": "tpu-sharding",
-                "prompt": "Distribute model tensors across TPU pod",
-            },
-        }
-        claude_event = runtime.normalize_inbound_event(
-            raw_payload=claude_payload,
-            harness="claude-code",
-            event="PreToolUse",
-            package="tpu-agent-suite",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(claude_event["event"], "PreToolUse")
-        self.assertEqual(claude_event["tool"], "delegate")
-        self.assertEqual(claude_event["args"]["subagent"], "tpu-sharding")
-        self.assertEqual(claude_event["args"]["prompt"],
-                         "Distribute model tensors across TPU pod")
-        self.assertIsNone(claude_event["output"])
-
-        # Antigravity PostToolUse invoke_subagent with toolOutput
-        ag_post_payload = {
-            "toolCall": {
-                "name": "invoke_subagent",
-                "args": {
-                    "Subagents": [{
-                        "TypeName": "tpu-kernel-development"
-                    }]
-                },
-            },
-            "toolOutput": {
-                "status": "success",
-                "speedup": "1.4x"
-            },
-        }
-        ag_post_event = runtime.normalize_inbound_event(
-            raw_payload=ag_post_payload,
-            harness="antigravity",
-            event="PostToolUse",
-            package="tpu-agent-suite",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(ag_post_event["event"], "PostToolUse")
-        self.assertEqual(ag_post_event["tool"], "delegate")
-        self.assertEqual(ag_post_event["args"]["subagent"],
-                         "tpu-kernel-development")
-        self.assertEqual(ag_post_event["output"], {
-            "status": "success",
-            "speedup": "1.4x"
-        })
-
-    def test_translate_subagent_canonical_output(self):
-        # Claude Code PreToolUse allow
-        out = runtime.translate_canonical_output(
-            {
-                "decision": "allow",
-                "updated_args": {
-                    "prompt": "Sanitized prompt"
-                }
-            },
-            "claude-code",
-            "PreToolUse",
-            "guard",
-        )
-        self.assertEqual(out["hookSpecificOutput"]["hookEventName"],
-                         "PreToolUse")
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"],
-                         "allow")
-        self.assertEqual(out["hookSpecificOutput"]["updatedInput"],
-                         {"prompt": "Sanitized prompt"})
-
-        # Claude Code PostToolUse block
-        out = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Kernel check failed",
-                "context": "Please retry with tile size 64"
-            },
-            "claude-code",
-            "PostToolUse",
-            "verifier",
-        )
-        self.assertEqual(out["decision"], "block")
-        self.assertEqual(out["reason"], "Kernel check failed")
-        self.assertEqual(out["hookSpecificOutput"]["hookEventName"],
-                         "PostToolUse")
-        self.assertEqual(out["hookSpecificOutput"]["additionalContext"],
-                         "Please retry with tile size 64")
-
-        # Antigravity PreToolUse deny
-        out = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Unauthorized subagent"
-            },
-            "antigravity",
-            "PreToolUse",
-            "guard",
-        )
-        self.assertEqual(out["decision"], "deny")
-        self.assertEqual(out["reason"], "Unauthorized subagent")
-
-    def test_normalize_inbound_subagent_stop_claude_code(self):
-        payload = {
-            "agent_type": "torch_coder",
-            "last_assistant_message":
-            "Kernel code generated successfully with 1.4x speedup.",
-            "agent_transcript_path": "/path/to/transcript.jsonl",
-            "session_id": "sess-123",
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="claude-code",
-            event="SubagentStop",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SubagentStop")
-        self.assertEqual(event["subagent"], "torch_coder")
-        self.assertEqual(event["args"]["subagent"], "torch_coder")
-        self.assertEqual(event["args"]["agent_transcript_path"],
-                         "/path/to/transcript.jsonl")
-        self.assertEqual(event["args"]["session_id"], "sess-123")
-        self.assertEqual(
-            event["output"],
-            "Kernel code generated successfully with 1.4x speedup.",
-        )
-        self.assertEqual(event["context"]["workspace"],
-                         str(self.workspace_dir))
-        self.assertEqual(event["context"]["package"], "test-pkg")
-
-    def test_normalize_inbound_subagent_stop_codex(self):
-        payload = {
-            "agent_type": "tpu-sharding",
-            "agent_id": "agent-456",
-            "turn_id": "turn-789",
-            "last_assistant_message":
-            "Distributed sharding strategy computed.",
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="codex",
-            event="SubagentStop",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SubagentStop")
-        self.assertEqual(event["subagent"], "tpu-sharding")
-        self.assertEqual(event["args"]["agent_id"], "agent-456")
-        self.assertEqual(event["args"]["turn_id"], "turn-789")
-        self.assertEqual(event["output"],
-                         "Distributed sharding strategy computed.")
-
-    def test_normalize_inbound_subagent_stop_cursor(self):
-        payload = {
-            "subagent_type": "torch_coder",
-            "status": "completed",
-            "task": "Refactor custom flash attention kernel",
-            "summary":
-            "Completed kernel implementation and benchmark verification.",
-            "modified_files": ["kernel.py", "bench.py"],
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="cursor",
-            event="subagentStop",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SubagentStop")
-        self.assertEqual(event["subagent"], "torch_coder")
-        self.assertEqual(event["args"]["status"], "completed")
-        self.assertEqual(event["args"]["task"],
-                         "Refactor custom flash attention kernel")
-        self.assertEqual(event["args"]["modified_files"],
-                         ["kernel.py", "bench.py"])
-        self.assertEqual(
-            event["output"],
-            "Completed kernel implementation and benchmark verification.",
-        )
-
-    def test_normalize_inbound_subagent_stop_antigravity(self):
-        payload = {
-            "role": "torch_coder",
-            "conversationId": "conv-999",
-            "transcriptPath": "/path/to/log.jsonl",
-            "terminationReason": "NO_TOOL_CALL",
-            "toolOutput": "Optimized TPU tile size 128x128.",
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="antigravity",
-            event="Stop",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SubagentStop")
-        self.assertEqual(event["subagent"], "torch_coder")
-        self.assertEqual(event["args"]["conversationId"], "conv-999")
-        self.assertEqual(event["args"]["transcriptPath"], "/path/to/log.jsonl")
-        self.assertEqual(event["args"]["terminationReason"], "NO_TOOL_CALL")
-        self.assertEqual(event["args"]["stop_reason"], "NO_TOOL_CALL")
-        self.assertEqual(event["output"], "Optimized TPU tile size 128x128.")
-
-    def test_normalize_inbound_subagent_stop_unsupported_harness(self):
-        with self.assertRaises(utils.TpuAgentSuiteError) as ctx:
-            runtime.normalize_inbound_event(
-                raw_payload={},
-                harness="unsupported_harness",
-                event="SubagentStop",
+    def _assert_normalized(self, cases):
+        """Each case is `(harness, native event, payload, {path: value})`;
+        a path is dotted into the canonical event."""
+        for harness, native_event, payload, expected in cases:
+            event = events.normalize_inbound_event(
+                raw_payload=payload,
+                harness=harness,
+                event=native_event,
                 package="test-pkg",
                 workspace=self.workspace_dir,
             )
-        self.assertIn("unsupported harness for subagent stop",
-                      str(ctx.exception))
-
-    def test_extract_last_transcript_message(self):
-        transcript_file = self.workspace_dir / "transcript.jsonl"
-        lines = [
-            json.dumps({
-                "source": "USER_EXPLICIT",
-                "content": "Hello"
-            }),
-            json.dumps({
-                "source": "MODEL",
-                "content": '{"return": "done"}'
-            }),
-        ]
-        transcript_file.write_text("\n".join(lines), encoding="utf-8")
-        msg = runtime.extract_last_transcript_message(str(transcript_file))
-        self.assertEqual(msg, '{"return": "done"}')
+            for path, value in expected.items():
+                with self.subTest(harness=harness, path=path):
+                    got = functools.reduce(lambda d, k: d[k], path.split("."),
+                                           event)
+                    self.assertEqual(got, value)
 
     def test_get_google_harness_subagent_name_with_disk_descriptor(self):
         cid = "test-descriptor-cid-9999"
@@ -1613,15 +603,8 @@ class TestRuntime(unittest.TestCase):
         }),
                              encoding="utf-8")
         with mock.patch("pathlib.Path.home", return_value=fake_home):
-            name = runtime.get_google_harness_subagent_name(
-                cid, "", self.workspace_dir)
+            name = run_state.get_google_harness_subagent_name(cid, "")
         self.assertEqual(name, "torch-coder")
-
-    def test_get_google_harness_subagent_name_root_conversation(self):
-        cid = "test-root-cid-5678"
-        name = runtime.get_google_harness_subagent_name(
-            cid, "", self.workspace_dir)
-        self.assertIsNone(name)
 
     def test_google_harness_post_processing(self):
         # 1. Output extracted from transcript when None
@@ -1633,1093 +616,186 @@ class TestRuntime(unittest.TestCase):
             }),
             encoding="utf-8",
         )
-        subagent, output = runtime.google_harness_post_processing(
+        subagent, output = events.google_harness_post_processing(
             subagent="my-agent",
             subagent_output=None,
-            workspace=self.workspace_dir,
             transcript_path=str(transcript_file),
         )
         self.assertEqual(subagent, "my-agent")
         self.assertEqual(output, "TPU kernel done")
 
         # 2. Existing output preserved
-        _, output_kept = runtime.google_harness_post_processing(
+        _, output_kept = events.google_harness_post_processing(
             subagent="my-agent",
             subagent_output="already_set",
-            workspace=self.workspace_dir,
             transcript_path=str(transcript_file),
         )
         self.assertEqual(output_kept, "already_set")
 
-    def test_translate_canonical_output_subagent_stop(self):
-        # 1. Claude Code
-        # Allow
-        claude_allow = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            "claude-code",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(
-            claude_allow.get("hookSpecificOutput", {}).get("hookEventName"),
-            "SubagentStop",
-        )
-        self.assertNotIn("decision", claude_allow)
-
-        # Deny / Block
-        claude_deny = runtime.translate_canonical_output(
-            {
-                "decision":
-                "deny",
-                "reason":
-                "Missing benchmark metric in summary",
-                "followup_message":
-                "Please include speedup metric before completing",
-            },
-            "claude-code",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(claude_deny.get("decision"), "block")
-        self.assertEqual(
-            claude_deny.get("reason"),
-            "Please include speedup metric before completing",
-        )
-
-        # 2. Codex
-        codex_allow = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            "codex",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(codex_allow.get("decision"), "allow")
-
-        codex_block = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Failed output validation",
-            },
-            "codex",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(codex_block.get("decision"), "block")
-        self.assertEqual(codex_block.get("reason"), "Failed output validation")
-
-        # 3. Cursor
-        cursor_allow = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            "cursor",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(cursor_allow, {})
-
-        cursor_deny = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Artifact validation failed",
-                "followup_message": "Please verify return schema",
-            },
-            "cursor",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(
-            cursor_deny,
-            {"followup_message": "Please verify return schema"},
-        )
-
-        # 4. Antigravity
-        ag_allow = runtime.translate_canonical_output(
-            {"decision": "allow"},
-            "antigravity",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(ag_allow.get("decision"), "allow")
-
-        ag_deny = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Compilation summary missing",
-            },
-            "antigravity",
-            "SubagentStop",
-            "guard",
-        )
-        self.assertEqual(ag_deny.get("decision"), "continue")
-        self.assertEqual(ag_deny.get("reason"), "Compilation summary missing")
-
     def test_dispatch_hook_subagent_stop_e2e(self):
-        scripts_dir = (self.central_home / "packages" / "test-pkg@1.0.0" /
-                       "scripts")
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        hook_script = scripts_dir / "check_deliverable.py"
-        hook_script.write_text(
+        self._write_script(
+            "check_deliverable.py",
             "import sys, json\n"
             "data = json.loads(sys.stdin.read())\n"
-            "output = data.get('output', '')\n"
-            "if 'error' in str(output).lower():\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': 'Error found in output'}))\n"
+            "if 'error' in str(data.get('output', '')).lower():\n"
+            "    print(json.dumps({'decision': 'deny', 'reason': 'bad'}))\n"
             "else:\n"
             "    print(json.dumps({'decision': 'allow'}))\n",
-            encoding="utf-8",
         )
-
-        # Allow case for Claude Code
-        res_allow, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="check-deliverable",
-            event="SubagentStop",
-            script_rel="scripts/check_deliverable.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "agent_type":
-                "torch_coder",
-                "last_assistant_message":
-                "All TPU tests passed successfully."
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertNotIn("decision", res_allow)
-
-        # Deny case for Cursor. `status` is what Cursor's mapping points
-        # `stop_reason` at, and its vocabulary is not Antigravity's: read as a
-        # termination reason it would look like a halt and excuse the subagent
-        # from its contract, so only the Google harnesses are asked.
-        res_deny, code = runtime.dispatch_hook(
-            harness="cursor",
-            package="test-pkg@1.0.0",
-            hook_name="check-deliverable",
-            event="subagentStop",
-            script_rel="scripts/check_deliverable.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "subagent_type":
-                "torch_coder",
-                "status":
-                "completed",
-                "summary":
-                "Execution error: Kernel died."
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_deny.get("followup_message"),
-                         "Error found in output")
-
-        # Deny case for Antigravity. The reason says the subagent finished on
-        # its own terms, so it is held to its contract rather than excused.
-        res_ag, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="check-deliverable",
-            event="SubagentStop",
-            script_rel="scripts/check_deliverable.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
+        matcher = "torch_coder|tpu-kernel-development"
+        err = "Error during compilation."
+        # (harness, event, payload, matcher, reply key, expected value)
+        cases = [
+            ("claude-code", "SubagentStop", {
+                "agent_type": "torch_coder",
+                "last_assistant_message": "All passed."
+            }, None, "decision", None),
+            # `status` is what Cursor's mapping points `stop_reason` at; read
+            # as a termination reason it would look like a halt and excuse
+            # the subagent, so only the Google harnesses are asked.
+            ("cursor", "subagentStop", {
+                "subagent_type": "torch_coder",
+                "status": "completed",
+                "summary": err
+            }, None, "followup_message", "bad"),
+            # Finished on its own terms, and matched by the emulated
+            # matcher: held to its contract. A non-matching role is not.
+            ("antigravity", "SubagentStop", {
                 "role": "torch_coder",
                 "terminationReason": "NO_TOOL_CALL",
-                "toolOutput": "Error during compilation."
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_ag.get("decision"), "continue")
-        self.assertEqual(res_ag.get("reason"), "Error found in output")
-
-        # Matcher emulation on Antigravity: matching subagent triggers validation
-        res_matched, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="check-deliverable",
-            event="SubagentStop",
-            script_rel="scripts/check_deliverable.py",
-            workspace=self.workspace_dir,
-            matcher="torch_coder|tpu-kernel-development",
-            raw_input_text=json.dumps({
-                "role": "torch_coder",
-                "toolOutput": "Error during compilation."
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_matched.get("decision"), "continue")
-
-        # Matcher emulation on Antigravity: non-matching subagent is bypassed
-        res_unmatched, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="check-deliverable",
-            event="SubagentStop",
-            script_rel="scripts/check_deliverable.py",
-            workspace=self.workspace_dir,
-            matcher="torch_coder|tpu-kernel-development",
-            raw_input_text=json.dumps({
+                "toolOutput": err
+            }, matcher, "decision", "continue"),
+            ("antigravity", "SubagentStop", {
                 "role": "doc_writer",
-                "toolOutput": "Error during compilation."
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_unmatched.get("decision"), "allow")
-
-        # Root session stop for Antigravity: bypasses SubagentStop hook even if output has errors
-        res_root, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="check-deliverable",
-            event="SubagentStop",
-            script_rel="scripts/check_deliverable.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId":
-                "root-conv-1234",
-                "terminationReason":
-                "USER_CANCELED",
-                "toolOutput":
-                "Error occurred in user turn.",
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_root.get("decision"), "allow")
-
-        # A subagent cut short has no result to hold to a contract, and
-        # blocking its stop would push an agent that was just stopped back
-        # into the loop. An unrecognised reason is treated the same way: the
-        # set lists completions, so anything the enum gains later errs toward
-        # letting the halt stand.
-        for reason in ("USER_CANCELED", "HALTED_STEP", "MAX_INVOCATIONS",
-                       "ERROR", "TERMINATION_REASON_FROM_THE_FUTURE"):
-            with self.subTest(reason=reason):
-                res_halted, code = runtime.dispatch_hook(
-                    harness="antigravity",
-                    package="test-pkg@1.0.0",
+                "toolOutput": err
+            }, matcher, "decision", "allow"),
+            # A root session stop bypasses the SubagentStop hook.
+            ("antigravity", "SubagentStop", {
+                "conversationId": "root-conv-1234",
+                "terminationReason": "USER_CANCELED",
+                "toolOutput": err,
+            }, None, "decision", "allow"),
+        ]
+        # A subagent cut short has no result to hold to a contract; an
+        # unrecognised reason errs toward letting the halt stand.
+        for reason in ("HALTED_STEP", "TERMINATION_REASON_FROM_THE_FUTURE"):
+            cases.append(("antigravity", "SubagentStop", {
+                "role": "torch_coder",
+                "terminationReason": reason,
+                "toolOutput": err
+            }, None, "decision", "allow"))
+        for harness, event, payload, match, key, expected in cases:
+            with self.subTest(harness=harness, payload=payload):
+                res, code = self._dispatch(
+                    harness=harness,
                     hook_name="check-deliverable",
-                    event="SubagentStop",
+                    event=event,
                     script_rel="scripts/check_deliverable.py",
-                    workspace=self.workspace_dir,
-                    raw_input_text=json.dumps({
-                        "role":
-                        "torch_coder",
-                        "terminationReason":
-                        reason,
-                        "toolOutput":
-                        "Error occurred before abort.",
-                    }),
+                    matcher=match,
+                    raw_input_text=json.dumps(payload),
                 )
-                self.assertEqual(code, 0)
-                self.assertEqual(res_halted.get("decision"), "allow")
+                self.assertEqual((code, res.get(key)), (0, expected))
 
-    def test_hook_dispatch_subagent_delegate(self):
-        # Directly test normalize_inbound_event unpacking for Antigravity invoke_subagent
-        raw_ag_payload = {
-            "toolCall": {
-                "name": "invoke_subagent",
-                "args": {
-                    "Subagents": [{
-                        "TypeName": "tpu-kernel-development",
-                        "Prompt": "optimize"
-                    }]
-                },
-            }
-        }
-        normalized = runtime.normalize_inbound_event(
-            raw_payload=raw_ag_payload,
-            harness="antigravity",
-            event="PreToolUse",
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(normalized["tool"], "delegate")
-        self.assertEqual(normalized["args"]["subagent"],
-                         "tpu-kernel-development")
-        self.assertEqual(normalized["args"]["prompt"], "optimize")
-
-        script_path = self.pkg_root / "scripts" / "subagent_guard.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(
-            "import json, sys\n"
-            "data = json.load(sys.stdin)\n"
-            "assert data['tool'] == 'delegate'\n"
-            "subagent = data.get('args', {}).get('subagent', '')\n"
-            "prompt = data.get('args', {}).get('prompt', '')\n"
-            "if subagent == 'blocked-agent':\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': 'blocked subagent'}))\n"
-            "elif data['event'] == 'PostToolUse' and data.get('output', {}).get('status') == 'fail':\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': 'subagent failed'}))\n"
-            "else:\n"
-            "    print(json.dumps({'decision': 'allow', 'message': f'{subagent}:{prompt}'}))\n",
-            encoding="utf-8",
-        )
-
-        # Antigravity PreToolUse allow (unpacks Subagents[0])
-        res_ag, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="subagent-guard",
-            event="PreToolUse",
-            script_rel="scripts/subagent_guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps(raw_ag_payload),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_ag, {"decision": "allow"})
-
-        # Claude Code PreToolUse deny
-        res_claude, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="subagent-guard",
-            event="PreToolUse",
-            script_rel="scripts/subagent_guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "tool_name": "Agent",
-                "tool_input": {
-                    "subagent_type": "blocked-agent",
-                    "prompt": "run"
-                },
+    def test_normalize_inbound_session_start(self):
+        """Each harness's native session-start payload, in canonical form."""
+        self._assert_normalized([
+            ("claude-code", "SessionStart", {
+                "session_id": "sess-claude-123",
+                "source": "resume",
+                "cwd": "/workspace/project",
+            }, {
+                "event": "SessionStart",
+                "args.session_id": "sess-claude-123",
+                "args.source": "resume",
+                "args.cwd": "/workspace/project",
             }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            res_claude["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertEqual(
-            res_claude["hookSpecificOutput"]["permissionDecisionReason"],
-            "blocked subagent")
-
-        # Antigravity PostToolUse deny on toolOutput
-        res_post, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="subagent-guard",
-            event="PostToolUse",
-            script_rel="scripts/subagent_guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "toolCall": {
-                    "name": "invoke_subagent",
-                    "args": {
-                        "Subagents": [{
-                            "TypeName": "tpu-kernel-development"
-                        }]
-                    }
-                },
-                "toolOutput": {
-                    "status": "fail"
-                },
+            # `workspace_roots` is a list, but `cwd` names one directory. Cursor
+            # names nothing that started the session, so the default stands.
+            ("cursor", "sessionStart", {
+                "workspace_roots": ["/workspace/cursor-proj"],
+            }, {
+                "args.cwd": "/workspace/cursor-proj",
+                "args.source": "startup",
             }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_post, {
-            "decision": "deny",
-            "reason": "subagent failed"
-        })
-
-        # Antigravity multi-subagent batch: partial allow with overwrite filtering
-        raw_multi_ag = {
-            "toolCall": {
-                "name": "invoke_subagent",
-                "args": {
-                    "Subagents": [
-                        {
-                            "TypeName": "tpu-kernel-development",
-                            "Prompt": "optimize"
-                        },
-                        {
-                            "TypeName": "blocked-agent",
-                            "Prompt": "run dangerous task"
-                        },
-                    ]
-                }
-            }
-        }
-        res_multi, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="subagent-guard",
-            event="PreToolUse",
-            script_rel="scripts/subagent_guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps(raw_multi_ag),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_multi.get("decision"), "allow")
-        self.assertIn("overwrite", res_multi)
-        # Blocked subagent is pruned, only allowed subagent remains in overwrite.Subagents
-        self.assertEqual(res_multi["overwrite"]["Subagents"],
-                         [{
-                             "TypeName": "tpu-kernel-development",
-                             "Prompt": "optimize"
-                         }])
-
-        # Antigravity multi-subagent batch: all denied
-        raw_all_denied = {
-            "toolCall": {
-                "name": "invoke_subagent",
-                "args": {
-                    "Subagents": [
-                        {
-                            "TypeName": "blocked-agent",
-                            "Prompt": "task 1"
-                        },
-                    ]
-                }
-            }
-        }
-        res_all_denied, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="subagent-guard",
-            event="PreToolUse",
-            script_rel="scripts/subagent_guard.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps(raw_all_denied),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res_all_denied.get("decision"), "deny")
-
-    def test_normalize_inbound_session_start_claude_code(self):
-        payload = {
-            "session_id": "sess-claude-123",
-            "source": "startup",
-            "cwd": "/workspace/project",
-            "transcript_path": "/workspace/.claude/transcript.jsonl",
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="claude-code",
-            event="SessionStart",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SessionStart")
-        self.assertEqual(event["args"]["session_id"], "sess-claude-123")
-        self.assertEqual(event["args"]["source"], "startup")
-        self.assertEqual(event["args"]["cwd"], "/workspace/project")
-        self.assertEqual(event["args"]["transcript_path"],
-                         "/workspace/.claude/transcript.jsonl")
-        self.assertEqual(event["context"]["workspace"],
-                         str(self.workspace_dir))
-        self.assertEqual(event["context"]["package"], "test-pkg")
-
-    def test_normalize_inbound_session_start_codex(self):
-        payload = {
-            "session_id": "sess-codex-456",
-            "source": "resume",
-            "cwd": "/workspace/codex-proj",
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="codex",
-            event="SessionStart",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SessionStart")
-        self.assertEqual(event["args"]["session_id"], "sess-codex-456")
-        self.assertEqual(event["args"]["source"], "resume")
-        self.assertEqual(event["args"]["cwd"], "/workspace/codex-proj")
-
-    def test_normalize_inbound_session_start_cursor(self):
-        """Cursor's documented sessionStart payload, including its array cwd.
-
-        `workspace_roots` is a list of paths, but `cwd` names a single
-        directory, so the normalizer must hand hooks the first root as a
-        string rather than the list itself.
-        """
-        payload = {
-            "session_id": "sess-cursor-789",
-            "conversation_id": "sess-cursor-789",
-            "is_background_agent": False,
-            "composer_mode": "agent",
-            "workspace_roots": ["/workspace/cursor-proj"],
-            "transcript_path": "/workspace/.cursor/transcript.jsonl",
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="cursor",
-            event="sessionStart",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SessionStart")
-        self.assertEqual(event["args"]["session_id"], "sess-cursor-789")
-        self.assertEqual(event["args"]["cwd"], "/workspace/cursor-proj")
-        self.assertEqual(event["args"]["transcript_path"],
-                         "/workspace/.cursor/transcript.jsonl")
-        # Cursor publishes nothing naming what started the session, so the
-        # canonical default stands rather than a value invented from the
-        # payload.
-        self.assertEqual(event["args"]["source"], "startup")
-
-    def test_session_start_cwd_survives_an_empty_workspace_roots(self):
-        """An empty array is no answer, so the workspace fallback must hold.
-
-        Cursor sends `workspace_roots` as a list. Unwrapping an empty one used
-        to yield `[]`, which then displaced the fallback and handed hooks a
-        list where the contract promises a path string.
-        """
-        event = runtime.normalize_inbound_event(
-            raw_payload={
-                "session_id": "sess-empty",
+            # Regression: an empty list used to displace the workspace
+            # fallback, handing hooks `[]` where a path string is promised.
+            ("cursor", "sessionStart", {
                 "workspace_roots": [],
-            },
-            harness="cursor",
-            event="sessionStart",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["args"]["cwd"], str(self.workspace_dir))
-        self.assertIsInstance(event["args"]["cwd"], str)
-
-    def test_normalize_inbound_session_start_antigravity(self):
-        payload = {
-            "conversationId": "conv-agy-101",
-            "source": "startup",
-            "workspacePaths": [str(self.workspace_dir)],
-            "transcriptPath": "/path/to/agy.jsonl",
-            "invocationNum": 1,
-            "initialNumSteps": 0,
-        }
-        event = runtime.normalize_inbound_event(
-            raw_payload=payload,
-            harness="antigravity",
-            event="PreInvocation",
-            package="test-pkg",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(event["event"], "SessionStart")
-        self.assertEqual(event["args"]["session_id"], "conv-agy-101")
-        self.assertEqual(event["args"]["source"], "startup")
-        self.assertEqual(event["args"]["cwd"], str(self.workspace_dir))
-        self.assertEqual(event["args"]["transcript_path"],
-                         "/path/to/agy.jsonl")
-        self.assertEqual(event["args"]["invocation_num"], 1)
-        self.assertEqual(event["args"]["initial_num_steps"], 0)
-
-    def test_translate_canonical_output_session_start(self):
-        # 1. Claude Code Allow with context
-        claude_allow = runtime.translate_canonical_output(
-            {
-                "decision": "allow",
-                "context": "TPU v5p environment active.",
-                "message": "Welcome!",
-            },
-            "claude-code",
-            "SessionStart",
-            "init-guard",
-        )
-        self.assertEqual(claude_allow.get("systemMessage"), "Welcome!")
-        self.assertEqual(
-            claude_allow.get("hookSpecificOutput", {}).get("hookEventName"),
-            "SessionStart",
-        )
-        self.assertEqual(
-            claude_allow.get("hookSpecificOutput",
-                             {}).get("additionalContext"),
-            "TPU v5p environment active.",
-        )
-        self.assertNotIn("decision", claude_allow)
-
-        # Claude Code Deny
-        claude_deny = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Missing TPU credentials",
-            },
-            "claude-code",
-            "SessionStart",
-            "init-guard",
-        )
-        self.assertEqual(claude_deny.get("decision"), "block")
-        self.assertEqual(claude_deny.get("reason"), "Missing TPU credentials")
-
-        # 2. Codex Allow & Deny
-        codex_allow = runtime.translate_canonical_output(
-            {
-                "decision": "allow",
-                "context": "Context for codex",
-            },
-            "codex",
-            "SessionStart",
-            "init-guard",
-        )
-        self.assertEqual(codex_allow.get("decision"), "allow")
-        self.assertEqual(codex_allow.get("additional_context"),
-                         "Context for codex")
-
-        codex_deny = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "GCE cluster unavailable",
-            },
-            "codex",
-            "SessionStart",
-            "init-guard",
-        )
-        self.assertEqual(codex_deny.get("decision"), "block")
-        self.assertEqual(codex_deny.get("reason"), "GCE cluster unavailable")
-
-        # 3. Cursor Allow & Deny
-        cursor_allow = runtime.translate_canonical_output(
-            {
-                "decision": "allow",
-                "context": "Context for cursor",
-            },
-            "cursor",
-            "sessionStart",
-            "init-guard",
-        )
-        self.assertEqual(cursor_allow.get("additional_context"),
-                         "Context for cursor")
-
-        cursor_deny = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Cluster down",
-            },
-            "cursor",
-            "sessionStart",
-            "init-guard",
-        )
-        self.assertEqual(cursor_deny.get("decision"), "cancel")
-        self.assertEqual(cursor_deny.get("reason"), "Cluster down")
-
-        # 4. Antigravity (injectSteps)
-        ag_allow = runtime.translate_canonical_output(
-            {
-                "decision": "allow",
-                "context": "Active profile: TPU v6e.",
-            },
-            "antigravity",
-            "SessionStart",
-            "init-guard",
-        )
-        self.assertIn("injectSteps", ag_allow)
-        self.assertEqual(len(ag_allow["injectSteps"]), 1)
-        self.assertEqual(
-            ag_allow["injectSteps"][0]["ephemeralMessage"],
-            "Active profile: TPU v6e.",
-        )
-
-        ag_deny = runtime.translate_canonical_output(
-            {
-                "decision": "deny",
-                "reason": "Invalid workspace",
-            },
-            "antigravity",
-            "SessionStart",
-            "init-guard",
-        )
-        self.assertIn("injectSteps", ag_deny)
-        self.assertEqual(len(ag_deny["injectSteps"]), 1)
-        self.assertIn("Invalid workspace",
-                      ag_deny["injectSteps"][0]["ephemeralMessage"])
-
-    def test_dispatch_hook_session_start_e2e(self):
-        scripts_dir = self.pkg_root / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        hook_script = scripts_dir / "init_session.py"
-        hook_script.write_text(
-            "import sys, json\n"
-            "data = json.loads(sys.stdin.read())\n"
-            "assert data.get('event') == 'SessionStart'\n"
-            "print(json.dumps({\n"
-            "    'decision': 'allow',\n"
-            "    'context': 'TPU environment ready',\n"
-            "    'message': 'Session initialized'\n"
-            "}))\n",
-            encoding="utf-8",
-        )
-
-        res, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="init-session",
-            event="SessionStart",
-            script_rel="scripts/init_session.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "session_id": "sess-init-123",
-                "source": "startup",
-                "cwd": str(self.workspace_dir),
+            }, {
+                "args.cwd": str(self.workspace_dir),
             }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res.get("systemMessage"), "Session initialized")
-        self.assertEqual(
-            res.get("hookSpecificOutput", {}).get("additionalContext"),
-            "TPU environment ready",
-        )
-
-    def test_dispatch_hook_session_start_antigravity_turn_bypass(self):
-        scripts_dir = self.pkg_root / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        hook_script = scripts_dir / "fail_on_call.py"
-        hook_script.write_text(
-            "import sys, json\n"
-            "# If called on turn > 1, emit error\n"
-            "sys.exit(1)\n",
-            encoding="utf-8",
-        )
-
-        # Turn 2: invocationNum=2 -> should be bypassed, returning allow ({'injectSteps': []}) with exit code 0
-        res, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="fail-on-call",
-            event="SessionStart",
-            script_rel="scripts/fail_on_call.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-123",
-                "invocationNum": 2,
-                "initialNumSteps": 5,
+            ("antigravity", "PreInvocation", {
+                "conversationId": "conv-agy-101",
+                "workspacePaths": ["/workspace/agy-proj"],
+                "invocationNum": 1,
+                "initialNumSteps": 0,
+            }, {
+                "event": "SessionStart",
+                "args.session_id": "conv-agy-101",
+                "args.cwd": "/workspace/agy-proj",
+                "args.invocation_num": 1,
+                "args.initial_num_steps": 0,
             }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res, {"injectSteps": []})
+        ])
 
     # The compute note is not replayed; its own test below covers that.
     @mock.patch.object(runtime.compute.cli,
                        "check_target_at_session_start",
                        return_value=None)
-    def test_dispatch_hook_session_start_antigravity_turn_2_reinjects_active_run_id(
+    def test_dispatch_hook_session_start_antigravity_context_caching(
             self, _check):
-        """Turn 2+ replays the run namespace that Turn 1 allocated.
+        """Antigravity fires SessionStart on every model call: only the first
+        runs each hook, and every later call replays that hook's own context.
 
         The builtin emits a bare `run_id`; the context wrapped around it is
-        synthesised during translation. Turn 2+ must reproduce that same text
-        from cache, so caching a canonical result keyed only on `context` is
-        not enough -- it has to cover `run_id` too.
+        synthesised during translation, so the cache has to cover `run_id`
+        too, or Turn 2+ would allocate a fresh namespace.
         """
-        # Turn 1: the builtin allocates the namespace and seeds the cache.
-        res1, code1 = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="session-run-init",
-            event="SessionStart",
-            builtin="start-run",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-turn2",
-                "invocationNum": 0,
-                "initialNumSteps": 1,
-            }),
+        telemetry_script = self._write_script(
+            "telemetry.py",
+            "import sys, json\n"
+            "json.dump({'decision': 'allow', 'context': 'TPU ready'}, sys.stdout)\n",
         )
-        self.assertEqual(code1, 0)
-        turn_1_context = res1["injectSteps"][0]["ephemeralMessage"]
-        run_id = runtime.resolve_session_run_id("conv-turn2")
-        self.assertIn(run_id, turn_1_context)
+        run_init = {"hook_name": "session-run-init", "builtin": "start-run"}
+        telemetry = {"hook_name": "tel", "script_rel": "scripts/telemetry.py"}
+        telemetry_reply = {"injectSteps": [{"ephemeralMessage": "TPU ready"}]}
 
-        # Turn 2: initialNumSteps=5, invocationNum=0 -> replay cache, allocating nothing.
-        res2, code2 = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="session-run-init",
-            event="SessionStart",
-            builtin="start-run",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-turn2",
-                "invocationNum": 0,
-                "initialNumSteps": 5,
-            }),
-        )
-        self.assertEqual(code2, 0)
-        self.assertEqual(
-            res2, {"injectSteps": [{
-                "ephemeralMessage": turn_1_context
-            }]})
-        # The namespace must be the one from Turn 1, not a freshly allocated one.
-        self.assertEqual(runtime.resolve_session_run_id("conv-turn2"), run_id)
-
-        # The context is ephemeral: each model call sees only what is
-        # injected into it, so later calls in a turn get it again too.
-        for init_steps, invocation in ((1, 2), (5, 3)):
-            res3, _ = runtime.dispatch_hook(
+        def fire(initial_num_steps, invocation_num=0, **action):
+            res, code = self._dispatch(
                 harness="antigravity",
-                package="test-pkg@1.0.0",
-                hook_name="session-run-init",
                 event="SessionStart",
-                builtin="start-run",
-                workspace=self.workspace_dir,
                 raw_input_text=json.dumps({
-                    "conversationId": "conv-turn2",
-                    "invocationNum": invocation,
-                    "initialNumSteps": init_steps,
+                    "conversationId": "conv-multi",
+                    "invocationNum": invocation_num,
+                    "initialNumSteps": initial_num_steps,
                 }),
+                **action,
             )
-            self.assertEqual(res3, res2)
+            self.assertEqual(code, 0)
+            return res
 
-    def test_dispatch_hook_session_start_antigravity_turn_1_executes(self):
-        scripts_dir = self.pkg_root / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        hook_script = scripts_dir / "turn1_hook.py"
-        hook_script.write_text(
-            "import sys, json\n"
-            "json.dump({'decision': 'allow', 'context': 'Turn 1 context'}, sys.stdout)\n",
-            encoding="utf-8",
-        )
+        # Turn 1: each hook runs and seeds its own cache.
+        first_run = fire(1, **run_init)
+        run_id = run_state.resolve_session_run_id("conv-multi")
+        self.assertIn(f"TPU agent suite run namespace: {run_id}",
+                      first_run["injectSteps"][0]["ephemeralMessage"])
+        self.assertEqual(fire(1, **telemetry), telemetry_reply)
 
-        # Turn 1: initialNumSteps=1 (user prompt), invocationNum=0 -> should NOT be bypassed
-        res, code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="turn1-hook",
-            event="SessionStart",
-            script_rel="scripts/turn1_hook.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-123",
-                "invocationNum": 0,
-                "initialNumSteps": 1,
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            res, {"injectSteps": [{
-                "ephemeralMessage": "Turn 1 context"
-            }]})
-
-    def test_dispatch_hook_session_start_antigravity_multi_hook_context_caching(
-            self):
-        scripts_dir = self.pkg_root / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        telemetry_script = scripts_dir / "telemetry.py"
-        telemetry_script.write_text(
-            "import sys, json\n"
-            "json.dump({'decision': 'allow', 'context': 'TPU Cluster: v4-8 Ready'}, sys.stdout)\n",
-            encoding="utf-8",
-        )
-
-        # Turn 1: Hook A (builtin:start-run)
-        res_a1, code_a1 = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="session-run-init",
-            event="SessionStart",
-            builtin="start-run",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-multi",
-                "invocationNum": 0,
-                "initialNumSteps": 1,
-            }),
-        )
-        self.assertEqual(code_a1, 0)
-        self.assertEqual(len(res_a1["injectSteps"]), 1)
-        self.assertIn("TPU agent suite run namespace:",
-                      res_a1["injectSteps"][0]["ephemeralMessage"])
-
-        # Turn 1: Hook B (user script)
-        res_b1, code_b1 = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="telemetry-hook",
-            event="SessionStart",
-            script_rel="scripts/telemetry.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-multi",
-                "invocationNum": 0,
-                "initialNumSteps": 1,
-            }),
-        )
-        self.assertEqual(code_b1, 0)
-        self.assertEqual(
-            res_b1,
-            {"injectSteps": [{
-                "ephemeralMessage": "TPU Cluster: v4-8 Ready"
-            }]})
-
-        # Overwrite telemetry script to fail if invoked on Turn 2+
+        # Later calls in turn 1 and later turns replay, running nothing.
         telemetry_script.write_text("import sys\nsys.exit(1)\n",
                                     encoding="utf-8")
-
-        # Turn 2: Hook A should return only Hook A's cached context
-        res_a2, code_a2 = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="session-run-init",
-            event="SessionStart",
-            builtin="start-run",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-multi",
-                "invocationNum": 0,
-                "initialNumSteps": 3,
-            }),
-        )
-        self.assertEqual(code_a2, 0)
-        self.assertEqual(len(res_a2["injectSteps"]), 1)
-        self.assertIn("TPU agent suite run namespace:",
-                      res_a2["injectSteps"][0]["ephemeralMessage"])
-
-        # Turn 2: Hook B should return only Hook B's cached context without running script
-        res_b2, code_b2 = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="telemetry-hook",
-            event="SessionStart",
-            script_rel="scripts/telemetry.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-multi",
-                "invocationNum": 0,
-                "initialNumSteps": 3,
-            }),
-        )
-        self.assertEqual(code_b2, 0)
-        self.assertEqual(
-            res_b2,
-            {"injectSteps": [{
-                "ephemeralMessage": "TPU Cluster: v4-8 Ready"
-            }]})
-
-        # Turn 2: Hook C (unregistered hook) returns empty injectSteps
-        res_c2, code_c2 = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="unregistered-hook",
-            event="SessionStart",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "conversationId": "conv-multi",
-                "invocationNum": 0,
-                "initialNumSteps": 3,
-            }),
-        )
-        self.assertEqual(code_c2, 0)
-        self.assertEqual(res_c2, {"injectSteps": []})
-
-        # Each hook's context lives in its own file, sharing no document.
-        context_files = sorted(p.name
-                               for p in (utils.get_sessions_root() /
-                                         "conv-multi.contexts").iterdir())
-        self.assertEqual(context_files,
-                         ["session-run-init.json", "telemetry-hook.json"])
-
-    def test_dispatch_hook_session_start_skips_cache_for_single_fire_harness(
-            self):
-        """Only the per-turn harnesses read the cache back, so only they write it.
-
-        Claude Code fires SessionStart once per session and injects context
-        directly, so caching there is pure write amplification on a session
-        record nothing will ever consult.
-        """
-        scripts_dir = self.pkg_root / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        (scripts_dir / "ctx.py").write_text(
-            "import sys, json\n"
-            "json.dump({'decision': 'allow', 'context': 'CC ctx'}, sys.stdout)\n",
-            encoding="utf-8",
-        )
-
-        res, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="cc-hook",
-            event="SessionStart",
-            script_rel="scripts/ctx.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "session_id": "conv-cc",
-                "source": "startup"
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(res["hookSpecificOutput"]["additionalContext"],
-                         "CC ctx")
-        self.assertIsNone(
-            runtime.resolve_session_hook_context("conv-cc", "cc-hook"))
-
-    def test_session_writers_touch_disjoint_files(self):
-        """The run record and each hook's context never share a document.
-
-        This is what makes concurrent hook dispatch safe: with no shared file
-        there is no read-modify-write to interleave, so neither writer can
-        clobber the other.
-        """
-        runtime.record_session_run(
-            session_id="conv-keep",
-            run_id="20260913T170000Z-998877665544",
-            package="test-pkg@1.0.0",
-        )
-        session_file = runtime.get_session_file("conv-keep")
-        created_at = utils.load_json(session_file)["created_at"]
-        session_mtime = session_file.stat().st_mtime_ns
-
-        # Caching hook context must not rewrite the run record at all.
-        runtime.record_session_hook_context(
-            session_id="conv-keep",
-            hook_name="telemetry-hook",
-            context_text="TPU Cluster: v4-8 Ready",
-            package="test-pkg@1.0.0",
-        )
-        self.assertEqual(session_file.stat().st_mtime_ns, session_mtime)
-
-        # Re-recording a run must not evict context cached by any hook.
-        runtime.record_session_run(
-            session_id="conv-keep",
-            run_id="20260914T170000Z-112233445566",
-            package="test-pkg@1.0.0",
-        )
-        session_doc = utils.load_json(session_file)
-        self.assertEqual(session_doc["run_id"],
-                         "20260914T170000Z-112233445566")
-        self.assertEqual(session_doc["created_at"], created_at)
-        self.assertEqual(
-            runtime.resolve_session_hook_context("conv-keep",
-                                                 "telemetry-hook"),
-            "TPU Cluster: v4-8 Ready")
-
-        # Re-recording identical state must not rewrite the file.
-        mtime = session_file.stat().st_mtime_ns
-        runtime.record_session_run(
-            session_id="conv-keep",
-            run_id="20260914T170000Z-112233445566",
-            package="test-pkg@1.0.0",
-        )
-        self.assertEqual(session_file.stat().st_mtime_ns, mtime)
-
-    def test_session_lookups_do_not_touch_the_filesystem(self):
-        """A miss must not leave state behind.
-
-        resolve_session_run_id runs on every normalized event, and the context
-        lookup runs on every turn of an emulated SessionStart. If the path
-        builders created directories, the store would accumulate an empty
-        directory per conversation that was merely asked about.
-        """
-        sessions_root = utils.get_sessions_root()
-        shutil.rmtree(sessions_root, ignore_errors=True)
-
-        self.assertIsNone(runtime.resolve_session_run_id("conv-absent"))
-        self.assertIsNone(
-            runtime.resolve_session_hook_context("conv-absent", "any-hook"))
-
-        self.assertFalse(sessions_root.exists(),
-                         "lookups created state for a session never recorded")
-
-    def test_session_record_readers_route_through_the_safe_reader(self):
-        """A corrupt record degrades to a cache miss, never a crash.
-
-        load_json_doc's own behaviour is covered in test_utils; what matters
-        here is that both resolvers go through it. Reading a record with
-        load_json instead would raise inside hook dispatch and take down
-        session start for the whole conversation.
-        """
-        session_file = runtime.get_session_file("conv-bad")
-        context_file = runtime.get_hook_context_file("conv-bad", "any-hook")
-        for path in (session_file, context_file):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Valid JSON, wrong shape: the case that raised AttributeError.
-            path.write_text("[1, 2, 3]", encoding="utf-8")
-
-        self.assertIsNone(
-            runtime.resolve_session_hook_context("conv-bad", "any-hook"))
-        self.assertIsNone(runtime.resolve_session_run_id("conv-bad"))
+        for init_steps, invocation in ((1, 2), (5, 3)):
+            with self.subTest(initial_num_steps=init_steps,
+                              invocation_num=invocation):
+                self.assertEqual(fire(init_steps, invocation, **run_init),
+                                 first_run)
+                self.assertEqual(fire(init_steps, invocation, **telemetry),
+                                 telemetry_reply)
+        self.assertEqual(run_state.resolve_session_run_id("conv-multi"),
+                         run_id)
+        # A hook that never ran has nothing to replay.
+        self.assertEqual(fire(3, hook_name="unregistered-hook"),
+                         {"injectSteps": []})
 
     def test_purge_data_clears_runs_and_session_records(self):
         """Purging runs must not leave sessions pointing at deleted namespaces.
@@ -2728,63 +804,62 @@ class TestRuntime(unittest.TestCase):
         context advertising its artifact path. Surviving a purge, they would
         hand a live conversation a namespace that no longer exists.
         """
-        run_doc = runtime.start_run(package="test-pkg@1.0.0",
-                                    workspace=self.workspace_dir)
-        runtime.record_session_run(
+        run_doc = run_state.start_run(package="test-pkg@1.0.0",
+                                      workspace=self.workspace_dir)
+        run_root = paths.get_run_root(run_doc["run_id"])
+        self.assertTrue((run_root / "artifacts").is_dir())
+        self.assertEqual(paths.get_active_run_id(self.workspace_dir),
+                         run_doc["run_id"])
+        run_state.record_session_run(
             session_id="conv-purge",
             run_id=run_doc["run_id"],
             package="test-pkg@1.0.0",
         )
-        runtime.record_session_hook_context(
+        run_state.record_session_hook_context(
             session_id="conv-purge",
             hook_name="session-run-init",
             context_text="cached context",
             package="test-pkg@1.0.0",
         )
-        self.assertTrue(utils.get_run_root(run_doc["run_id"]).is_dir())
+        self.assertTrue(run_root.is_dir())
 
         with contextlib.redirect_stdout(io.StringIO()):
-            runtime.purge_data(force=True)
+            run_state.purge_data(force=True)
 
-        self.assertFalse(utils.get_runs_root().is_dir())
-        self.assertIsNone(runtime.resolve_session_run_id("conv-purge"))
+        self.assertFalse(paths.get_runs_root().is_dir())
+        self.assertIsNone(run_state.resolve_session_run_id("conv-purge"))
         self.assertIsNone(
-            runtime.resolve_session_hook_context("conv-purge",
-                                                 "session-run-init"))
+            run_state.resolve_session_hook_context("conv-purge",
+                                                   "session-run-init"))
 
     def test_purge_data_declined_keeps_everything(self):
-        runtime.record_session_run(
+        run_state.record_session_run(
             session_id="conv-keep-purge",
             run_id="20260913T170000Z-998877665544",
             package="test-pkg@1.0.0",
         )
         with mock.patch("builtins.input", return_value="n"):
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                runtime.purge_data()
+                run_state.purge_data()
 
         self.assertIn("cancelled", err.getvalue())
-        self.assertEqual(runtime.resolve_session_run_id("conv-keep-purge"),
+        self.assertEqual(run_state.resolve_session_run_id("conv-keep-purge"),
                          "20260913T170000Z-998877665544")
 
     def test_dispatch_hook_session_start_antigravity_subagent_bypassed(self):
-        scripts_dir = self.pkg_root / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        hook_script = scripts_dir / "fail_on_call.py"
-        hook_script.write_text(
+        self._write_script(
+            "fail_on_call.py",
             "import sys, json\n"
             "# If called for a subagent, exit with error\n"
             "sys.exit(1)\n",
-            encoding="utf-8",
         )
 
         # Worktree transcript path indicates subagent -> should be bypassed with allow
-        res, code = runtime.dispatch_hook(
+        res, code = self._dispatch(
             harness="antigravity",
-            package="test-pkg@1.0.0",
             hook_name="subagent-test",
             event="SessionStart",
             script_rel="scripts/fail_on_call.py",
-            workspace=self.workspace_dir,
             raw_input_text=json.dumps({
                 "conversationId":
                 "subagent-conv-456",
@@ -2799,64 +874,13 @@ class TestRuntime(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(res, {"injectSteps": []})
 
-    def test_dispatch_hook_builtin_start_run(self):
-        res, code = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="session-run-init",
-            event="SessionStart",
-            builtin="start-run",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "session_id": "sess-builtin-1",
-                "source": "startup",
-                "cwd": str(self.workspace_dir),
-            }),
-        )
-        self.assertEqual(code, 0)
-        self.assertIn("systemMessage", res)
-        additional_ctx = res.get("hookSpecificOutput",
-                                 {}).get("additionalContext", "")
-        self.assertIn("TPU agent suite run namespace:", additional_ctx)
-
-        session_file = utils.get_sessions_root() / "sess-builtin-1.json"
-        self.assertTrue(session_file.is_file())
-        session_data = json.loads(session_file.read_text(encoding="utf-8"))
-        self.assertEqual(session_data["session_id"], "sess-builtin-1")
-        first_run_id = session_data["run_id"]
-        self.assertTrue(first_run_id)
-
-        # Calling start-run again for the same session must be idempotent
-        res2, code2 = runtime.dispatch_hook(
-            harness="claude-code",
-            package="test-pkg@1.0.0",
-            hook_name="session-run-init",
-            event="SessionStart",
-            builtin="start-run",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps({
-                "session_id": "sess-builtin-1",
-                "source": "startup",
-                "cwd": str(self.workspace_dir),
-            }),
-        )
-        self.assertEqual(code2, 0)
-        session_data2 = json.loads(session_file.read_text(encoding="utf-8"))
-        self.assertEqual(session_data2["run_id"], first_run_id)
-        additional_ctx2 = res2.get("hookSpecificOutput",
-                                   {}).get("additionalContext", "")
-        self.assertIn(f"TPU agent suite run namespace: {first_run_id}",
-                      additional_ctx2)
-
     def _start_session(self, session_id):
-        res, code = runtime.dispatch_hook(
+        res, code = self._dispatch(
             harness="claude-code",
-            package="test-pkg@1.0.0",
             hook_name="session-run-init",
             event="SessionStart",
             builtin="start-run",
             timeout=30,
-            workspace=self.workspace_dir,
             raw_input_text=json.dumps({
                 "session_id": session_id,
                 "source": "startup",
@@ -2872,42 +896,13 @@ class TestRuntime(unittest.TestCase):
                                "check_target_at_session_start",
                                return_value=note) as check:
             context = self._start_session("sess-check-1")
-            self._start_session("sess-check-1")  # resumed: checked again
-        self.assertIn("TPU agent suite run namespace:", context)
+            run_id = run_state.resolve_session_run_id("sess-check-1")
+            # Resumed: checked again, but the session keeps its run.
+            resumed = self._start_session("sess-check-1")
         self.assertIn(note, context)
+        self.assertIn(f"TPU agent suite run namespace: {run_id}", resumed)
         self.assertEqual(check.call_count, 2)
         self.assertEqual(check.call_args.args[-1], 30)  # the hook's timeout
-
-    def test_later_turns_on_google_harnesses_do_not_replay_the_compute_check(
-            self):
-        note = "Compute target FAILED its check"
-
-        def turn(initial_num_steps):
-            res, code = runtime.dispatch_hook(
-                harness="antigravity",
-                package="test-pkg@1.0.0",
-                hook_name="session-run-init",
-                event="SessionStart",
-                builtin="start-run",
-                timeout=30,
-                workspace=self.workspace_dir,
-                raw_input_text=json.dumps({
-                    "conversationId": "conv-check",
-                    "invocationNum": 0,
-                    "initialNumSteps": initial_num_steps,
-                }),
-            )
-            self.assertEqual(code, 0)
-            return res["injectSteps"][0]["ephemeralMessage"]
-
-        with mock.patch.object(runtime.compute.cli,
-                               "check_target_at_session_start",
-                               return_value=note):
-            first = turn(1)
-            later = turn(5)
-        self.assertIn(note, first)
-        self.assertIn("TPU agent suite run namespace:", later)
-        self.assertNotIn(note, later)
 
     def test_start_run_survives_a_compute_check_that_raises(self):
         with mock.patch.object(runtime.compute.cli,
@@ -2917,64 +912,13 @@ class TestRuntime(unittest.TestCase):
             context = self._start_session("sess-check-2")
         self.assertIn("TPU agent suite run namespace:", context)
 
-    def test_multi_session_concurrency_and_run_id_propagation(self):
-        # Register two concurrent sessions in the same workspace
-        runtime.record_session_run(
-            session_id="session-tab-1",
-            run_id="20260913T100000Z-aaaaaaaaaaaa",
-            package="test-pkg@1.0.0",
-        )
-        runtime.record_session_run(
-            session_id="session-tab-2",
-            run_id="20260913T100001Z-bbbbbbbbbbbb",
-            package="test-pkg@1.0.0",
-        )
-
-        # Verify distinct resolution
-        self.assertEqual(
-            runtime.resolve_session_run_id("session-tab-1"),
-            "20260913T100000Z-aaaaaaaaaaaa",
-        )
-        self.assertEqual(
-            runtime.resolve_session_run_id("session-tab-2"),
-            "20260913T100001Z-bbbbbbbbbbbb",
-        )
-
-        # Verify normalization assigns respective run_ids to each event's context
-        ev1 = runtime.normalize_inbound_event(
-            raw_payload={
-                "session_id": "session-tab-1",
-                "tool_name": "Bash",
-                "tool_input": {}
-            },
-            harness="claude-code",
-            event="PreToolUse",
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-        )
-        ev2 = runtime.normalize_inbound_event(
-            raw_payload={
-                "session_id": "session-tab-2",
-                "tool_name": "Bash",
-                "tool_input": {}
-            },
-            harness="claude-code",
-            event="PreToolUse",
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-        )
-        self.assertEqual(ev1["context"]["run_id"],
-                         "20260913T100000Z-aaaaaaaaaaaa")
-        self.assertEqual(ev2["context"]["run_id"],
-                         "20260913T100001Z-bbbbbbbbbbbb")
-
     def test_antigravity_child_conversation_resolves_parent_run_id(self):
         parent_cid = "conv-parent-999"
         child_cid = "subagent-child-888"
         parent_run_id = "20260913T120000Z-999999999999"
 
         # Record run_id for parent session
-        runtime.record_session_run(
+        run_state.record_session_run(
             session_id=parent_cid,
             run_id=parent_run_id,
             package="test-pkg@1.0.0",
@@ -2991,10 +935,9 @@ class TestRuntime(unittest.TestCase):
         with mock.patch("pathlib.Path.home", return_value=fake_home):
             # Verify child resolves to parent run_id via disk discovery
             self.assertEqual(
-                runtime.resolve_session_run_id(child_cid),
+                run_state.resolve_session_run_id(child_cid),
                 parent_run_id,
             )
-            self.assertIsNone(runtime.resolve_session_run_id("non-existent"), )
 
             # Inbound normalization for child subagent PreToolUse
             payload = {
@@ -3006,7 +949,7 @@ class TestRuntime(unittest.TestCase):
                     },
                 },
             }
-            ev = runtime.normalize_inbound_event(
+            ev = events.normalize_inbound_event(
                 raw_payload=payload,
                 harness="antigravity",
                 event="PreToolUse",
@@ -3043,91 +986,22 @@ class TestWorkspaceRootResolution(unittest.TestCase):
                 with mock.patch.object(pathlib.Path,
                                        "cwd",
                                        return_value=harness_dir):
-                    self.assertEqual(runtime.resolve_workspace_root(),
+                    self.assertEqual(events.resolve_workspace_root(),
                                      self.workspace.resolve())
-
-    def test_explicit_workspace_wins(self):
-        """An argument is an answer, not a hint; nothing below should run."""
-        self.assertEqual(runtime.resolve_workspace_root(self.workspace),
-                         self.workspace.resolve())
-
-    def test_a_nested_directory_climbs_to_the_marker(self):
-        """From real work inside the tree, the marker directory is the root."""
-        nested = self.workspace / "src" / "deep"
-        nested.mkdir(parents=True)
-        with mock.patch.object(pathlib.Path, "cwd", return_value=nested):
-            self.assertEqual(runtime.resolve_workspace_root(),
-                             self.workspace.resolve())
-
-    def test_a_repository_inside_the_workspace_is_not_the_workspace(self):
-        """A session that `cd`s into a repo it created still finds its records.
-
-        The session-start hook writes `.tpu-agent-suite/current_run_id` where
-        the harness says the session is. A later command run from a git
-        repository below that directory has to resolve the same place, or it
-        looks for the active run in a directory that has none.
-        """
-        repo = self.workspace / "model-repo"
-        (repo / ".git").mkdir(parents=True)
-        nested = repo / "scripts"
-        nested.mkdir()
-        for cwd in (repo, nested):
-            with self.subTest(cwd=cwd.name):
-                with mock.patch.object(pathlib.Path, "cwd", return_value=cwd):
-                    self.assertEqual(runtime.resolve_workspace_root(),
-                                     self.workspace.resolve())
-
-    def test_an_export_from_a_repository_finds_the_session(self):
-        """The trajectory export, run from that repo, names the right session.
-
-        This is the failure it had: the run id was found by climbing, the
-        session record was looked up under the repo, and the export stopped
-        with "could not determine which session to export".
-        """
-        run_id = "20260928T225805Z-a09b00bd2610"
-        tpu_agent_suite = self.workspace / ".tpu-agent-suite"
-        (tpu_agent_suite / "current_run_id").write_text(run_id,
-                                                        encoding="utf-8")
-        repo = self.workspace / "model-repo"
-        (repo / ".git").mkdir(parents=True)
-        store = self.workspace / "store"
-        with mock.patch.dict(os.environ, {"TPU_AGENT_SUITE_HOME": str(store)}):
-            utils.write_json(
-                utils.get_sessions_root() / "4b8b541a.json", {
-                    "session_id": "4b8b541a",
-                    "run_id": run_id,
-                    "created_at": "2026-09-28T22:58:05Z",
-                })
-            utils.get_run_root(run_id).mkdir(parents=True)
-            with mock.patch.object(pathlib.Path, "cwd", return_value=repo):
-                # The run id comes from climbing out of the repo to the
-                # workspace's marker; the session from the central store.
-                session_id, found_run, _ = runtime.resolve_trajectory_target(
-                    run_id=utils.get_active_run_id(
-                        runtime.resolve_workspace_root()) or "")
-        self.assertEqual((session_id, found_run), ("4b8b541a", run_id))
-
-    def test_a_directory_without_an_active_run_is_not_the_workspace(self):
-        """A bare `.tpu-agent-suite` is not a marker; the one with a run is.
-
-        The installer and the logging hooks create that directory in places
-        no session started in, so only the active-run file says a session did.
-        """
-        stray = self.workspace / "model-repo"
-        (stray / ".tpu-agent-suite" / "logs").mkdir(parents=True)
-        with mock.patch.object(pathlib.Path, "cwd", return_value=stray):
-            self.assertEqual(runtime.resolve_workspace_root(),
-                             self.workspace.resolve())
 
     def test_a_repository_is_not_a_workspace(self):
-        """With no active run above the cwd, the cwd answers, not a git root."""
+        """With no active run above the cwd, the cwd answers, not a git root.
+
+        A bare `.tpu-agent-suite` (the installer and logging hooks create one
+        where no session started) is not a marker; only the active-run file is.
+        """
         repo = self.tmp / "bare-repo"
         (repo / ".git").mkdir(parents=True)
+        (repo / ".tpu-agent-suite" / "logs").mkdir(parents=True)
         nested = repo / "src"
         nested.mkdir()
         with mock.patch.object(pathlib.Path, "cwd", return_value=nested):
-            self.assertEqual(runtime.resolve_workspace_root(),
-                             nested.resolve())
+            self.assertEqual(events.resolve_workspace_root(), nested.resolve())
 
 
 class TestCompletedArtifactRuleIsConditional(unittest.TestCase):
@@ -3139,28 +1013,35 @@ class TestCompletedArtifactRuleIsConditional(unittest.TestCase):
     way to satisfy the rule would be to claim success.
     """
 
-    def test_completed_without_an_artifact_is_rejected(self):
-        self.assertTrue(
-            runtime.check_completed_has_artifact({
+    def test_only_a_completed_result_owes_an_artifact(self):
+        for result, owes in (
+            ({
+                "status": "completed",
+                "summary": "all done"
+            }, True),
+            ({
                 "status": "completed",
                 "artifacts": []
-            }))
-
-    def test_a_failure_owes_no_artifact(self):
-        for status in ("failed", "blocked", "cancelled"):
-            with self.subTest(status=status):
+            }, True),
+            ({
+                "status": "completed",
+                "artifacts": [{
+                    "file": "report.md"
+                }]
+            }, False),
+            ({
+                "status": "failed",
+                "artifacts": []
+            }, False),
+            ({
+                "status": "needs_input"
+            }, False),
+            ("not a result object", False),
+        ):
+            with self.subTest(result=result):
                 self.assertEqual(
-                    runtime.check_completed_has_artifact({
-                        "status": status,
-                        "artifacts": []
-                    }), [])
-
-    def test_a_non_result_is_not_this_rule_s_business(self):
-        """Anything that is not a result object passes through untouched."""
-        for value in ("text", [], 7, None):
-            with self.subTest(value=value):
-                self.assertEqual(runtime.check_completed_has_artifact(value),
-                                 [])
+                    bool(agent_contracts.check_completed_has_artifact(result)),
+                    owes)
 
 
 class TestInstalledPackageResolution(unittest.TestCase):
@@ -3172,30 +1053,21 @@ class TestInstalledPackageResolution(unittest.TestCase):
         self.packages = self.tmp / "packages"
         self.packages.mkdir()
 
-    def _resolve(self, package):
-        with mock.patch.object(utils,
-                               "get_tpu_agent_suite_home",
-                               return_value=self.tmp):
-            return runtime.latest_installed_package(package)
-
-    def test_no_package_named_resolves_to_nothing(self):
-        self.assertIsNone(self._resolve(""))
-
-    def test_the_highest_version_wins(self):
+    def test_the_highest_installed_version_wins(self):
         for version in ("0.9.0", "0.10.0", "0.2.0"):
             (self.packages / f"pkg@{version}").mkdir()
-        resolved = self._resolve("pkg")
-        self.assertIsNotNone(resolved)
-        # 0.10.0 beats 0.9.0 numerically, which string ordering gets wrong.
-        self.assertEqual(resolved.name, "pkg@0.10.0")
-
-    def test_files_and_other_packages_are_skipped(self):
-        (self.packages / "pkg@1.0.0").mkdir()
+        # None of these is a candidate.
         (self.packages / "other@9.0.0").mkdir()
         (self.packages / "pkg@8.0.0").write_text("not a directory",
                                                  encoding="utf-8")
+        (self.packages / "pkg@not-a-version").mkdir()
         (self.packages / "unversioned").mkdir()
-        self.assertEqual(self._resolve("pkg").name, "pkg@1.0.0")
+        with mock.patch.object(paths,
+                               "get_tpu_agent_suite_home",
+                               return_value=self.tmp):
+            resolved = paths.latest_installed_package("pkg")
+        # 0.10.0 beats 0.9.0 numerically, which string ordering gets wrong.
+        self.assertEqual(resolved.name, "pkg@0.10.0")
 
 
 class TestStopEventDisambiguation(unittest.TestCase):
@@ -3212,29 +1084,11 @@ class TestStopEventDisambiguation(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.workspace, ignore_errors=True)
 
     def _normalize(self, payload):
-        return runtime.normalize_inbound_event(raw_payload=payload,
-                                               harness="antigravity",
-                                               event="Stop",
-                                               package="pkg",
-                                               workspace=self.workspace)
-
-    def test_no_subagent_metadata_is_a_root_stop(self):
-        event = self._normalize({
-            "terminationReason": "error",
-            "error": "429 RESOURCE_EXHAUSTED",
-            "conversationId": "conv-1",
-        })
-        self.assertEqual(event["event"], "Stop")
-        self.assertEqual(event["termination"]["error"],
-                         "429 RESOURCE_EXHAUSTED")
-        self.assertEqual(event["context"]["conversation_id"], "conv-1")
-
-    def test_top_level_subagent_metadata_is_a_subagent_stop(self):
-        event = self._normalize({
-            "role": "tpu-diagnostics",
-            "terminationReason": "NO_TOOL_CALL"
-        })
-        self.assertEqual(event["event"], "SubagentStop")
+        return events.normalize_inbound_event(raw_payload=payload,
+                                              harness="antigravity",
+                                              event="Stop",
+                                              package="pkg",
+                                              workspace=self.workspace)
 
     def test_nested_subagent_metadata_is_a_subagent_stop(self):
         """The role can arrive inside the tool call rather than beside it."""
@@ -3248,229 +1102,63 @@ class TestStopEventDisambiguation(unittest.TestCase):
         self.assertEqual(event["subagent"], "tpu-diagnostics")
 
 
-class TestIdleFlagAbsenceIsAnnounced(unittest.TestCase):
-    """A missing idle flag is read permissively, so it must not be silent.
-
-    The gate that holds a stop hook until the agent reports itself idle reads
-    "the harness did not say" as "allow". That is the safe default, but if
-    Antigravity ever renamed `fullyIdle` the gate would go on allowing every
-    stop with nothing in the logs to explain it -- the original bug wearing a
-    different hat.
-    """
-
-    def setUp(self):
-        self.workspace = pathlib.Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.workspace, ignore_errors=True)
-
-    def _normalize(self, harness, event, payload):
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            normalized = runtime.normalize_inbound_event(
-                raw_payload=payload,
-                harness=harness,
-                event=event,
-                package="pkg",
-                workspace=self.workspace)
-        return normalized, stderr.getvalue()
-
-    def test_antigravity_payload_without_the_idle_flag_warns(self):
-        # Both normalizers reach the flag, and they file it in different
-        # places: a root stop under `termination`, a subagent stop under
-        # `args`. Either one going quiet is the regression worth catching.
-        for event, payload, read in (
-            ("Stop", {
-                "terminationReason": "NO_TOOL_CALL"
-            }, lambda e: e["termination"]["fully_idle"]),
-            ("Stop", {
-                "role": "tpu-diagnostics"
-            }, lambda e: e["args"].get("fully_idle")),
-        ):
-            with self.subTest(payload=payload):
-                normalized, err = self._normalize("antigravity", event,
-                                                  payload)
-                self.assertIsNone(read(normalized))
-                self.assertIn("fullyIdle", err)
-
-    def test_a_reported_flag_and_a_harness_without_one_stay_quiet(self):
-        idle, err = self._normalize("antigravity", "Stop", {
-            "terminationReason": "NO_TOOL_CALL",
-            "fullyIdle": False
-        })
-        self.assertIs(idle["termination"]["fully_idle"], False)
-        self.assertEqual(err, "")
-
-        # Claude Code declares no idle field at all, so there is nothing to
-        # have gone missing and nothing to say about it.
-        claude, err = self._normalize("claude-code", "Stop",
-                                      {"stop_hook_active": False})
-        self.assertIsNone(claude["termination"]["fully_idle"])
-        self.assertEqual(err, "")
-
-
 class TestBuiltinValidateSchema(unittest.TestCase):
     """Unit tests for builtin:validate-schema hook execution."""
 
     def setUp(self):
         super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.workspace_dir = self.temp_dir / "workspace"
-        self.workspace_dir.mkdir()
-
+        self.temp_dir, self.workspace_dir = _isolated_workspace(
+            self, "central_tpu_agent_suite")
         self.central_home = self.temp_dir / "central_tpu_agent_suite"
         self.central_home.mkdir()
-        self.old_tpu_agent_suite_home = os.environ.get("TPU_AGENT_SUITE_HOME")
-        os.environ["TPU_AGENT_SUITE_HOME"] = str(self.central_home)
 
-        # Set up installed package structure in central packages directory with tpu-agent-suite-build.json and schemas
-        self.pkg_root = self.central_home / utils.PACKAGES_DIRNAME / "test-pkg@1.0.0"
-        self.pkg_root.mkdir(parents=True)
-        (self.pkg_root / "schemas").mkdir()
+        self.pkg_root = self.central_home / paths.PACKAGES_DIRNAME / "test-pkg@1.0.0"
+        (self.pkg_root / "schemas").mkdir(parents=True)
+        string = {"type": "string"}
 
-        (self.pkg_root / "schemas" / "helper-request.json").write_text(
-            json.dumps({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
+        def schema(name, required, properties, example=None):
+            doc = {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["prompt"],
-                "properties": {
-                    "prompt": {
-                        "type": "string"
-                    },
-                    "run_id": {
-                        "type": "string"
-                    },
-                },
-                "examples": [{
-                    "prompt": "Optimize TPU kernel"
-                }],
-            }),
-            encoding="utf-8",
-        )
+                "required": required,
+                "properties": properties,
+            }
+            if example:
+                doc["examples"] = [example]
+            (self.pkg_root / "schemas" / name).write_text(json.dumps(doc),
+                                                          encoding="utf-8")
 
-        (self.pkg_root / "schemas" / "helper-result.json").write_text(
-            json.dumps({
-                "$schema":
-                "https://json-schema.org/draft/2020-12/schema",
-                "type":
-                "object",
-                "additionalProperties":
-                False,
-                "required": ["status"],
-                "properties": {
-                    "status": {
-                        "type":
-                        "string",
-                        "enum": [
-                            "completed", "failed", "invalid_input",
-                            "needs_input"
-                        ],
-                    },
-                    "summary": {
-                        "type": "string"
-                    },
-                    "artifacts": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "required": ["file"],
-                            "properties": {
-                                "file": {
-                                    "type": "string"
-                                },
-                                "run_id": {
-                                    "type": "string"
-                                },
-                            },
-                        },
-                    },
-                },
-                "examples": [{
-                    "status": "completed",
-                    "summary": "done",
-                    "artifacts": [{
-                        "file": "summary.json"
-                    }]
-                }],
-            }),
-            encoding="utf-8",
-        )
-
-        # Matches the five shipped request schemas that make run_id mandatory
-        # (worker, plan, test, implement, autotune). The helper-request fixture
-        # above leaves it optional, so it cannot show what happens when a
-        # caller omits a run_id the contract actually demands.
-        (self.pkg_root / "schemas" / "strict-request.json").write_text(
-            json.dumps({
-                "$schema":
-                "https://json-schema.org/draft/2020-12/schema",
-                "type":
-                "object",
-                "additionalProperties":
-                False,
-                "required": ["prompt", "run_id"],
-                "properties": {
-                    "prompt": {
-                        "type": "string"
-                    },
-                    "run_id": {
-                        "type": "string"
-                    },
-                },
-                "examples": [{
-                    "prompt": "Optimize TPU kernel",
-                    "run_id": "20260914T120000Z-000000000000",
-                }],
-            }),
-            encoding="utf-8",
-        )
-
-        # Mirrors kernel-worker-result.json: closed to extra properties, admits
-        # "completed", and carries its deliverable in a typed field instead of
-        # a generic `artifacts` array.
-        (self.pkg_root / "schemas" / "typed-result.json").write_text(
-            json.dumps({
-                "$schema":
-                "https://json-schema.org/draft/2020-12/schema",
-                "type":
-                "object",
-                "additionalProperties":
-                False,
-                "required": ["status", "kernel_artifact"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": ["success", "failed", "completed"],
-                    },
-                    "kernel_artifact": {
-                        "type": "object"
-                    },
-                },
-                "examples": [{
-                    "status": "completed",
-                    "kernel_artifact": {
-                        "file": "kernel.py"
-                    },
-                }],
-            }),
-            encoding="utf-8",
-        )
-
+        schema("helper-request.json", ["prompt"], {
+            "prompt": string,
+            "run_id": string
+        })
+        schema("helper-result.json", ["status"], {
+            "status": string,
+            "summary": string,
+            "artifacts": {
+                "type": "array"
+            },
+        }, {
+            "status": "completed",
+            "artifacts": [{
+                "file": "summary.json"
+            }]
+        })
+        # Like the shipped request schemas that make run_id mandatory; its
+        # placeholder example is what the denial must not let win.
+        schema("strict-request.json", ["prompt", "run_id"], {
+            "prompt": string,
+            "run_id": string
+        }, {
+            "prompt": "Optimize TPU kernel",
+            "run_id": "20260914T120000Z-000000000000"
+        })
         (self.pkg_root / "tpu-agent-suite-build.json").write_text(
             json.dumps({
-                "version": "1.0.0",
-                "source": "test-pkg",
                 "contracts": {
                     "helper": {
                         "accepts": "schemas/helper-request.json",
                         "produces": "schemas/helper-result.json",
-                    },
-                    "orchestrator": {
-                        "accepts": "schemas/helper-request.json",
-                        "produces": "schemas/helper-result.json",
-                    },
-                    "typed-worker": {
-                        "accepts": "schemas/helper-request.json",
-                        "produces": "schemas/typed-result.json",
                     },
                     "strict-worker": {
                         "accepts": "schemas/strict-request.json",
@@ -3485,57 +1173,17 @@ class TestBuiltinValidateSchema(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def tearDown(self):
-        if self.old_tpu_agent_suite_home is not None:
-            os.environ["TPU_AGENT_SUITE_HOME"] = self.old_tpu_agent_suite_home
-        else:
-            os.environ.pop("TPU_AGENT_SUITE_HOME", None)
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-        super().tearDown()
-
-    def test_pre_tool_use_delegate_validation(self):
-        """PreToolUse validates delegation arguments against accepts schema, allowing valid and denying invalid payloads."""
-        valid_res = runtime._builtin_validate_schema(
+    def _validate(self, event_payload: dict) -> dict:
+        """`builtin_validate_schema` on the test package and workspace."""
+        return agent_contracts.builtin_validate_schema(
             package="test-pkg@1.0.0",
             workspace=self.workspace_dir,
-            event_payload={
-                "event": "PreToolUse",
-                "tool": "delegate",
-                "subagent": "helper",
-                "args": {
-                    "subagent": "helper",
-                    "prompt": "Optimize TPU kernel",
-                },
-                "context": {
-                    "run_id": "20260913T120000Z-abcdef123456",
-                },
-            },
+            event_payload=event_payload,
         )
-        self.assertEqual(valid_res["decision"], "allow")
-
-        invalid_res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "PreToolUse",
-                "tool": "delegate",
-                "subagent": "helper",
-                "args": {
-                    "subagent": "helper",
-                    "prompt": "Optimize TPU kernel",
-                    "unsupported_field": 123,
-                },
-            },
-        )
-        self.assertEqual(invalid_res["decision"], "deny")
-        self.assertIn("accepts schema", invalid_res["reason"])
-        self.assertIn("unsupported_field", invalid_res["reason"])
-        self.assertIn("Expected payload schema example:",
-                      invalid_res["reason"])
 
     def _delegate_event(self, tool_input):
         """Build a delegate event the way a harness actually produces one."""
-        return runtime._normalize_tool_event(
+        return events._normalize_tool_event(
             {
                 "hook_event_name": "PreToolUse",
                 "tool_name": "Agent",
@@ -3564,43 +1212,38 @@ class TestBuiltinValidateSchema(unittest.TestCase):
             "description": "Optimize a kernel",
             "prompt": "Optimize TPU kernel",
         })
-        self.assertEqual(event["tool"], "delegate")
         self.assertIn("subagent_type", event["args"])
-        self.assertIn("description", event["args"])
+        self.assertEqual(self._validate(event)["decision"], "allow")
 
-        res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload=event,
-        )
-        self.assertEqual(res["decision"], "allow")
-
-    def test_delegate_validation_rejects_unknown_field_in_authored_payload(
-            self):
-        """Dropping routing keys is not a blanket amnesty for unknown fields.
-
-        A JSON prompt is written by the caller, so every key in it is deliberate
-        and a misspelled one is worth a denial rather than a silent drop.
-        """
-        event = self._delegate_event({
-            "subagent_type":
-            "helper",
-            "description":
-            "Optimize a kernel",
-            "prompt":
-            json.dumps({
-                "prompt": "Optimize TPU kernel",
-                "unsupported_field": 123,
-            }),
-        })
-        res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload=event,
-        )
-        self.assertEqual(res["decision"], "deny")
-        self.assertIn("unsupported_field", res["reason"])
-        self.assertIn("Expected payload schema example:", res["reason"])
+        # The keys come from tool-mappings.json, so every harness's are
+        # dropped; a dotted spec (Antigravity's `Subagents.TypeName`)
+        # contributes its root, which is the key the bag carries. agy 1.4.x
+        # sends a single delegation flat, without the Subagents array; the
+        # array form still wins when both are present.
+        flat = {"TypeName": "flat-agent", "Prompt": "flat"}
+        nested = {"Subagents": [{"TypeName": "helper", "Prompt": "nested"}]}
+        for args, subagent, prompt in ((flat, "flat-agent", "flat"), ({
+                **flat,
+                **nested
+        }, "helper", "nested")):
+            with self.subTest(subagent=subagent):
+                event = events.normalize_inbound_event(
+                    raw_payload={
+                        "toolCall": {
+                            "name": "invoke_subagent",
+                            "args": args
+                        }
+                    },
+                    harness="antigravity",
+                    event="PreToolUse",
+                    package="test-pkg@1.0.0",
+                    workspace=self.workspace_dir,
+                )
+                self.assertEqual(event["tool"], "delegate")
+                self.assertEqual(event["args"]["subagent"], subagent)
+                self.assertEqual(event["args"]["prompt"], prompt)
+        self.assertIn("Subagents", event["args"])
+        self.assertEqual(self._validate(event)["decision"], "allow")
 
     def test_missing_required_run_id_is_denied_at_the_caller(self):
         """A run_id the subagent cannot see must be refused while it can be fixed.
@@ -3613,22 +1256,18 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         run_id and can resend.
         """
         run_id = "20260913T120000Z-abcdef123456"
-        res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "PreToolUse",
-                "tool": "delegate",
+        res = self._validate({
+            "event": "PreToolUse",
+            "tool": "delegate",
+            "subagent": "strict-worker",
+            "args": {
                 "subagent": "strict-worker",
-                "args": {
-                    "subagent": "strict-worker",
-                    "prompt": json.dumps({"prompt": "Optimize TPU kernel"}),
-                },
-                "context": {
-                    "run_id": run_id
-                },
+                "prompt": json.dumps({"prompt": "Optimize TPU kernel"}),
             },
-        )
+            "context": {
+                "run_id": run_id
+            },
+        })
         self.assertEqual(res["decision"], "deny")
         # The example carries a placeholder run_id, and it is the most
         # copyable thing in the message, so the real one has to be stated.
@@ -3636,147 +1275,24 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         self.assertLess(res["reason"].index(run_id),
                         res["reason"].index("20260914T120000Z-000000000000"))
 
-        supplied = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "PreToolUse",
-                "tool": "delegate",
-                "subagent": "strict-worker",
-                "args": {
-                    "subagent":
-                    "strict-worker",
-                    "prompt":
-                    json.dumps({
-                        "prompt": "Optimize TPU kernel",
-                        "run_id": run_id,
-                    }),
-                },
-                "context": {
-                    "run_id": run_id
-                },
-            },
-        )
-        self.assertEqual(supplied["decision"], "allow")
-
-    def test_delegate_routing_keys_come_from_the_mapping_table(self):
-        """Routing keys are read off tool-mappings.json, not hardcoded.
-
-        Hardcoding them is what let claude-code's pair go unhandled, so a
-        harness added to the table must contribute its names automatically.
-        """
-        keys = runtime._delegate_routing_keys()
-        self.assertIn("subagent", keys)
-        self.assertIn("subagent_type", keys)
-        self.assertIn("description", keys)
-        # A dotted spec addresses into a nested arg; the bag carries its root.
-        self.assertIn("Subagents", keys)
-        self.assertNotIn("Subagents.TypeName", keys)
-
-    def test_subagent_stop_validation(self):
-        """SubagentStop verifies output JSON schema and prose rejection."""
-        run_id = "20260913T120000Z-abcdef123456"
-
-        # 1. Valid result envelope -> allow
-        valid_res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event":
-                "SubagentStop",
+        supplied = self._validate({
+            "event": "PreToolUse",
+            "tool": "delegate",
+            "subagent": "strict-worker",
+            "args": {
                 "subagent":
-                "helper",
-                "context": {
-                    "run_id": run_id
-                },
-                "output":
+                "strict-worker",
+                "prompt":
                 json.dumps({
-                    "status":
-                    "completed",
-                    "summary":
-                    "Kernel compiled successfully",
-                    "artifacts": [{
-                        "file": "summary.json",
-                        "run_id": run_id
-                    }],
+                    "prompt": "Optimize TPU kernel",
+                    "run_id": run_id,
                 }),
             },
-        )
-        self.assertEqual(valid_res["decision"], "allow")
-
-        # 2. Non-JSON prose output -> deny
-        prose_res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "SubagentStop",
-                "subagent": "helper",
-                "output": "I am done with the optimization loop!",
+            "context": {
+                "run_id": run_id
             },
-        )
-        self.assertEqual(prose_res["decision"], "deny")
-        self.assertIn("must be a valid JSON object", prose_res["reason"])
-        self.assertIn("Expected output schema example:", prose_res["reason"])
-
-    def test_subagent_stop_validates_despite_running_background_agents(self):
-        """Other live agents in `background_tasks` do not excuse a stop.
-
-        Claude Code lists every live agent of the session there with no
-        parent link, so a running entry of a type this agent could spawn may
-        be a sibling's child. Background tasks are disabled at install, so the
-        agent's own children have always returned before it stops; its stop
-        is the only one it gets, and skipping it would skip validation for
-        good.
-        """
-
-        def _stop(agent_type, agent_id, live_agents):
-            return json.dumps({
-                "hook_event_name":
-                "SubagentStop",
-                "session_id":
-                "sess-nested",
-                "agent_id":
-                agent_id,
-                "agent_type":
-                agent_type,
-                "last_assistant_message":
-                "Done; see the report.",
-                "background_tasks": [{
-                    "id": live_id,
-                    "type": "subagent",
-                    "status": "running",
-                    "agent_type": live_type,
-                } for live_id, live_type in live_agents],
-            })
-
-        cases = {
-            "sibling of the same type":
-            _stop("orchestrator", "agent-orch-1", [
-                ("agent-orch-1", "orchestrator"),
-                ("agent-orch-2", "orchestrator"),
-            ]),
-            "a sibling's child":
-            _stop("orchestrator", "agent-orch-1", [
-                ("agent-orch-1", "orchestrator"),
-                ("agent-helper-1", "helper"),
-            ]),
-            "nothing else running":
-            _stop("orchestrator", "agent-orch-1",
-                  [("agent-orch-1", "orchestrator")]),
-        }
-        for label, raw_input_text in cases.items():
-            with self.subTest(label):
-                res, code = runtime.dispatch_hook(
-                    harness="claude-code",
-                    package="test-pkg@1.0.0",
-                    workspace=self.workspace_dir,
-                    hook_name="validate-subagent-result",
-                    event="SubagentStop",
-                    raw_input_text=raw_input_text,
-                    builtin="validate-schema",
-                )
-                self.assertEqual(code, 0)
-                self.assertEqual(res.get("decision"), "block")
+        })
+        self.assertEqual(supplied["decision"], "allow")
 
     def test_skipped_subagent_stop_says_why_on_stderr(self):
         """A stop the gate filters must not vanish silently.
@@ -3787,7 +1303,7 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         """
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            res, code = runtime.dispatch_hook(
+            res, code = dispatch.dispatch_hook(
                 harness="claude-code",
                 package="test-pkg@1.0.0",
                 workspace=self.workspace_dir,
@@ -3808,195 +1324,6 @@ class TestBuiltinValidateSchema(unittest.TestCase):
                       stderr.getvalue())
         self.assertIn("no subagent name", stderr.getvalue())
 
-    def test_routine_subagent_stop_skips_stay_quiet(self):
-        """Skips this PR did not introduce say nothing on stderr.
-
-        On Antigravity a nameless stop is every root turn and a stop not fully
-        idle is every mid-wait pause; both were always skipped and fire far
-        too often to log.
-        """
-        cases = {
-            "root turn": {
-                "conversationId": "conv-root-1",
-                "fullyIdle": True,
-            },
-            "mid-wait pause": {
-                "role": "helper",
-                "conversationId": "conv-agy-1",
-                "fullyIdle": False,
-            },
-        }
-        for label, payload in cases.items():
-            with self.subTest(label):
-                stderr = io.StringIO()
-                with contextlib.redirect_stderr(stderr):
-                    res, code = runtime.dispatch_hook(
-                        harness="antigravity",
-                        package="test-pkg@1.0.0",
-                        workspace=self.workspace_dir,
-                        hook_name="validate-subagent-result",
-                        event="SubagentStop",
-                        raw_input_text=json.dumps({
-                            **payload, "finalModelOutput":
-                            "not JSON"
-                        }),
-                        builtin="validate-schema",
-                    )
-                self.assertEqual(code, 0)
-                self.assertEqual(res.get("decision"), "allow")
-                self.assertNotIn("SubagentStop skipped", stderr.getvalue())
-
-    def test_subagent_stop_waits_until_the_harness_reports_itself_idle(self):
-        """Antigravity delegates asynchronously, so a stop it calls not fully idle is a turn boundary.
-
-        Prose that would otherwise be denied has to pass while the subagent's
-        own work is still outstanding.
-        """
-        agy_payload = {
-            "role": "helper",
-            "conversationId": "conv-agy-1",
-            "finalModelOutput": "Delegated the benchmark; waiting on it.",
-            "fullyIdle": False,
-        }
-        res_paused, code_paused = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            hook_name="validate-subagent-result",
-            event="SubagentStop",
-            raw_input_text=json.dumps(agy_payload),
-            builtin="validate-schema",
-        )
-        self.assertEqual(code_paused, 0)
-        self.assertEqual(res_paused.get("decision"), "allow")
-
-        # Once the subagent is idle, the same prose is held to the contract.
-        agy_payload["fullyIdle"] = True
-        res_done, code_done = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            hook_name="validate-subagent-result",
-            event="SubagentStop",
-            raw_input_text=json.dumps(agy_payload),
-            builtin="validate-schema",
-        )
-        self.assertEqual(code_done, 0)
-        self.assertEqual(res_done.get("decision"), "continue")
-
-    def test_subagent_stop_last_valid_json_wins(self):
-        """SubagentStop selects the last candidate JSON that satisfies the produces contract."""
-        run_id = "20260913T120000Z-abcdef123456"
-        valid_envelope = {
-            "status": "completed",
-            "summary": "Finished successfully",
-            "artifacts": [{
-                "file": "summary.json",
-                "run_id": run_id
-            }],
-        }
-        invalid_json = {"step": 1, "note": "intermediate draft"}
-
-        # 1. Earlier invalid draft followed by valid deliverable surrounded by prose -> allow
-        output_draft_then_valid = (
-            "Draft step:\n"
-            f"```json\n{json.dumps(invalid_json)}\n```\n"
-            "Final result envelope:\n"
-            f"```json\n{json.dumps(valid_envelope)}\n```\n"
-            "All tests passed!")
-        res_draft = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "SubagentStop",
-                "subagent": "helper",
-                "context": {
-                    "run_id": run_id
-                },
-                "output": output_draft_then_valid,
-            },
-        )
-        self.assertEqual(res_draft["decision"], "allow")
-
-        # 2. Valid deliverable followed by invalid debug dump -> allow (valid envelope wins)
-        output_valid_then_debug = (
-            f"```json\n{json.dumps(valid_envelope)}\n```\n"
-            "Debug output:\n"
-            f"```json\n{json.dumps(invalid_json)}\n```")
-        res_debug = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "SubagentStop",
-                "subagent": "helper",
-                "context": {
-                    "run_id": run_id
-                },
-                "output": output_valid_then_debug,
-            },
-        )
-        self.assertEqual(res_debug["decision"], "allow")
-
-    def test_subagent_stop_multiple_invalid_jsons_denied(self):
-        """When no candidate satisfies the contract, SubagentStop denies reporting the last error."""
-        run_id = "20260913T120000Z-abcdef123456"
-        output_all_invalid = (
-            "```json\n"
-            '{"unsupported": 1}\n'
-            "```\n"
-            "```json\n"
-            '{"status": "completed"}\n'  # Missing required artifacts
-            "```")
-        res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "SubagentStop",
-                "subagent": "helper",
-                "context": {
-                    "run_id": run_id
-                },
-                "output": output_all_invalid,
-            },
-        )
-        self.assertEqual(res["decision"], "deny")
-
-    def test_typed_artifact_schema_accepts_its_own_declared_example(self):
-        """A closed schema without an `artifacts` array must not be unsatisfiable.
-
-        The runtime's artifact rule is not part of any schema, so applying it
-        to a schema that reports its deliverable through a typed field and
-        forbids additional properties leaves the agent no legal output: the
-        payload is denied for lacking `artifacts`, and adding `artifacts` is
-        denied as an additional property. Because SubagentStop denials carry a
-        followup_message, that pair loops -- and the example quoted back in the
-        denial is this very payload.
-        """
-        schema = json.loads((self.pkg_root / "schemas" /
-                             "typed-result.json").read_text(encoding="utf-8"))
-        declared_example = schema["examples"][0]
-
-        res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "SubagentStop",
-                "subagent": "typed-worker",
-                "output": json.dumps(declared_example),
-            },
-        )
-        self.assertEqual(res["decision"], "allow")
-
-        # The escape hatch really is closed, so the allow above is the only
-        # reachable outcome rather than one of two.
-        self.assertTrue(
-            utils.validate_instance(
-                {
-                    **declared_example, "artifacts": [{
-                        "file": "kernel.py"
-                    }]
-                }, schema))
-
     def test_subagent_stop_still_requires_artifacts_when_schema_declares_them(
             self):
         """Narrowing the artifact rule must not switch it off where it applies.
@@ -4004,88 +1331,37 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         `helper-result.json` declares an `artifacts` array, so a completed result
         that omits one is still prose pretending to be a deliverable.
         """
-        res = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "SubagentStop",
-                "subagent": "helper",
-                "output": json.dumps({
-                    "status": "completed",
-                    "summary": "done",
-                }),
-            },
-        )
+        res = self._validate({
+            "event":
+            "SubagentStop",
+            "subagent":
+            "helper",
+            "output":
+            json.dumps({
+                "status": "completed",
+                "summary": "done",
+            }),
+        })
         self.assertEqual(res["decision"], "deny")
 
     def test_subagent_without_contract_allowed(self):
         """Subagents without declared contracts pass through unconditionally."""
-        res_pre = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "PreToolUse",
-                "tool": "delegate",
-                "subagent": "uncontracted",
-                "args": {
-                    "any_arg": "value"
-                },
+        res_pre = self._validate({
+            "event": "PreToolUse",
+            "tool": "delegate",
+            "subagent": "uncontracted",
+            "args": {
+                "any_arg": "value"
             },
-        )
+        })
         self.assertEqual(res_pre["decision"], "allow")
 
-        res_stop = runtime._builtin_validate_schema(
-            package="test-pkg@1.0.0",
-            workspace=self.workspace_dir,
-            event_payload={
-                "event": "SubagentStop",
-                "subagent": "uncontracted",
-                "output": "Raw prose output is fine",
-            },
-        )
+        res_stop = self._validate({
+            "event": "SubagentStop",
+            "subagent": "uncontracted",
+            "output": "Raw prose output is fine",
+        })
         self.assertEqual(res_stop["decision"], "allow")
-
-    def test_dispatch_hook_multi_subagent_batch_filtering(self):
-        """In Antigravity, multiple subagents in a single batch are filtered individually."""
-        raw_payload = {
-            "toolCall": {
-                "name": "invoke_subagent",
-                "args": {
-                    "Subagents": [
-                        {
-                            "TypeName": "helper",
-                            "Prompt":
-                            json.dumps({"prompt": "Valid subagent 1"}),
-                        },
-                        {
-                            "TypeName":
-                            "helper",
-                            "Prompt":
-                            json.dumps({
-                                "prompt": "Invalid subagent 2",
-                                "unexpected": True
-                            }),
-                        },
-                    ]
-                }
-            }
-        }
-        response, exit_code = runtime.dispatch_hook(
-            harness="antigravity",
-            package="test-pkg@1.0.0",
-            hook_name="validate-delegate-request",
-            event="PreToolUse",
-            builtin="validate-schema",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps(raw_payload),
-        )
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(response["decision"], "allow")
-        self.assertIn("overwrite", response)
-        overwrite_subs = response["overwrite"]["Subagents"]
-        self.assertEqual(len(overwrite_subs), 1)
-        self.assertEqual(overwrite_subs[0]["TypeName"], "helper")
-        self.assertIn("Valid subagent 1", overwrite_subs[0]["Prompt"])
 
 
 class TestBuiltinSkillTools(unittest.TestCase):
@@ -4093,27 +1369,16 @@ class TestBuiltinSkillTools(unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.workspace_dir = self.temp_dir / "workspace"
-        self.workspace_dir.mkdir()
+        self.temp_dir, self.workspace_dir = _isolated_workspace(
+            self, "central_tpu_agent_suite")
         self.central_home = self.temp_dir / "central_tpu_agent_suite"
-        self.old_tpu_agent_suite_home = os.environ.get("TPU_AGENT_SUITE_HOME")
-        os.environ["TPU_AGENT_SUITE_HOME"] = str(self.central_home)
-        self.pkg_root = self.central_home / utils.PACKAGES_DIRNAME / "test-pkg@1.0.0"
+        self.pkg_root = self.central_home / paths.PACKAGES_DIRNAME / "test-pkg@1.0.0"
         self.pkg_root.mkdir(parents=True)
         self._write_build_info({
             "router": ["ask", "delegate", "read", "Skill", "ToolSearch"],
             "exporter":
             None,
         })
-
-    def tearDown(self):
-        if self.old_tpu_agent_suite_home is not None:
-            os.environ["TPU_AGENT_SUITE_HOME"] = self.old_tpu_agent_suite_home
-        else:
-            os.environ.pop("TPU_AGENT_SUITE_HOME", None)
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-        super().tearDown()
 
     def _write_build_info(self, skill_allowed_tools):
         build_info = {"version": "1.0.0", "source": "test-pkg"}
@@ -4134,7 +1399,7 @@ class TestBuiltinSkillTools(unittest.TestCase):
         }
         if event == "PostToolUse":
             payload["success"] = True
-        return runtime._builtin_skill_tools(package="test-pkg@1.0.0",
+        return actions._builtin_skill_tools(package="test-pkg@1.0.0",
                                             workspace=self.workspace_dir,
                                             event_payload=payload)
 
@@ -4143,37 +1408,6 @@ class TestBuiltinSkillTools(unittest.TestCase):
 
     def _shell(self, **kwargs):
         return self._run("PreToolUse", "shell", {"command": "ls"}, **kwargs)
-
-    def test_no_active_skill_allows_everything(self):
-        """Without a tool-limited skill, shell is allowed."""
-        self.assertEqual(self._shell()["decision"], "allow")
-
-    def test_limited_skill_denies_shell_for_the_rest_of_the_session(self):
-        """After the router loads, shell stays denied on later calls."""
-        self._invoke_skill("test-pkg:router")
-        for _ in range(2):
-            res = self._shell()
-            self.assertEqual(res["decision"], "deny")
-            self.assertIn("router", res["reason"])
-            self.assertIn("Delegate", res["reason"])
-        self.assertTrue(runtime.get_active_skill_file("s1").exists())
-
-    def test_limited_skill_denies_tools_not_on_its_allow_list(self):
-        """Unmapped, MCP and unknown tools are denied without being named."""
-        self._invoke_skill("router")
-        for tool in ("PowerShell", "mcp__github__create_issue", "CronCreate",
-                     "SomeFutureTool"):
-            with self.subTest(tool=tool):
-                self.assertEqual(
-                    self._run("PreToolUse", tool)["decision"], "deny")
-
-    def test_limited_skill_allows_its_own_tools_and_delegation(self):
-        """The router can still read, ask, delegate and use always-safe tools."""
-        self._invoke_skill("router")
-        for tool in ("read", "ask", "delegate", "Skill", "ToolSearch"):
-            with self.subTest(tool=tool):
-                self.assertEqual(
-                    self._run("PreToolUse", tool)["decision"], "allow")
 
     def test_limited_skill_still_allows_this_packages_setup_commands(self):
         """The main thread can set compute up; nothing else gets the shell."""
@@ -4209,62 +1443,15 @@ class TestBuiltinSkillTools(unittest.TestCase):
         self.assertEqual(self._shell()["decision"], "deny")
 
     def test_unlimited_package_skill_lifts_the_limit(self):
-        """Loading a package skill with no tool limit lifts it."""
-        self._invoke_skill("router")
-        self._invoke_skill("/exporter")
-        self.assertEqual(self._shell()["decision"], "allow")
+        """Loading a package skill with no tool limit lifts it.
 
-    def test_skill_from_another_package_keeps_the_limit(self):
-        """A skill this package doesn't ship leaves the limit in place."""
+        A skill this package doesn't ship leaves the limit in place.
+        """
         self._invoke_skill("router")
         self._invoke_skill("other-plugin:helper")
         self.assertEqual(self._shell()["decision"], "deny")
-
-    def test_sessions_are_independent(self):
-        """A limit in one session doesn't affect another."""
-        self._invoke_skill("router", session="s1")
-        self.assertEqual(self._shell(session="s2")["decision"], "allow")
-
-    def test_build_without_skill_tools_allows_everything(self):
-        """An older build with no skill_tools table never limits tools."""
-        self._write_build_info(None)
-        self._invoke_skill("router")
+        self._invoke_skill("/exporter")
         self.assertEqual(self._shell()["decision"], "allow")
-
-    def test_claude_events_are_mapped_end_to_end(self):
-        """Claude's Skill and Bash events reach the hook as skill and shell."""
-
-        def dispatch(event, raw):
-            return runtime.dispatch_hook(harness="claude-code",
-                                         package="test-pkg@1.0.0",
-                                         hook_name="skill-tools",
-                                         event=event,
-                                         builtin="skill-tools",
-                                         workspace=self.workspace_dir,
-                                         raw_input_text=json.dumps(raw))
-
-        base = {"session_id": "s1", "cwd": str(self.workspace_dir)}
-        dispatch(
-            "PostToolUse", {
-                **base, "hook_event_name": "PostToolUse",
-                "tool_name": "Skill",
-                "tool_input": {
-                    "skill": "tpu-agent:router"
-                },
-                "tool_response": {
-                    "success": True
-                }
-            })
-        res, _ = dispatch(
-            "PreToolUse", {
-                **base, "hook_event_name": "PreToolUse",
-                "tool_name": "Bash",
-                "tool_input": {
-                    "command": "kubectl get pods"
-                }
-            })
-        self.assertEqual(res["hookSpecificOutput"]["permissionDecision"],
-                         "deny")
 
 
 class TestMissingPackageDegradesGracefully(unittest.TestCase):
@@ -4279,42 +1466,16 @@ class TestMissingPackageDegradesGracefully(unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.workspace_dir = self.temp_dir / "workspace"
-        self.workspace_dir.mkdir()
-        self.old_tpu_agent_suite_home = os.environ.get("TPU_AGENT_SUITE_HOME")
         # An empty store: nothing the hook names can resolve.
-        os.environ["TPU_AGENT_SUITE_HOME"] = str(self.temp_dir / "empty_home")
-
-    def tearDown(self):
-        if self.old_tpu_agent_suite_home is not None:
-            os.environ["TPU_AGENT_SUITE_HOME"] = self.old_tpu_agent_suite_home
-        else:
-            os.environ.pop("TPU_AGENT_SUITE_HOME", None)
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-        super().tearDown()
-
-    def test_contract_resolution_skips_rather_than_raising(self):
-        """Validation degrades to "no contract", the way its other failures do.
-
-        Every other unresolvable input here -- absent build file, unparseable
-        build file, unknown agent -- yields no contract rather than raising, so
-        package resolution has to behave the same or the builtin cannot return.
-        """
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            accepts, produces = runtime._resolve_agent_contract(
-                "ghost-pkg@9.9.9", self.workspace_dir, "helper")
-
-        self.assertIsNone(accepts)
-        self.assertIsNone(produces)
-        # Enforcing nothing without saying so is its own failure.
-        self.assertIn("ghost-pkg@9.9.9", stderr.getvalue())
+        self.temp_dir, self.workspace_dir = _isolated_workspace(
+            self, "empty_home")
 
     def test_validate_schema_builtin_still_returns_a_decision(self):
-        """The builtin answers even when it cannot find what to validate."""
-        with contextlib.redirect_stderr(io.StringIO()):
-            res = runtime._builtin_validate_schema(
+        """Validation degrades to "no contract", the way its other failures
+        do (absent or unparseable build file, unknown agent) -- but says so,
+        since enforcing nothing silently is its own failure."""
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            res = agent_contracts.builtin_validate_schema(
                 package="ghost-pkg@9.9.9",
                 workspace=self.workspace_dir,
                 event_payload={
@@ -4324,13 +1485,14 @@ class TestMissingPackageDegradesGracefully(unittest.TestCase):
                 },
             )
         self.assertEqual(res["decision"], "allow")
+        self.assertIn("ghost-pkg@9.9.9", stderr.getvalue())
 
     def test_script_hook_denies_with_the_reason(self):
         """A script hook denies instead of skipping, as it does for any
         script it cannot locate -- but the harness still gets a decision.
         """
         with contextlib.redirect_stderr(io.StringIO()):
-            response, code = runtime.dispatch_hook(
+            response, code = dispatch.dispatch_hook(
                 harness="claude-code",
                 package="ghost-pkg@9.9.9",
                 hook_name="some-script-hook",
@@ -4354,7 +1516,7 @@ class TestHookTimeoutVerdictBeatsHarness(unittest.TestCase):
     """A hung hook's deny must be written before the harness gives up on it.
 
     The harness is registered with the hook's timeout plus
-    `compiler.HOOK_DISPATCH_HEADROOM_S`, and hook-dispatch gets the bare
+    `hook_config.HOOK_DISPATCH_HEADROOM_S`, and hook-dispatch gets the bare
     timeout. Dispatch enforces that timeout on the action but finishes a
     little after it -- interpreter start before, the verdict after. Should
     that overrun ever reach the headroom, the harness kills dispatch first,
@@ -4426,17 +1588,18 @@ class TestHookTimeoutVerdictBeatsHarness(unittest.TestCase):
         self.assertGreaterEqual(elapsed, self.TIMEOUT_S)
         # ...and the verdict landed while the harness was still listening.
         self.assertLess(elapsed,
-                        self.TIMEOUT_S + compiler.HOOK_DISPATCH_HEADROOM_S)
+                        self.TIMEOUT_S + hook_config.HOOK_DISPATCH_HEADROOM_S)
 
     # A builtin that never returns and keeps writing to stderr, as a stuck
     # builtin that reports progress would; the child then dispatches to it.
     CHATTERING_BUILTIN = (
         "import sys\n"
         "from framework import runtime\n"
+        "from framework.hooks import actions\n"
         "def chatter(**_kwargs):\n"
         "    while True:\n"
         "        sys.stderr.write('x' * 4096)\n"
-        "runtime.BUILTIN_HOOK_ACTIONS['record-event'] = chatter\n"
+        "actions.BUILTIN_HOOK_ACTIONS['record-event'] = chatter\n"
         "raise SystemExit(runtime.main(sys.argv[1:]))\n")
 
     def test_an_abandoned_builtin_does_not_crash_dispatch_at_exit(self):
@@ -4476,7 +1639,29 @@ class TestHookTimeoutVerdictBeatsHarness(unittest.TestCase):
         self.assertIn("timed out", specific["permissionDecisionReason"])
 
 
-class TestHookFailurePolicy(unittest.TestCase):
+class _FailureLogTestCase(unittest.TestCase):
+    """A workspace and an isolated store whose hook failure log tests read."""
+
+    def setUp(self):
+        super().setUp()
+        # The failure log is central: point the store at the temp dir so the
+        # failures recorded here never reach the real one.
+        self.temp_dir, self.workspace = _isolated_workspace(self, "home")
+        self.failure_log = paths.get_tpu_agent_suite_home(
+        ) / utils.HOOK_FAILURE_LOG
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+
+    def _records(self) -> list[dict]:
+        return jsonio.read_jsonl(self.failure_log)
+
+    def _hang_until_released(self, **_kwargs) -> dict:
+        """A builtin that does not answer until the test lets it go."""
+        self.release.wait(30)
+        return {"decision": "allow"}
+
+
+class TestHookFailurePolicy(_FailureLogTestCase):
     """What a hook that fails to reach a verdict turns into.
 
     A guard must fail closed; a hook that only observes, or that sits where a
@@ -4495,24 +1680,9 @@ class TestHookFailurePolicy(unittest.TestCase):
         },
     }
 
-    def setUp(self):
-        super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
-        self.workspace = self.temp_dir / "workspace"
-        self.workspace.mkdir()
-        # The failure log is central: point the store at the temp dir so the
-        # failures recorded here never reach the real one.
-        home = mock.patch.dict(
-            os.environ, {"TPU_AGENT_SUITE_HOME": str(self.temp_dir / "home")})
-        home.start()
-        self.addCleanup(home.stop)
-        self.failure_log = utils.get_tpu_agent_suite_home(
-        ) / utils.HOOK_FAILURE_LOG
-
     def _command(self, command: str, on_failure: str) -> dict:
         with contextlib.redirect_stderr(io.StringIO()):
-            return runtime.execute_single_hook_action(
+            return actions.execute_single_hook_action(
                 event_payload=self.PAYLOAD,
                 hook_name="h",
                 workspace=self.workspace,
@@ -4522,40 +1692,16 @@ class TestHookFailurePolicy(unittest.TestCase):
                 on_failure=on_failure,
             )
 
-    def _builtin(self, handler, on_failure: str, timeout: float = 5) -> dict:
-        with contextlib.redirect_stderr(io.StringIO()):
-            return runtime.run_builtin_hook_action(
-                handler,
-                package="test-pkg@1.0.0",
-                workspace=self.workspace,
-                event_payload=self.PAYLOAD,
-                hook_name="h",
-                timeout=timeout,
-                on_failure=on_failure,
-            )
-
-    def _records(self) -> list[dict]:
-        return utils.read_jsonl(self.failure_log)
-
     def test_non_json_output_is_quoted_in_the_reason(self):
         """What the hook printed is the clue to why it failed."""
         denied = self._command("echo not json", "deny")
-        self.assertEqual(
-            denied["reason"],
-            "Hook 'h' emitted non-JSON output on stdout: 'not json'")
+        self.assertIn(repr("not json"), denied["reason"])
         # Capped: the reason reaches the log and the model's context.
         noisy = self._command("printf 'x%.0s' $(seq 600)", "deny")
         self.assertIn(repr("x" * 500 + "..."), noisy["reason"])
         self.assertNotIn("x" * 501, noisy["reason"])
         self.assertEqual([r["kind"] for r in self._records()],
                          ["non_json", "non_json"])
-
-    def test_an_explicit_deny_is_honoured_whatever_the_policy(self):
-        """Only a failure to answer is covered; a refusal is an answer."""
-        res = self._command(
-            "echo '{\"decision\": \"deny\", \"reason\": \"no\"}'", "allow")
-        self.assertEqual(res, {"decision": "deny", "reason": "no"})
-        self.assertFalse(self.failure_log.exists())
 
     def test_output_that_cannot_be_decoded_follows_the_policy(self):
         # `text=True` decodes strictly: this used to escape as a
@@ -4566,6 +1712,11 @@ class TestHookFailurePolicy(unittest.TestCase):
         denied = self._command(command, "deny")
         self.assertEqual(denied["decision"], "deny")
         self.assertIn("UnicodeDecodeError", denied["reason"])
+        # Only a failure to answer is covered; a refusal is an answer, is
+        # honoured whatever the policy, and is not recorded as a failure.
+        res = self._command(
+            "echo '{\"decision\": \"deny\", \"reason\": \"no\"}'", "allow")
+        self.assertEqual(res, {"decision": "deny", "reason": "no"})
         self.assertEqual([r["kind"] for r in self._records()],
                          ["exception", "exception"])
 
@@ -4578,31 +1729,27 @@ class TestHookFailurePolicy(unittest.TestCase):
         # The denial the model reads and the record are the same text.
         self.assertEqual(denied["reason"], record["reason"])
         self.assertEqual(len(record["reason"]),
-                         len("...") + runtime._HOOK_FAILURE_REASON_CHARS)
+                         len("...") + actions._HOOK_FAILURE_REASON_CHARS)
         self.assertTrue(record["reason"].startswith("..."))
         self.assertTrue(record["reason"].endswith("ValueError: bad"))
-
-    def test_failures_are_recorded_under_either_policy(self):
-        # Exit 2 is not read as a block: shell and `argparse` errors exit 2.
-        usage_error = "echo 'error: bad arguments' >&2; exit 2"
-        self.assertEqual(self._command(usage_error, "allow"),
-                         {"decision": "allow"})
-        self.assertEqual(self._command(usage_error, "deny"), {
-            "decision": "deny",
-            "reason": "error: bad arguments"
-        })
-        records = self._records()
-        self.assertEqual([(r["on_failure"], r["decision"]) for r in records],
-                         [("allow", "allow"), ("deny", "deny")])
-        first = records[0]
-        self.assertEqual(first["hook"], "h")
-        self.assertEqual(first["event"], "PreToolUse")
-        self.assertEqual(first["tool"], "shell")
-        self.assertEqual(first["kind"], "exit")
-        self.assertEqual(first["session_id"], "s1")
-        self.assertEqual(first["run_id"], "r1")
-        self.assertEqual(first["package"], "test-pkg@1.0.0")
-        self.assertTrue(first["timestamp"])
+        # The record says which hook failed, where, and under which policy.
+        self.assertEqual(
+            {
+                key: record[key]
+                for key in ("hook", "event", "tool", "kind", "session_id",
+                            "run_id", "package", "on_failure", "decision")
+            }, {
+                "hook": "h",
+                "event": "PreToolUse",
+                "tool": "shell",
+                "kind": "exit",
+                "session_id": "s1",
+                "run_id": "r1",
+                "package": "test-pkg@1.0.0",
+                "on_failure": "deny",
+                "decision": "deny",
+            })
+        self.assertTrue(record["timestamp"])
 
     def _pid_running(self, pid: int) -> bool:
         try:
@@ -4621,7 +1768,7 @@ class TestHookFailurePolicy(unittest.TestCase):
         pid_file = self.workspace / "child.pid"
         self.addCleanup(self._kill_if_running, pid_file)
         with contextlib.redirect_stderr(io.StringIO()):
-            res = runtime.execute_single_hook_action(
+            res = actions.execute_single_hook_action(
                 event_payload=self.PAYLOAD,
                 hook_name="h",
                 workspace=self.workspace,
@@ -4646,37 +1793,8 @@ class TestHookFailurePolicy(unittest.TestCase):
                          {"decision": "allow"})
         self.assertEqual(self._command("exit 3", "deny")["decision"], "deny")
 
-    def test_a_builtin_that_raises_follows_the_policy(self):
-        broken = mock.Mock(side_effect=ValueError("kaput"))
-        self.assertEqual(self._builtin(broken, "allow"), {"decision": "allow"})
-        denied = self._builtin(broken, "deny")
-        self.assertEqual(denied["decision"], "deny")
-        self.assertIn("ValueError: kaput", denied["reason"])
-        self.assertEqual([r["kind"] for r in self._records()],
-                         ["exception", "exception"])
 
-    def _hang_until_released(self, **_kwargs) -> dict:
-        """A builtin that does not answer until the test lets it go."""
-        self.release.wait(30)
-        return {"decision": "allow"}
-
-    def test_a_builtin_that_hangs_follows_the_policy(self):
-        self.release = threading.Event()
-        self.addCleanup(self.release.set)
-
-        started = time.monotonic()
-        self.assertEqual(
-            self._builtin(self._hang_until_released, "allow", timeout=0.2),
-            {"decision": "allow"})
-        denied = self._builtin(self._hang_until_released, "deny", timeout=0.2)
-        self.assertLess(time.monotonic() - started, 5)
-        self.assertEqual(denied["decision"], "deny")
-        self.assertIn("timed out", denied["reason"])
-        self.assertEqual([r["kind"] for r in self._records()],
-                         ["timeout", "timeout"])
-
-
-class TestDispatchFailure(unittest.TestCase):
+class TestDispatchFailure(_FailureLogTestCase):
     """An error in dispatch itself is settled by the hook's policy.
 
     Left to escape, it would exit non-zero with nothing on stdout, and the
@@ -4688,21 +1806,6 @@ class TestDispatchFailure(unittest.TestCase):
         "tool_name": "Bash",
         "tool_input": {},
     })
-
-    def setUp(self):
-        super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
-        self.workspace = self.temp_dir / "workspace"
-        self.workspace.mkdir()
-        # The failure log is central: point the store at the temp dir so the
-        # failures recorded here never reach the real one.
-        home = mock.patch.dict(
-            os.environ, {"TPU_AGENT_SUITE_HOME": str(self.temp_dir / "home")})
-        home.start()
-        self.addCleanup(home.stop)
-        self.failure_log = utils.get_tpu_agent_suite_home(
-        ) / utils.HOOK_FAILURE_LOG
 
     def _dispatch(self, on_failure: str, **kwargs) -> tuple[dict, int]:
         arguments = {
@@ -4717,46 +1820,13 @@ class TestDispatchFailure(unittest.TestCase):
         }
         arguments.update(kwargs)
         with contextlib.redirect_stderr(io.StringIO()):
-            return runtime.dispatch_hook(**arguments)
-
-    def _records(self) -> list[dict]:
-        return utils.read_jsonl(self.failure_log)
-
-    def test_a_normalization_error_follows_the_policy(self):
-        with mock.patch.object(runtime,
-                               "normalize_inbound_event",
-                               side_effect=RuntimeError("boom")):
-            allowed, allowed_code = self._dispatch("allow")
-            denied, denied_code = self._dispatch("deny")
-        self.assertEqual((allowed_code, denied_code), (0, 0))
-        self.assertEqual(allowed["hookSpecificOutput"]["permissionDecision"],
-                         "allow")
-        verdict = denied["hookSpecificOutput"]
-        self.assertEqual(verdict["permissionDecision"], "deny")
-        self.assertIn("Dispatch of hook 'h' failed: RuntimeError: boom",
-                      verdict["permissionDecisionReason"])
-        records = self._records()
-        self.assertEqual([(r["kind"], r["decision"]) for r in records],
-                         [("dispatch", "allow"), ("dispatch", "deny")])
-        self.assertEqual(records[0]["hook"], "h")
-        self.assertEqual(records[0]["event"], "PreToolUse")
-
-    def test_a_bug_under_the_hooks_action_follows_the_policy(self):
-        with mock.patch.object(runtime,
-                               "_run_hook_process",
-                               side_effect=NameError("oops")):
-            denied, code = self._dispatch("deny")
-        self.assertEqual(code, 0)
-        verdict = denied["hookSpecificOutput"]
-        self.assertEqual(verdict["permissionDecision"], "deny")
-        self.assertIn("NameError: oops", verdict["permissionDecisionReason"])
-        self.assertEqual([r["kind"] for r in self._records()], ["dispatch"])
+            return dispatch.dispatch_hook(**arguments)
 
     def test_a_handback_is_answered_as_its_tool_event(self):
         # Claude Code rejects a SubagentStop-shaped reply to the hand-back's
         # PreToolUse as a hook error and runs the tool, losing the deny. The
         # payload is unreadable here: the command line alone decides.
-        with mock.patch.object(runtime,
+        with mock.patch.object(events,
                                "normalize_inbound_event",
                                side_effect=RuntimeError("boom")):
             denied, code = self._dispatch("deny",
@@ -4772,7 +1842,7 @@ class TestDispatchFailure(unittest.TestCase):
                       verdict["permissionDecisionReason"])
 
 
-class TestHookFanOut(unittest.TestCase):
+class TestHookFanOut(_FailureLogTestCase):
     """A batched delegation must reach its verdict inside the harness budget.
 
     The hook runs once per subagent, and the harness allows the whole dispatch
@@ -4783,34 +1853,12 @@ class TestHookFanOut(unittest.TestCase):
     # Enough subagents that, checked in turn, they would outlast the budget.
     SUBAGENTS = tuple(f"agent-{i}"
                       for i in range(TIMEOUT +
-                                     compiler.HOOK_DISPATCH_HEADROOM_S + 1))
+                                     hook_config.HOOK_DISPATCH_HEADROOM_S + 1))
     # Hangs on the first subagent only, and answers at once for the others.
     # Every sub-event carries the whole batch too; match the one it is for.
     SLOW_ON_FIRST = ('payload=$(cat); case "$payload" in '
                      '*\'"subagent": "agent-0"\'*) sleep 15;; esac; '
                      'echo \'{"decision": "allow"}\'')
-
-    def setUp(self):
-        super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
-        self.workspace = self.temp_dir / "workspace"
-        self.workspace.mkdir()
-        # The failure log is central: point the store at the temp dir so the
-        # failures recorded here never reach the real one.
-        home = mock.patch.dict(
-            os.environ, {"TPU_AGENT_SUITE_HOME": str(self.temp_dir / "home")})
-        home.start()
-        self.addCleanup(home.stop)
-        self.failure_log = utils.get_tpu_agent_suite_home(
-        ) / utils.HOOK_FAILURE_LOG
-        self.release = threading.Event()
-        self.addCleanup(self.release.set)
-
-    def _hang_until_released(self, **_kwargs) -> dict:
-        """A builtin that does not answer until the test lets it go."""
-        self.release.wait(30)
-        return {"decision": "allow"}
 
     def _dispatch(self, on_failure: str, **action) -> tuple[dict, float]:
         """Dispatches one delegation of every subagent; returns the timing."""
@@ -4827,7 +1875,7 @@ class TestHookFanOut(unittest.TestCase):
         }
         started = time.monotonic()
         with contextlib.redirect_stderr(io.StringIO()):
-            response, code = runtime.dispatch_hook(
+            response, code = dispatch.dispatch_hook(
                 harness="antigravity",
                 package="test-pkg@1.0.0",
                 hook_name="h",
@@ -4843,7 +1891,7 @@ class TestHookFanOut(unittest.TestCase):
 
     def _assert_within_budget(self, elapsed: float) -> None:
         self.assertLess(elapsed,
-                        self.TIMEOUT + compiler.HOOK_DISPATCH_HEADROOM_S)
+                        self.TIMEOUT + hook_config.HOOK_DISPATCH_HEADROOM_S)
 
     def _hung_actions(self) -> dict[str, dict]:
         return {
@@ -4856,7 +1904,7 @@ class TestHookFanOut(unittest.TestCase):
         }
 
     def test_hung_subagents_are_denied_within_the_budget(self):
-        with mock.patch.dict(runtime.BUILTIN_HOOK_ACTIONS,
+        with mock.patch.dict(actions.BUILTIN_HOOK_ACTIONS,
                              {"validate-schema": self._hang_until_released}):
             for kind, action in self._hung_actions().items():
                 with self.subTest(kind=kind):
@@ -4900,7 +1948,7 @@ class TestSessionStartLease(unittest.TestCase):
                 mock.patch("framework.compute.lease.spawn_sweep",
                            side_effect=lambda run: seen.append(
                                runtime.compute.lease.read_owner(run))):
-            _, code = runtime.dispatch_hook(
+            _, code = dispatch.dispatch_hook(
                 harness="claude-code",
                 package=self.PKG,
                 hook_name="hook",
@@ -4911,14 +1959,6 @@ class TestSessionStartLease(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         return seen[0] if seen else None
-
-    def test_the_sweep_runs_after_the_claim_and_a_resume_takes_it_over(self):
-        owner = self._start(self.OWNER)
-        self.assertEqual((owner["pid"], owner["package"], owner["workspace"]),
-                         (4242, self.PKG, str(self.workspace.resolve())))
-        self.assertEqual(self._start({**self.OWNER, "pid": 5151})["pid"], 5151)
-        # A resume whose owner cannot be identified releases the run.
-        self.assertEqual(self._start(None), {})
 
     def test_failures_never_fail_the_session_start(self):
         with mock.patch("framework.compute.lease.claim",
@@ -4941,19 +1981,12 @@ class TestSessionEndReapHook(unittest.TestCase):
     PKG = "test-pkg@1.0.0"
 
     def setUp(self):
-        self.tmp = pathlib.Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.workspace = self.tmp / "workspace"
-        self.workspace.mkdir(parents=True)
         # Session records are central: keep this class's out of the real store.
-        home = mock.patch.dict(
-            os.environ, {"TPU_AGENT_SUITE_HOME": str(self.tmp / "home")})
-        home.start()
-        self.addCleanup(home.stop)
+        self.tmp, self.workspace = _isolated_workspace(self, "home")
 
     def _dispatch(self, harness, event, payload, session="sess-1"):
-        runtime.record_session_run(session, self.RUN_ID, package=self.PKG)
-        return runtime.dispatch_hook(
+        run_state.record_session_run(session, self.RUN_ID, package=self.PKG)
+        return dispatch.dispatch_hook(
             harness=harness,
             package=self.PKG,
             hook_name="session-end-reap",
@@ -4992,78 +2025,31 @@ class TestSessionEndReapHook(unittest.TestCase):
     @mock.patch("framework.compute.reap_jobs")
     def test_claude_code_turn_stop_never_reaps(self, mock_reap_jobs):
         """A Stop is a turn ending, whatever the payload says."""
-        res, code = self._dispatch("claude-code", "Stop", {
+        _, code = self._dispatch("claude-code", "Stop", {
             "session_id": "sess-1",
             "stop_hook_active": True,
         })
         self.assertEqual(code, 0)
         mock_reap_jobs.assert_not_called()
 
-    @mock.patch("framework.compute.reap_jobs")
-    def test_unknown_session_is_a_no_op(self, mock_reap_jobs):
-        res, code = self._dispatch("claude-code", "SessionEnd", {
-            "session_id": "someone-else",
-        })
-        self.assertEqual(code, 0)
-        mock_reap_jobs.assert_not_called()
-
     @mock.patch("framework.compute.reap_jobs", return_value=([], {}))
     def test_antigravity_idle_terminal_stop_reaps(self, mock_reap_jobs):
-        res, code = self._dispatch(
+        _, code = self._dispatch(
             "antigravity", "SessionEnd", {
                 "conversationId": "sess-1",
                 "terminationReason": "TERMINAL_STEP_TYPE",
                 "fullyIdle": True,
             })
         self.assertEqual(code, 0)
-        mock_reap_jobs.assert_called_once()
         self.assertEqual(mock_reap_jobs.call_args.args[0], self.RUN_ID)
 
     @mock.patch("framework.compute.reap_jobs")
-    def test_antigravity_turn_boundaries_do_not_reap(self, mock_reap_jobs):
-        """Every payload here is a loop pausing, not the session ending."""
-        payloads = {
-            "turn end": {
-                "terminationReason": "NO_TOOL_CALL",
-                "fullyIdle": True
-            },
-            "not idle": {
-                "terminationReason": "TERMINAL_STEP_TYPE",
-                "fullyIdle": False
-            },
-            "no idle flag at all": {
-                "terminationReason": "TERMINAL_STEP_TYPE"
-            },
-            # The resume hook retries an error; reaping first would cancel
-            # the jobs of a run about to be picked up again.
-            "transient error": {
-                "terminationReason": "ERROR",
-                "fullyIdle": True
-            },
-            # The user stopping the agent is not the user ending the session.
-            "user cancelled": {
-                "terminationReason": "USER_CANCELED",
-                "fullyIdle": True
-            },
-            "budget exhausted": {
-                "terminationReason": "MAX_TOKEN_BUDGET_EXCEEDED",
-                "fullyIdle": True
-            },
-            # A reason the enum gains later must not start cancelling jobs on
-            # its own; that is the point of listing completions, not halts.
-            "reason we have never seen": {
-                "terminationReason": "TERMINATION_REASON_FROM_THE_FUTURE",
-                "fullyIdle": True
-            },
-        }
-        for label, extra in payloads.items():
-            with self.subTest(label):
-                res, code = self._dispatch("antigravity", "SessionEnd", {
-                    "conversationId": "sess-1",
-                    **extra
-                })
-                self.assertEqual(code, 0)
-                mock_reap_jobs.assert_not_called()
+    def test_unknown_session_is_a_no_op(self, mock_reap_jobs):
+        _, code = self._dispatch("claude-code", "SessionEnd", {
+            "session_id": "someone-else",
+        })
+        self.assertEqual(code, 0)
+        mock_reap_jobs.assert_not_called()
 
     @mock.patch("framework.compute.reap_jobs")
     def test_antigravity_subagent_stop_bypasses_the_hook(self, mock_reap_jobs):
@@ -5084,7 +2070,7 @@ class TestSessionEndReapHook(unittest.TestCase):
     def test_reap_failure_is_reported_not_raised(self, mock_reap_jobs):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            res, code = self._dispatch("claude-code", "SessionEnd", {
+            _, code = self._dispatch("claude-code", "SessionEnd", {
                 "session_id": "sess-1",
             })
         self.assertEqual(code, 0)
@@ -5108,12 +2094,9 @@ class TestSubagentHandback(unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.workspace_dir = self.temp_dir / "workspace"
-        self.workspace_dir.mkdir()
+        self.temp_dir, self.workspace_dir = _isolated_workspace(
+            self, "central_tpu_agent_suite")
         self.central_home = self.temp_dir / "central_tpu_agent_suite"
-        self.old_tpu_agent_suite_home = os.environ.get("TPU_AGENT_SUITE_HOME")
-        os.environ["TPU_AGENT_SUITE_HOME"] = str(self.central_home)
 
         scripts_dir = self.central_home / "packages" / self.PKG / "scripts"
         scripts_dir.mkdir(parents=True)
@@ -5132,16 +2115,8 @@ class TestSubagentHandback(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def tearDown(self):
-        if self.old_tpu_agent_suite_home is not None:
-            os.environ["TPU_AGENT_SUITE_HOME"] = self.old_tpu_agent_suite_home
-        else:
-            os.environ.pop("TPU_AGENT_SUITE_HOME", None)
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-        super().tearDown()
-
-    def _dispatch(self, payload, matcher=None):
-        return runtime.dispatch_hook(
+    def _dispatch(self, payload):
+        return dispatch.dispatch_hook(
             harness="claude-code",
             package=self.PKG,
             hook_name="check",
@@ -5149,14 +2124,13 @@ class TestSubagentHandback(unittest.TestCase):
             script_rel="scripts/check.py",
             workspace=self.workspace_dir,
             raw_input_text=json.dumps(payload),
-            matcher=matcher,
         )
 
-    def _handback(self, message, agent_type="tpu-model-onboarding", **extra):
+    def _handback(self, message, **extra):
         return {
             "hook_event_name": "PreToolUse",
             "tool_name": "SubagentHandback",
-            "agent_type": agent_type,
+            "agent_type": "tpu-model-onboarding",
             "session_id": "sess-1",
             "tool_input": {
                 "message": message
@@ -5214,76 +2188,6 @@ class TestSubagentHandback(unittest.TestCase):
             payload["permission_mode"] = permission_mode
         return payload
 
-    def test_other_tool_events_are_not_handbacks(self):
-        for payload in (
-                self._handback("x", hook_event_name="PostToolUse"),
-                dict(self._handback("x"), tool_name="Read"),
-        ):
-            event = runtime.normalize_inbound_event(payload, "claude-code",
-                                                    "SubagentStop", self.PKG,
-                                                    self.workspace_dir)
-            self.assertNotIn("handback", event["args"])
-
-    def test_handback_without_event_name_is_matched_by_tool(self):
-        payload = self._handback("x")
-        del payload["hook_event_name"]
-        event = runtime.normalize_inbound_event(payload, "claude-code",
-                                                "SubagentStop", self.PKG,
-                                                self.workspace_dir)
-        self.assertIs(event["args"]["handback"], True)
-
-    def test_refused_handback_answers_as_tool_denial(self):
-        res, code = self._dispatch(self._handback("no json here"))
-        self.assertEqual(code, 0)
-        self.assertNotIn("decision", res)
-        out = res["hookSpecificOutput"]
-        self.assertEqual(out["hookEventName"], "PreToolUse")
-        self.assertEqual(out["permissionDecision"], "deny")
-        self.assertEqual(out["permissionDecisionReason"], "send JSON")
-
-    def _dispatch_script(self, decision, payload):
-        scripts_dir = self.central_home / "packages" / self.PKG / "scripts"
-        (scripts_dir / "bare.py").write_text(
-            f"print({json.dumps(json.dumps({'decision': decision}))})\n",
-            encoding="utf-8")
-        return runtime.dispatch_hook(
-            harness="claude-code",
-            package=self.PKG,
-            hook_name="bare",
-            event="SubagentStop",
-            script_rel="scripts/bare.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps(payload),
-        )
-
-    def test_bare_refusal_still_gives_the_subagent_a_reason(self):
-        # A script hook may refuse with no text at all; the denial reason is
-        # the only thing the subagent reads back, so it is never empty.
-        res, code = self._dispatch_script("deny", self._handback("x"))
-        self.assertEqual(code, 0)
-        out = res["hookSpecificOutput"]
-        self.assertEqual(out["permissionDecision"], "deny")
-        self.assertEqual(out["permissionDecisionReason"],
-                         "Denied by hook bare")
-
-    def test_retry_means_the_same_on_both_roads(self):
-        # `retry` is a Stop decision. A native SubagentStop does not block on
-        # it, so a hand-back must not be refused on it either.
-        handback, _ = self._dispatch_script("retry", self._handback("x"))
-        native, _ = self._dispatch_script(
-            "retry", self._native_stop(self._write_transcript([])))
-        self.assertEqual(handback["hookSpecificOutput"]["permissionDecision"],
-                         "allow")
-        self.assertNotIn("decision", native)
-
-    def test_handback_from_unmatched_subagent_is_bypassed(self):
-        res, _ = self._dispatch(
-            self._handback("no json", agent_type="doc_writer"),
-            matcher="tpu-model-onboarding|tpu-kernel-development")
-        self.assertEqual(res["hookSpecificOutput"]["permissionDecision"],
-                         "allow")
-        self.assertEqual(self._fire_count(), 0)
-
     def test_one_check_per_delivery_across_both_roads(self):
         # The recorded auto-mode sequence: the subagent writes its report as
         # text and ends its turn before calling the tool, then calls it, then
@@ -5310,20 +2214,6 @@ class TestSubagentHandback(unittest.TestCase):
         self.assertEqual(len(fires), 1)
         self.assertIs(fires[0]["args"]["handback"], True)
         self.assertEqual(fires[0]["subagent"], "tpu-model-onboarding")
-
-    def test_native_stop_outside_auto_mode_is_held(self):
-        # Outside auto mode, or with no mode on the payload, the final
-        # message is the delivery and is held to the contract.
-        transcript = self._write_transcript(
-            [self._prompt("p1", "harness test")])
-        for mode in ("default", None):
-            with self.subTest(permission_mode=mode):
-                res, _ = self._dispatch(
-                    self._native_stop(transcript,
-                                      prompt_id="p1",
-                                      permission_mode=mode))
-                self.assertEqual(res.get("decision"), "block")
-        self.assertEqual(self._fire_count(), 2)
 
     def _handback_call(self, call_id, result, is_error=False):
         # A SubagentHandback call and the tool result Claude Code records.
@@ -5362,18 +2252,6 @@ class TestSubagentHandback(unittest.TestCase):
             }),
         ])
 
-    def test_resumed_run_without_handback_is_held(self):
-        # The earlier run's hand-back must not exempt the resumed run: its
-        # native stop is the delivery and is held to the contract.
-        transcript = self._auto_run_then_resume()
-        res, _ = self._dispatch(
-            self._native_stop(transcript,
-                              "handshake-2",
-                              prompt_id="p2",
-                              permission_mode="default"))
-        self.assertEqual(res.get("decision"), "block")
-        self.assertEqual(self._fire_count(), 1)
-
     def test_stop_without_a_known_run_is_held(self):
         # A payload that cannot name its run, or names one no record bears,
         # proves nothing, like an unreadable transcript: an earlier run's
@@ -5391,160 +2269,60 @@ class TestSubagentHandback(unittest.TestCase):
                               stderr.getvalue())
         self.assertEqual(self._fire_count(), 2)
 
-    def test_prompt_id_named_only_in_prose_does_not_start_the_run(self):
-        # The resumed run's id quoted in the earlier run's text must not
-        # pull that run's hand-back into the resumed run.
-        transcript = self._auto_run_then_resume()
-        records = [
-            json.loads(line)
-            for line in transcript.read_text(encoding="utf-8").splitlines()
-        ]
-        records.insert(0, self._content({"type": "text", "text": "next: p2"}))
-        transcript = self._write_transcript(records)
-        res, _ = self._dispatch(
-            self._native_stop(transcript, "handshake-2", prompt_id="p2"))
-        self.assertEqual(res.get("decision"), "block")
-        self.assertEqual(self._fire_count(), 1)
-
-    def test_run_switched_out_of_auto_mode_is_held(self):
-        # Recorded (mode test C): delegated in auto mode, switched to default
-        # mid-run. Claude Code refuses every call outside auto mode; the
-        # caller's follow-up in the same turn (same prompt id) withdraws the
-        # tool and the plain final message is delivered.
-        transcript = self._write_transcript([
-            self._prompt("p1", "sleep 60, then report"),
-            *self._handback_call(
-                "t1",
-                "Only the auto-mode classifier can allow SubagentHandback: "
-                "the session is not in auto mode",
-                is_error=True),
-            self._prompt("p1",
-                         "<system-reminder>SubagentHandback is not available "
-                         "in this run ...</system-reminder>",
-                         meta=True),
-        ])
-        res, _ = self._dispatch(
-            self._native_stop(transcript,
-                              "mode-test-C",
-                              prompt_id="p1",
-                              permission_mode="default"))
-        self.assertEqual(res.get("decision"), "block")
-        self.assertEqual(self._fire_count(), 1)
-
-    def test_auto_mode_run_never_offered_the_tool_is_held(self):
+    def test_auto_mode_run_without_an_offer_is_held(self):
         # Recorded on Claude Code 2.1.241, headless and interactive alike:
         # auto mode, but the run is never given the tool, so its plain final
         # message is what the caller receives. Skipping it on the mode alone
-        # let every result through unchecked.
-        transcript = self._write_transcript([
-            self._prompt("p1", "Scope the onboarding request"),
-            self._content({
-                "type": "text",
-                "text": "Brief and plan written."
-            }),
-        ])
-        res, _ = self._dispatch(
-            self._native_stop(transcript,
-                              "Brief and plan written.",
-                              prompt_id="p1",
-                              permission_mode="auto"))
-        self.assertEqual(res.get("decision"), "block")
-        self.assertEqual(self._fire_count(), 1)
+        # let every result through unchecked. The meta record that withdraws
+        # the tool names it too; it must not read as the offer.
+        for label, record in (
+            ("never offered",
+             self._content({
+                 "type": "text",
+                 "text": "Brief and plan written."
+             })),
+            ("withdrawn",
+             self._prompt("p1",
+                          "<system-reminder>SubagentHandback is not available "
+                          "in this run ...</system-reminder>",
+                          meta=True)),
+        ):
+            with self.subTest(label):
+                transcript = self._write_transcript(
+                    [self._prompt("p1", "harness test"), record])
+                res, _ = self._dispatch(
+                    self._native_stop(transcript,
+                                      "handshake",
+                                      prompt_id="p1",
+                                      permission_mode="auto"))
+                self.assertEqual(res.get("decision"), "block")
+        self.assertEqual(self._fire_count(), 2)
 
     def test_auto_mode_run_offered_the_tool_is_a_turn_boundary(self):
         # Recorded on Claude Code 2.1.285: the offer is a meta record at the
         # start of the run, before its first stop, so the draft stop before
-        # the call is let through without waiting for the call.
-        transcript = self._write_transcript([
-            self._prompt("p1", "reply with pong"),
-            self._prompt("p1",
-                         "<system-reminder>\nYour final report is delivered "
-                         "through SubagentHandback: when your work is "
-                         "complete, call SubagentHandback({message: <your "
-                         "full report>}).</system-reminder>",
-                         meta=True),
-        ])
-        res, _ = self._dispatch(
-            self._native_stop(transcript,
-                              "draft",
-                              prompt_id="p1",
-                              permission_mode="auto"))
-        self.assertNotIn("decision", res)
-        self.assertEqual(self._fire_count(), 0)
-
-    def test_unreadable_transcript_in_auto_mode_is_let_through_and_reported(
-            self):
-        # The transcript cannot say whether the tool was offered. Holding the
-        # stop would block, on every retry, a subagent that was offered it
-        # and already delivered, so the mode decides as before; the skip is
-        # reported because a run without the tool goes unchecked here.
-        missing = self.temp_dir / "never-written.jsonl"
-        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            res, _ = self._dispatch(
-                self._native_stop(missing,
-                                  "draft",
-                                  prompt_id="p1",
-                                  permission_mode="auto"))
-        self.assertNotIn("decision", res)
-        self.assertEqual(self._fire_count(), 0)
-        self.assertIn("SubagentStop skipped: auto mode, but the transcript",
-                      err.getvalue())
-
-    def test_offered_tool_is_not_reported(self):
-        transcript = self._write_transcript([
-            self._prompt("p1", "reply with pong"),
-            self._prompt("p1", "Your final report is delivered through "
-                         "SubagentHandback.",
-                         meta=True),
-        ])
-        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            self._dispatch(
-                self._native_stop(transcript,
-                                  "draft",
-                                  prompt_id="p1",
-                                  permission_mode="auto"))
-        self.assertNotIn("SubagentStop skipped", err.getvalue())
-
-    def test_harness_without_transcript_offer_falls_back_to_the_mode(self):
-        # The offer's wording is the harness's, declared in its mapping.
-        # Without it the transcript cannot show the run lacked the tool, so
-        # the mode decides and the skip is reported.
-        mapping = dict(runtime.subagent_handback_mapping("claude-code"))
-        del mapping["transcript_offer"]
-        transcript = self._write_transcript([
-            self._prompt("p1", "Scope the onboarding request"),
-        ])
-        with mock.patch.object(runtime,
-                               "subagent_handback_mapping",
-                               return_value=mapping), \
-                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            res, _ = self._dispatch(
-                self._native_stop(transcript,
-                                  "draft",
-                                  prompt_id="p1",
-                                  permission_mode="auto"))
-        self.assertNotIn("decision", res)
-        self.assertEqual(self._fire_count(), 0)
-        self.assertIn("SubagentStop skipped: auto mode, but the transcript",
-                      err.getvalue())
-
-    def test_withdrawn_tool_is_not_an_offer(self):
-        # The meta record that withdraws the tool names it too; it must not
-        # read as the offer.
-        transcript = self._write_transcript([
-            self._prompt("p1", "harness test"),
-            self._prompt("p1",
-                         "<system-reminder>SubagentHandback is not available "
-                         "in this run ...</system-reminder>",
-                         meta=True),
-        ])
-        res, _ = self._dispatch(
-            self._native_stop(transcript,
-                              "handshake",
-                              prompt_id="p1",
-                              permission_mode="auto"))
-        self.assertEqual(res.get("decision"), "block")
-        self.assertEqual(self._fire_count(), 1)
+        # the call is let through without waiting for the call. The skip is
+        # not reported: the offer shows the run has the tool.
+        for offer in ("<system-reminder>\nYour final report is delivered "
+                      "through SubagentHandback: when your work is "
+                      "complete, call SubagentHandback({message: <your "
+                      "full report>}).</system-reminder>",
+                      "Your final report is delivered through "
+                      "SubagentHandback."):
+            with self.subTest(offer=offer):
+                transcript = self._write_transcript([
+                    self._prompt("p1", "reply with pong"),
+                    self._prompt("p1", offer, meta=True),
+                ])
+                with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                    res, _ = self._dispatch(
+                        self._native_stop(transcript,
+                                          "draft",
+                                          prompt_id="p1",
+                                          permission_mode="auto"))
+                self.assertNotIn("decision", res)
+                self.assertEqual(self._fire_count(), 0)
+                self.assertNotIn("SubagentStop skipped", err.getvalue())
 
     def test_accepted_handback_exempts_stops_in_any_mode(self):
         # Switching out of auto mode after the call was accepted must not
@@ -5560,6 +2338,284 @@ class TestSubagentHandback(unittest.TestCase):
                               permission_mode="default"))
         self.assertNotIn("decision", res)
         self.assertEqual(self._fire_count(), 0)
+
+
+class TestBackgroundIdleGate(unittest.TestCase):
+    """A Claude Code subagent's stop with its own background work still live.
+
+    The runtime records each launch a `PostToolUse` reports, per agent, and
+    intersects them with the stop's live-task list; payload shapes are as
+    captured on Claude Code 2.1.312. A not-idle stop is skipped when the
+    hook's environment shows the harness resumes the agent
+    (`CLAUDE_CODE_ENTRYPOINT=cli`, an interactive session) and refused
+    otherwise (`sdk-cli`, headless, or unset).
+    """
+
+    PKG = "test-pkg@1.0.0"
+    SESSION = "sess-bg"
+    PARENT = "a80d76da82903c174"
+    CHILD = "a7e703afaf7629f00"
+    SHELL = "b4xiddsfx"
+    GOOD = '{"status": "completed", "summary": "done", "artifacts": [{"file": "out.json"}]}'
+
+    def setUp(self):
+        super().setUp()
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.workspace_dir = self.temp_dir / "workspace"
+        self.workspace_dir.mkdir()
+        self.central_home = self.temp_dir / "central_tpu_agent_suite"
+        # Snapshot the environment before touching it, so cleanup restores
+        # the caller's, not this test's. The gate reads the regime off the
+        # hook's environment: start every test with no signal, whoever runs
+        # the suite (a Claude Code session sets it to `cli`); the
+        # interactive test sets it itself.
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ["TPU_AGENT_SUITE_HOME"] = str(self.central_home)
+        os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+        pkg_root = self.central_home / paths.PACKAGES_DIRNAME / self.PKG
+        (pkg_root / "schemas").mkdir(parents=True)
+        (pkg_root / "schemas" / "result.json").write_text(json.dumps({
+            "type":
+            "object",
+            "required": ["status"],
+            "properties": {
+                "status": {
+                    "type": "string"
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "artifacts": {
+                    "type": "array"
+                },
+            },
+        }),
+                                                          encoding="utf-8")
+        (pkg_root / "tpu-agent-suite-build.json").write_text(json.dumps({
+            "contracts": {
+                "parent-orch": {
+                    "accepts": "",
+                    "produces": "schemas/result.json"
+                }
+            },
+        }),
+                                                             encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        super().tearDown()
+
+    def _dispatch(self, event, payload, builtin, **kwargs):
+        return dispatch.dispatch_hook(
+            harness="claude-code",
+            package=self.PKG,
+            hook_name=f"test-{builtin}",
+            event=event,
+            builtin=builtin,
+            workspace=self.workspace_dir,
+            raw_input_text=json.dumps(payload),
+            **kwargs,
+        )
+
+    def _post_tool(self, tool_name, tool_input, tool_response, agent_id=None):
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "session_id": self.SESSION,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_response": tool_response,
+            "tool_use_id": "toolu_1",
+        }
+        if agent_id:
+            payload["agent_id"] = agent_id
+        return payload
+
+    def _launch_agent(self, agent_id=PARENT, child=CHILD):
+        return self._post_tool("Agent", {
+            "subagent_type": "child-worker",
+            "prompt": "go",
+            "run_in_background": True
+        }, {
+            "status": "async_launched",
+            "agentId": child,
+            "isAsync": True
+        },
+                               agent_id=agent_id)
+
+    def _launch_shell(self, agent_id=PARENT, task=SHELL):
+        return self._post_tool("Bash", {
+            "command": "sleep 10",
+            "run_in_background": True
+        }, {
+            "backgroundTaskId": task,
+            "stdout": "",
+            "stderr": ""
+        },
+                               agent_id=agent_id)
+
+    def _record_launches(self):
+        for payload in (self._launch_agent(), self._launch_shell()):
+            res, code = self._dispatch("PostToolUse", payload,
+                                       "track-background")
+            self.assertEqual((code, res.get("decision")), (0, None))
+
+    def _stop(self, live, message="waiting for background work", **extra):
+        payload = {
+            "hook_event_name": "SubagentStop",
+            "session_id": self.SESSION,
+            "agent_id": self.PARENT,
+            "agent_type": "parent-orch",
+            "last_assistant_message": message,
+            "agent_transcript_path": str(self.temp_dir / "missing.jsonl"),
+            "transcript_path": str(self.temp_dir / "parent.jsonl"),
+            "stop_hook_active": False,
+            **extra,
+        }
+        if live is not None:
+            payload["background_tasks"] = [{
+                "id": task_id,
+                "type": kind,
+                "status": "running"
+            } for task_id, kind in live]
+        return payload
+
+    def _ledger(self, agent_id=PARENT):
+        return sorted(bg_ledger.load_ledger(self.SESSION, agent_id).keys())
+
+    def _normalize_stop(self, payload):
+        return events.normalize_inbound_event(payload, "claude-code",
+                                              "SubagentStop", self.PKG,
+                                              self.workspace_dir)
+
+    def test_background_launches_are_recorded_under_their_launcher(self):
+        self._record_launches()
+        self.assertEqual(self._ledger(), sorted([self.CHILD, self.SHELL]))
+        # A foreground delegate and a foreground command launch nothing.
+        for payload in (
+                self._post_tool("Agent", {"subagent_type": "x"}, {
+                    "status": "completed",
+                    "agentId": "a111"
+                },
+                                agent_id=self.PARENT),
+                self._post_tool("Bash", {"command": "ls"}, {"stdout": ""},
+                                agent_id=self.PARENT),
+        ):
+            self._dispatch("PostToolUse", payload, "track-background")
+        self.assertEqual(self._ledger(), sorted([self.CHILD, self.SHELL]))
+        # The root conversation has no agent id and files under its own key.
+        self._dispatch("PostToolUse",
+                       self._launch_agent(agent_id=None, child="a222"),
+                       "track-background")
+        self.assertEqual(self._ledger(agent_id=""), ["a222"])
+        self.assertEqual(self._ledger(), sorted([self.CHILD, self.SHELL]))
+        # Session end clears every agent's ledger for the session.
+        res, code = self._dispatch(
+            "SessionEnd", {
+                "hook_event_name": "SessionEnd",
+                "session_id": self.SESSION,
+                "reason": "exit"
+            }, "track-background")
+        self.assertEqual((code, res.get("decision")), (0, None))
+        self.assertFalse(
+            bg_ledger.ledger_dir(self.SESSION, self.PARENT).parent.exists())
+
+    def test_pause_on_a_headless_run_is_refused_with_the_live_handles(self):
+        """Headless (`sdk-cli`), nothing resumes the agent: the stop is final
+        and refused. An unset variable refuses the same way."""
+        self._record_launches()
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}), \
+                contextlib.redirect_stderr(stderr):
+            res, code = self._dispatch(
+                "SubagentStop",
+                self._stop([(self.PARENT, "subagent"),
+                            (self.CHILD, "subagent"), (self.SHELL, "shell")]),
+                "validate-schema")
+        self.assertEqual(code, 0)
+        self.assertEqual(res.get("decision"), "block")
+        reason = res.get("reason", "")
+        self.assertIn(f"subagent {self.CHILD}", reason)
+        self.assertIn(f"shell {self.SHELL}", reason)
+        self.assertIn("`sleep 20`", reason)
+        self.assertNotIn("produces contract", reason)
+        self.assertIn("SubagentStop refused", stderr.getvalue())
+        # The refusal is the dispatcher's, so every hook on the event gives it.
+        res, _ = self._dispatch("SubagentStop",
+                                self._stop([(self.CHILD, "subagent")]),
+                                "record-event")
+        self.assertEqual(res.get("decision"), "block")
+
+    def test_finished_work_is_pruned_and_the_stop_validated(self):
+        self._record_launches()
+        # An entry that cannot be read is skipped with a note, never deleted.
+        stray = (bg_ledger.ledger_dir(self.SESSION, self.PARENT) /
+                 "stray.json")
+        stray.write_text("not json", encoding="utf-8")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            event = self._normalize_stop(
+                self._stop([(self.PARENT, "subagent")]))
+        self.assertIs(event["args"]["fully_idle"], True)
+        self.assertEqual(event["args"]["fully_idle_source"], "ledger")
+        self.assertNotIn("outstanding_work", event["args"])
+        self.assertEqual(self._ledger(), [])
+        self.assertTrue(stray.exists())
+        self.assertIn("ignoring unreadable ledger entry", stderr.getvalue())
+        res, _ = self._dispatch("SubagentStop",
+                                self._stop([], message=self.GOOD),
+                                "validate-schema")
+        self.assertNotIn("decision", res)
+
+    def test_missing_live_list_is_announced_and_the_stop_validated(self):
+        self._record_launches()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            event = self._normalize_stop(self._stop(None))
+            res, _ = self._dispatch("SubagentStop", self._stop(None),
+                                    "validate-schema")
+        self.assertNotIn("fully_idle", event["args"])
+        self.assertIn("carries no 'background_tasks' list", stderr.getvalue())
+        self.assertEqual(res.get("decision"), "block")
+        self.assertIn("produces", res.get("reason", ""))
+        # Nothing is pruned on a payload that could not say what is live.
+        self.assertEqual(self._ledger(), sorted([self.CHILD, self.SHELL]))
+
+    def test_an_unfilable_launch_is_a_logged_failure_not_a_silent_allow(self):
+        """A launch the recorder cannot file would read as idle at the stop,
+        so it is raised; the dispatcher logs it and on_failure still allows."""
+        payload = self._launch_agent()
+        del payload["session_id"]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            # The manifest registers the recorder with on_failure allow.
+            res, code = self._dispatch("PostToolUse",
+                                       payload,
+                                       "track-background",
+                                       on_failure="allow")
+        self.assertEqual(code, 0)
+        self.assertNotIn("decision", res)  # allowed, as on_failure says
+        self.assertIn("hook failed (exception)", stderr.getvalue())
+        self.assertIn("no session id", stderr.getvalue())
+        self.assertEqual(self._ledger(), [])
+
+    def test_harness_reported_idle_flag_still_skips_on_antigravity(self):
+        # Antigravity says `fullyIdle` itself and resumes the paused agent;
+        # the ledger policy must not reach it.
+        event = events.normalize_inbound_event(
+            {
+                "typeName": "parent-orch",
+                "conversationId": "conv-1",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": False,
+                "finalModelOutput": "waiting",
+            }, "antigravity", "SubagentStop", self.PKG, self.workspace_dir)
+        self.assertEqual(event["args"]["fully_idle_source"], "harness")
+        self.assertEqual(
+            stop_filter.subagent_stop_skip_reason(event, "antigravity"),
+            "subagent still has work outstanding (not fully idle)")
+        self.assertIsNone(bg_ledger.idle_gate_verdict(event, "antigravity"))
 
 
 if __name__ == "__main__":

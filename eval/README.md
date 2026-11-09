@@ -213,17 +213,16 @@ The setup runs as `root` when each trial starts:
 - Tasks live at `eval/datasets/<dataset>/<task>/` with a `task.toml`,
   `instruction.md`, `environment/Dockerfile`, and `tests/`. Configs live flat
   in `eval/configs/<config>.yaml` and must not name a dataset.
-- Dataset and task directory names must match `^[a-z0-9-]+$`; CI
-  (`.github/workflows/dataset-naming.yml`) rejects anything else. Names
-  starting with `_` or `.` are skipped, so `_template` is allowed.
+- Dataset and task directory names must match `^[a-z0-9-]+$`; CI rejects
+  anything else. Names starting with `_` or `.` are skipped, so `_template` is
+  allowed.
 - Run `./eval/verify.sh <package>` to validate the config YAML and every
   `task.toml` before running.
-- A PR that adds or modifies a task under `eval/datasets/nightly-functional/` runs
-  just those tasks, under `claude-code/agent-suite-remote` and `agy/agent-suite-remote`
-  (`.github/workflows/nightly-functional-eval.yml`). Nothing else needs editing, but
-  a functional nightly task must therefore pass under those two configs. Changes outside
-  `nightly-functional/` (verifiers, agent wrappers, configs) are not re-run on the PR;
-  the scheduled nightly run covers them.
+- Tasks under `eval/datasets/nightly-functional/` run in the scheduled nightly
+  evaluation under `claude-code/agent-suite-remote` and
+  `agy/agent-suite-remote`, so any functional nightly task must pass under both
+  configs. Pull requests run the `smoke-check` dataset automatically when
+  package, framework, or evaluation files change.
 
 ## Interactive Claude Code Sandbox
 

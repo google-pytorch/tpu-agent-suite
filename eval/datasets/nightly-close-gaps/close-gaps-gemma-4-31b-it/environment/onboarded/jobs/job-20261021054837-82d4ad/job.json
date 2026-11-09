@@ -1,0 +1,38 @@
+{
+ "job_id": "job-20261021054837-82d4ad",
+ "job_name": "gemma4-bench-1k1k-c512-r2",
+ "status": "COMPLETED",
+ "run_id": "20261021T052922Z-b24aba7e2a10",
+ "backend": "local",
+ "pid": null,
+ "pid_started": null,
+ "start_time": "2026-10-21T05:48:37.295525+00:00",
+ "end_time": "2026-10-21T06:01:55.033377+00:00",
+ "exit_code": 0,
+ "recipe_path": "/workspace/onboarded/onboarding/bench/bench_client.sh",
+ "log_path": "/root/.tpu-agent-suite/runs/jobs/job-20261021054837-82d4ad/output.log",
+ "remote_dir": "",
+ "workload_name": "",
+ "serve": false,
+ "compute_profile": "local",
+ "extra": {
+  "outputs": [
+   {
+    "local": "serving_bench/summary.json",
+    "remote": "serving_bench/summary.json"
+   },
+   {
+    "local": "serving_bench/summary.md",
+    "remote": "serving_bench/summary.md"
+   },
+   {
+    "local": "serving_bench/raw/isl1024_osl1024_c512_r1.json",
+    "remote": "serving_bench/raw/isl1024_osl1024_c512_r1.json"
+   },
+   {
+    "local": "serving_bench/raw/isl1024_osl1024_c512_r1.log",
+    "remote": "serving_bench/raw/isl1024_osl1024_c512_r1.log"
+   }
+  ]
+ }
+}

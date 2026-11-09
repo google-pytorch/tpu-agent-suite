@@ -221,12 +221,18 @@ def parse_client(client_args: list[str]) -> argparse.Namespace:
     errors = io.StringIO()
     try:
         with contextlib.redirect_stderr(errors):
-            return serving_benchmark.parse_args(
+            client = serving_benchmark.parse_args(
                 list(client_args) + ["--output-dir", CLIENT_DIR])
     except SystemExit as exc:
         raise ValueError("the client flags are not serving_benchmark.py's: " +
                          (errors.getvalue().strip().splitlines() or [str(exc)]
                           )[-1]) from exc
+    if client.workload != "random":
+        raise ValueError(f"--workload {client.workload} is not supported: "
+                         "a sweep spreads ISL:OSL shapes over servers, and "
+                         "this workload has none. Run serving_benchmark.py "
+                         "once against the server instead.")
+    return client
 
 
 def shape_cost(client: argparse.Namespace, isl: int, osl: int,

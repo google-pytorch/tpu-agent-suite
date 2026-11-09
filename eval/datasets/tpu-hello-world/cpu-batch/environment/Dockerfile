@@ -1,0 +1,27 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Built on top of the shared nexus-host toolchain image, with CPU-only PyTorch
+# added for local matrix multiplies inside the trial container.
+FROM us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host@sha256:7ff58a98ae2655dbcf25fa0aeb3e8081281bfb3061f97581a98951e98371fff4
+
+RUN uv pip install --system --no-cache -c /etc/nexus-host/constraints.txt \
+      --index-url https://download.pytorch.org/whl/cpu torch
+
+# `kube_gate_setup.sh` runs the trial as `agent` (uid=1000, HOME=/root) and
+# locks `/usr/local/bin` to root:root, so `npm install -g` for the ACP bridge
+# (`acpx`, `claude-code-acp`) installs into `/root/.local/bin`.
+ENV NPM_CONFIG_PREFIX=/root/.local PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /workspace

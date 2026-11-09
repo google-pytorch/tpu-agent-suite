@@ -3,9 +3,9 @@ title: "Data parallelism"
 type: concept
 tags: [parallelism, performance, memory]
 created: 2026-09-04
-updated: 2026-09-04
+updated: 2026-10-27
 sources: 3
-human_reviewed: true
+human_reviewed: false
 aliases: ["DP", "pure data parallelism"]
 ---
 
@@ -31,7 +31,7 @@ including the much higher v6e/TPU7x figures, are tabulated on
 ## Memory ceiling
 
 With bf16 params and fp32 Adam state a parameter costs ~10 bytes, so pure DP can hold at
-most `HBM / 10` parameters per chip — ~9 B on a 96 GB v5p, before any activation
+most `HBM / 10` parameters per chip — ~10 B on a 95 GiB v5p, before any activation
 checkpoints ([scaling-book, Part 5](../sources/2025-scaling-book-training.md)). That is why DP alone is
 rarely used for interesting models; [FSDP](fsdp.md) keeps the same roofline and drops the
 replication.

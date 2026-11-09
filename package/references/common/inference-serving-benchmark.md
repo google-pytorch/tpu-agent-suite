@@ -129,6 +129,131 @@ Defaults keep the measurement deterministic: greedy decoding (`--temperature
 `--endpoint chat` measures `/v1/chat/completions` instead of
 `/v1/completions`.
 
+### The AgentX workload
+
+By default, the client sends random prompts of a fixed length. With
+`--workload agentx`, the client runs the AgentX benchmark instead.
+
+AgentX is an agentic-coding benchmark published by SemiAnalysis. It replays
+recorded Claude Code sessions against the server. A session has many turns,
+and each turn sends the whole conversation so far. The prompt therefore grows
+with every turn, and consecutive turns share most of their prompt. AgentX
+measures how the server handles this traffic: long prompts, and prompts whose
+beginning the server has already processed and can reuse from its prefix
+cache. The random workload does not test either.
+
+The server needs no changes. Start it with `serve_vllm.sh` as for the random
+workload, with the settings in [Server requirements](#server-requirements).
+
+#### How a run works
+
+1.  The client downloads InferenceX, the SemiAnalysis repository that holds
+    the AgentX scripts, at a pinned commit. InferenceX includes aiperf, the
+    load generator that sends the requests.
+2.  For each value of `--concurrency`, the client starts one AgentX run. The
+    concurrency is the number of sessions that aiperf replays at the same
+    time.
+3.  aiperf sends each recorded turn as a request to the server's
+    OpenAI-compatible chat endpoint, `/v1/chat/completions`. InferenceX sets
+    this endpoint; the client only passes the server's base URL.
+4.  Each run has a warmup phase and then a measured phase of fixed length.
+    The metrics come from the measured phase only.
+5.  InferenceX validates the run and computes its results. The client copies
+    the results into `summary.json` under the usual metric names.
+
+The client calls the same InferenceX functions that the published AgentX
+results use, so the requests, the validation and the result computation are
+the same as AgentX's.
+
+#### Server requirements
+
+-   **Prefix caching on.** vLLM enables it by default, so do not pass
+    `--no-enable-prefix-caching`. Without it, the server recomputes every
+    turn from the start, and the results do not reflect normal serving.
+-   **A long context.** `--max-model-len` decides which recorded sessions the
+    server can take. The client reads it from `/v1/models` and picks the
+    recordings as follows:
+
+    | `max_model_len` | Recordings replayed |
+    | :--- | :--- |
+    | 1,000,000 or more | The full set. Its longest sessions reach about 1M tokens. |
+    | 262,144 to 999,999 | The set capped at 256k tokens. aiperf skips any session longer than `max_model_len`. |
+    | Under 262,144 | As above. The client prints a warning: more sessions are skipped, so the load is lighter than AgentX's. |
+
+    To pick a set yourself, pass `--agentx-corpus`.
+-   **Optional: `VLLM_SERVER_DEV_MODE=1`.** With it, the client can empty the
+    server's prefix cache before each run. See
+    [Prefix cache between runs](#prefix-cache-between-runs).
+
+#### Client requirements
+
+-   `git`, and network access to GitHub, PyPI and the Hugging Face Hub.
+-   About 1.5 GB of disk in `--agentx-cache-dir` (default
+    `<output-dir>/agentx_cache`). The first run downloads InferenceX,
+    installs aiperf in its own Python environment and downloads the
+    recordings there. Later runs reuse these files, so keep the directory
+    between runs, on a disk with space.
+-   No TPU, and no vLLM installation. The client only sends HTTP requests.
+
+#### Duration
+
+A run lasts the measured phase plus setup and warmup:
+
+-   The measured phase lasts `--agentx-duration` seconds. The default, 1800,
+    is the AgentX standard.
+-   Loading the recordings and the warmup can add up to an hour.
+-   `--agentx-fast` selects the AgentX quick mode for smoke tests: a shorter
+    warmup and a 1200-second measured phase.
+-   `--run-timeout` defaults to the measured phase plus 7200 seconds.
+
+#### Comparing with published AgentX results
+
+Only a standard run can be compared with published AgentX results. A
+standard run has a measured phase of 1800 seconds, does not use
+`--agentx-fast` and does not use `--agentx-coverage-ratio`.
+`settings.agentx.canonical` in `summary.json` is `true` for a standard run.
+
+AgentX also checks that the latency measurements cover at least 95% of the
+measured phase, and fails the run otherwise. A slow server may fail this
+check. `--agentx-coverage-ratio` lowers the required share, and makes the run
+non-standard.
+
+#### Metrics
+
+`summary.json` uses the same metric names as for the random workload, with
+these differences:
+
+-   AgentX reports latency percentiles p50, p90 and p95. The summary has
+    `*_p95_ms` metrics and no `*_p99_ms` metrics.
+-   AgentX computes TPOT and ITL the same way, so `tpot_*` and `itl_*` are
+    equal.
+-   `prefix_cache_hit_rate` is the share of prompt tokens that the server
+    found in its prefix cache, from the server's Prometheus metrics.
+-   `theoretical_prefix_cache_hit_rate` is the highest hit rate the
+    recordings allow.
+
+A cell fails when more than `--max-failed-pct` of its requests fail. For
+AgentX the default is 10%, the AgentX limit. A cell also fails when AgentX's
+own validation rejects the run. The raw aiperf output and the AgentX result
+of each run are in `raw/agentx_c<N>_r<replicate>/`.
+
+#### Prefix cache between runs
+
+When the server runs with `VLLM_SERVER_DEV_MODE=1`, the client empties its
+prefix cache before each run, so each run starts with an empty cache.
+Without it, a run can reuse cache entries that the previous run left behind,
+and `settings.prefix_cache` in `summary.json` is `not reset`.
+
+#### Unsupported options
+
+-   `--isl-osl`, `--avoid`, `--max-concurrency-limit`,
+    `--stop-below-gain-pct` and `--stop-on-failure` apply only to the random
+    workload. The client exits with an error if you pass them.
+-   `--engine custom_fastapi` is not supported: that server has no chat
+    endpoint.
+-   `serving_sweep.py` does not support AgentX. Run `serving_benchmark.py`
+    once against the server instead.
+
 ## Run the client
 
 The client only sends HTTP requests and holds no chips. Run it one of two
@@ -202,12 +327,10 @@ rewrites it after every cell, and compute sends it back as it changes. Its
 `status` is then `partial`; report the cells it lists as measured and the
 rest as not run.
 
-### Through a port forward (every backend that can serve)
+### Through a port forward (every backend)
 
-| Backend | Port forward |
-| :--- | :--- |
-| `local`, `gce_tpu_vm`, `gke_pod`, `gke_job` | supported |
-| `gke_xpk` | **not supported**: report it as the blocker |
+Every backend (`local`, `gce_tpu_vm`, `gke_pod`, `gke_job`) supports a port
+forward.
 
 The client runs on this host and needs `vllm` here for `--engine vllm`.
 Run it with an interpreter that has vllm, so it runs vllm as itself as "Run
@@ -239,7 +362,7 @@ which waits behind the server holding them, or lands on another node where
 ## A sweep inside a time limit
 
 When the cluster stops jobs a fixed time after they start running
-(`declared_duration_minutes` in `compute inspect`'s `details` when configured,
+(the compute profile's `declared_duration_minutes`, from `config show`, when set,
 or a limit the prompt states), the server and every client run against it must
 end before that; a server can spend 15-30 minutes starting up. A server
 stopped mid-sweep fails the remaining cells; the client keeps the ones it
@@ -321,9 +444,10 @@ How the sweep works:
 
 1.  **Book the slots**, once per session, from the compute profiles. Each
     `gke_job` profile gets one slot per server its node pool can still start
-    (`available_chips` from `compute inspect`, divided by the chips one of its
-    Jobs takes), and each slot records its kind of TPU. Profiles on the same
-    nodes share those chips: each lists them, and a claim stops at what the
+    (the free chips `tpu_slots.py` reads itself, divided by the chips one of
+    its Jobs takes; don't run `compute inspect` for them), and each slot
+    records its kind of TPU. Profiles on the same nodes share those chips:
+    each lists them, and a claim stops at what the
     nodes can hold. `--gke-slots` is what a profile gets when its free chips
     cannot be read, or its pool has no nodes yet; give it no more than the
     shapes to measure. `parallel`, the cap on slots held at once, starts at
@@ -347,8 +471,11 @@ How the sweep works:
     client's flags, all of them, as one `serving_benchmark.py` run would take
     them: `--isl-osl` with every shape, `--concurrency`, `--engine`,
     `--model`, `--tokenizer`, and the measurement's flags below (for an
-    onboarding sweep `--max-concurrency-limit <max_num_seqs x dp>
-    --stop-below-gain-pct 10 --stop-on-failure`). They are read by the
+    onboarding sweep `--max-concurrency-limit <requests per replica x DP>`:
+    `max_num_seqs` x `data_parallel_size` for vLLM, `max_running_requests`
+    x `dp_size` for SGLang, left out when the deployment sets neither
+    `max_num_seqs` nor `max_running_requests`; and
+    `--stop-below-gain-pct 10 --stop-on-failure`). They are read by the
     client's own parser, so they default as they would there; the sweep sets
     `--base-url` and `--output-dir`, and each shape's `--isl-osl` and
     `--seed`.
@@ -417,7 +544,7 @@ How the sweep works:
 | Use | Flags |
 | :--- | :--- |
 | One measurement of a deployment (tpu-model-onboarding) | `--isl-osl 1024:128 --concurrency 1 --replicates 1 --num-prompts 200`, or the lengths and concurrency the request names. The lengths must fit the server's maximum model length together. |
-| Concurrency sweep of a deployment (tpu-model-onboarding) | `--max-concurrency-limit <max_num_seqs * dp> --stop-below-gain-pct 10 --stop-on-failure` on top of the `--isl-osl` and `--concurrency` sweep. |
+| Concurrency sweep of a deployment (tpu-model-onboarding) | `--max-concurrency-limit <requests per replica * DP> --stop-below-gain-pct 10 --stop-on-failure` on top of the `--isl-osl` and `--concurrency` sweep. Requests per replica x DP is `max_num_seqs` x `data_parallel_size` for vLLM and `max_running_requests` x `dp_size` for SGLang (DP 1 when absent). Leave out `--max-concurrency-limit` when the deployment sets neither, so the sweep runs to its top point against the engine's default (points above it measure queueing). |
 
 ### Sweep design: static filtering and dynamic early-stopping
 
@@ -430,6 +557,11 @@ How the sweep works:
 2. **Sequential execution & dynamic early-stopping (`check_early_stop`)**: The kept `c_range` runs sequentially from lowest to highest concurrency. After each concurrency point:
    - If `--stop-on-failure` is set and the cell fails while the server is still alive, or if `--stop-below-gain-pct <float>` (e.g. `10.0`) is set and `output_tokens_per_s` improves by less than that percentage over the best throughput so far for two consecutive steps, all remaining higher concurrencies in `c_range` for that `(isl, osl)` shape are marked `status: "skipped"` with the reason in `error`, and the sweep moves to the next `(isl, osl)` shape.
    - `--stop-below-gain-pct`, `--stop-on-failure`, and `--avoid` are for exploratory and onboarding sweeps only (`settings.sweep_mode: "exploratory"`), never for a study or A/B comparison.
+
+### SGLang client, Pareto curves, and BKC export
+
+- **`--bench-client sglang`**: Runs `python3 -m sglang.bench_serving` (override with `--sglang-cmd`) against an OpenAI-compatible server (`--endpoint completions` $\rightarrow$ `sglang-oai`, `--endpoint chat` $\rightarrow$ `sglang-oai-chat`), flushing the radix prefix cache via `POST /flush_cache` when `/reset_prefix_cache` returns 404/405 and normalizing SGLang's JSONL output to the same summary keys.
+- **Pareto curve & BKC verification**: `summary.json` includes `curves["<isl>:<osl>"]["pareto_frontier"]` (non-dominated points over `output_tokens_per_s` and `output_tokens_per_s_per_user`). Pass `--reference-curve <ref_summary.json> [--tolerance-pct 5.0] [--export-bkc <bkc.json>]` to verify Pareto reproduction within `--tolerance-pct` and export the Best Known Config (`bkc.json`) manifest when consistent.
 
 ## Exit codes and failures
 

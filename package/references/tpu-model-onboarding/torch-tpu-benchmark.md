@@ -35,12 +35,12 @@ You **MUST** follow this step-by-step checklist during execution. At each phase
 of your work, check off the step you are executing and ensure you complete the
 next step:
 
--   [ ] **Step 0.1: Accelerator Runtime Verification**: Check compute connectivity
-    via `{{runtime}} compute inspect --json`.
+-   [ ] **Step 0.1: Accelerator Runtime Verification**: Check that compute is
+    configured via `{{runtime}} config show --json --package {{package_tag}}`.
 -   [ ] **Step 0.2: Hugging Face Requirements**: Skip gating/auth prompts for
     public models.
--   [ ] **Step 0.3: Remote Hardware Diagnostics**: Read
-    `{{reference:tpu-model-onboarding/remote-tpu-runner.md}}`, verify compute, and run hardware profiling.
+-   [ ] **Step 0.3: Hardware Sizing**: Read
+    `{{reference:tpu-model-onboarding/remote-tpu-runner.md}}` and size the accelerator.
 -   [ ] **Step 0.4: Model Discovery**: Read
     `{{reference:tpu-model-onboarding/smart-hf-search.md}}` and discover candidate models.
 -   [ ] **Step 0.5: Pre-flight Compatibility Check**: **MANDATORY**: Read
@@ -69,17 +69,18 @@ it *is* the accelerator host and there is nothing remote to reach; an agent that
 otherwise concludes it is on a CPU machine and hard-stops asking for
 credentials to the machine it is already on.
 
-#### Verify Accelerator Compute Connectivity
+#### Verify Accelerator Compute Is Configured
 
-Before proceeding to model discovery, script generation, or benchmarking, verify
-that the configured compute target is operational:
+Before proceeding to model discovery, script generation, or benchmarking, read
+the active compute profile (do not run `compute inspect`):
 
 ```bash
-{{runtime}} compute inspect --json
+{{runtime}} config show --json --package {{package_tag}}
 ```
 
-1. If `compute inspect` succeeds and reports accelerator availability, proceed to Step 0.2.
-2. If `compute inspect` returns `COMPUTE_NOT_CONFIGURED` or a connectivity error:
+1. If it names an active profile, proceed to Step 0.2. A connectivity error
+   surfaces at the first job; treat it as below.
+2. If there is no active profile, or a job returns `COMPUTE_NOT_CONFIGURED` or a connectivity error:
    - **STOP IMMEDIATELY AND ASK** the user to set up compute, following the compute setup guide named under **Accelerator Compute Access**. Never create or edit the environment configuration yourself.
    - **DO NOT** proceed to model discovery, script generation, or benchmarking until accelerator compute access has been verified.
 
@@ -103,15 +104,14 @@ steps to ensure seamless access to models:
     hf auth login
     ```
 
-### Step 0.3: Remote Hardware Diagnostics
+### Step 0.3: Hardware Sizing
 
-Before discovering or validating models, you MUST inspect the target remote VM's
-hardware to identify the available accelerator and memory capacity. Follow
-`{{reference:tpu-model-onboarding/remote-tpu-runner.md}}` to: 1. Verify the
-remote connection. 2. Execute the inspect/diagnostics script to retrieve the
-specs JSON (containing `tpu.type`, `tpu.hbm_gb`, `gpu.available`, and
-`ram_gb`). 3. Parse and identify the `{tpu_type}` (e.g. `v5e-4`) and Memory
-Limit (`hbm_gb`) from the output.
+Before discovering or validating models, size the target's accelerator and
+memory capacity as
+`{{reference:tpu-model-onboarding/remote-tpu-runner/hardware_profiling.md}}`
+says: the accelerator from the request, its specs from the knowledge base, the
+chips from the compute profile. The memory limit (`hbm_gb`) is HBM per chip x
+chips.
 
 ### Step 0.4: Model Discovery & Capacity Integration
 
@@ -121,7 +121,7 @@ instead of a specific model ID, follow
 
 To prevent Out-Of-Memory (OOM) compilation crashes on the remote TPU
 accelerator, you **MUST** apply safe parameter limits on the search query based
-on the `hbm_gb` limit resolved in Step 0.1.
+on the `hbm_gb` limit resolved in Step 0.3.
 
 #### Real TPU Memory-to-Parameter Boundary Calculations (Relaxed but Conservative)
 

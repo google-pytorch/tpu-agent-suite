@@ -136,6 +136,71 @@
       "type": "integer",
       "minimum": 0,
       "description": "How many HLO ops by device time the report should list per trace. They go in the report in the tool's own shape, not in the result."
+    },
+    "serving_candidates": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Also return the serving changes the traces argue for (see 'Serving candidates'): for a vLLM server with serving_config. Fixed rules; the caller measures and decides.",
+      "required": [
+        "points"
+      ],
+      "properties": {
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]+:[0-9]+:[0-9]+$"
+          },
+          "description": "Every isl:osl:concurrency point the baseline was benchmarked at."
+        },
+        "capture_points": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]+:[0-9]+:[0-9]+$"
+          },
+          "description": "The points to capture a trace at, one load each (one per traffic regime, e.g. each regime's peak)."
+        },
+        "target_points": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]+:[0-9]+:[0-9]+$"
+          },
+          "description": "The points to optimize, as ISL:OSL:C: the ones the user chose from the baseline's measured points, or each regime's peak point when nobody chose. Candidates are ranked for these points' phase."
+        },
+        "target_phase": {
+          "type": "string",
+          "enum": [
+            "prefill",
+            "decode"
+          ],
+          "description": "The phase to optimize when the user named one (prefill for time to first token, decode for per-token latency or decode throughput). Omit it to optimize the phase that dominates the target points' time, which propose.py estimates from the captured step times."
+        },
+        "hf_config": {
+          "type": "string",
+          "description": "The model's config.json; fetched at the served revision when absent."
+        },
+        "hbm_gib_per_device": {
+          "type": "number"
+        },
+        "devices": {
+          "type": "integer"
+        },
+        "image": {
+          "type": "string",
+          "description": "The serving image's digest."
+        },
+        "ttft_sensitive": {
+          "type": "boolean",
+          "description": "False when the metric is throughput and no TTFT limit was stated."
+        },
+        "max_candidates": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3
+        }
+      }
     }
   },
   "examples": [

@@ -16,6 +16,7 @@
 from . import cli, lease, setup
 from .cli import (JOB_ACTIONS, SETUP_GUIDE, handle_compute_cli,
                   handle_config_cli)
+from .cli_parser import register_compute_parser, register_config_parser
 from .config import (describe_backends, describe_required_flags,
                      get_valid_backends, normalize_environment_profiles,
                      resolve_driver, resolve_profile_name,
@@ -23,11 +24,12 @@ from .config import (describe_backends, describe_required_flags,
 from .drivers import (DISCOVERY_ERRORS, DRIVER_REGISTRY,
                       AsynchronousExecutionResult, ComputeConfigError,
                       ComputeDriver, GceTpuVmDriver, GkeJobDriver,
-                      GkePodDriver, GkeXpkDriver, HardwareProfile, LocalDriver,
-                      SetupFields, StagedFile, SynchronousExecutionResult,
+                      GkePodDriver, HardwareProfile, LocalDriver, SetupFields,
+                      StagedFile, SynchronousExecutionResult,
                       describe_discovery_errors, get_discovery_errors,
                       get_driver, get_registered_driver_cli_flags,
                       get_registered_drivers, list_drivers, register_driver,
                       validate_field_format)
 from .drivers.jobs import reap_jobs
-from .setup import apply_setup, config_set, config_show, config_use
+from .setup import (apply_setup, config_remove, config_set, config_show,
+                    config_use)

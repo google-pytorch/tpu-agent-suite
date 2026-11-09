@@ -82,6 +82,50 @@
       "description": "Validates a subagent result against its produces schema."
     },
     {
+      "name": "require-foreground-launch",
+      "event": "PreToolUse",
+      "matchers": [
+        "delegate"
+      ],
+      "action": "builtin:track-background",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Refuses a background delegation from an agent that has no shell: headless, the child's report would never reach it."
+    },
+    {
+      "name": "track-background-work",
+      "event": "PostToolUse",
+      "matchers": [
+        "delegate",
+        "shell"
+      ],
+      "action": "builtin:track-background",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Records each background agent or command an agent launches, so a stop made while that work is still running can be told from a finished one.",
+      "action_level": {
+        "effect": "write",
+        "scope": "session",
+        "approval": "never"
+      }
+    },
+    {
+      "name": "background-ledger-cleanup",
+      "event": "SessionEnd",
+      "action": "builtin:track-background",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Drops the session's record of background launches once the session is over.",
+      "action_level": {
+        "effect": "delete",
+        "scope": "session",
+        "approval": "never"
+      }
+    },
+    {
       "name": "resume-after-quota",
       "event": "Stop",
       "action": "script:scripts/tpu-agent/resume_after_quota.py",

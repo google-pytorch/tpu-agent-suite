@@ -55,7 +55,8 @@ Prose units:
 - **Memory.** A block of text that the installer adds to the harness's memory
   file (`CLAUDE.md` or `AGENTS.md`). Because the harness loads that file into
   every session, a memory block reaches every conversation, not only the ones
-  that start a skill.
+  that start a skill. The compiler therefore opens each block by saying that
+  it applies only to the package's skills and their agents.
 
 Resources:
 
@@ -223,10 +224,11 @@ something different from what users install.
 These are our rules as of this writing, mostly due to the limitations imposed by
 one or more harnesses. We may relax these, if all the harnesses allow it.
 
-- **Delegation happens in the foreground.** A caller starts an agent, waits for
-  it to finish, and then reads what it wrote. Callers never poll for results.
-  Background delegation is not supported yet, because we do not know how a
-  caller should behave when a background agent dies or stalls.
+- **A caller reports only when its delegates have.** It may start an agent in
+  the foreground or the background, but it does not finish while a child or
+  command it launched is still running: on a run the harness will not resume,
+  the runtime's idle gate refuses the stop, names the live work, and tells the
+  caller to wait, or to stop the work and report the failure.
 - **At most three levels deep.** The compiler rejects a chain of delegation
   more than three levels below a released skill, rejects cycles, and rejects
   agents that nothing can reach.

@@ -4,7 +4,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "prompt"
+    "prompt",
+    "accelerator_type"
   ],
   "properties": {
     "prompt": {
@@ -13,6 +14,11 @@
     },
     "run_id": {
       "type": "string"
+    },
+    "accelerator_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The TPU type the onboarding targets: the accelerator label from tpu-agent's one `compute inspect` (`accelerator`, else `details.accelerator_type` or `details.tpu_accelerator`), e.g. tpu7x or tpu-v6e-slice, not the slice shape, which onboarding sizes itself. Onboarding compares generations, so tpu7x and v7x match. Required: when the probe finds none, tpu-agent asks the user rather than guessing from a profile, VM or cluster name."
     },
     "model": {
       "type": "object",
@@ -37,13 +43,14 @@
       "enum": [
         "benchmark",
         "inference",
-        "both"
+        "both",
+        "candidate"
       ],
-      "description": "Optional. Omit only when tpu-agent could not resolve the user's intent; tpu-model-onboarding cannot ask, so an unset mode is a question its caller still owes."
+      "description": "Optional. Omit only when tpu-agent could not resolve the user's intent; tpu-model-onboarding cannot ask, so an unset mode is a question its caller still owes. `candidate` is set only by tpu-agent's optimization-heuristics round: serve and benchmark a serving candidate tpu-diagnostics proposed, the way the baseline was, and compare the two (tpu-model-onboarding's Measuring a serving candidate)."
     },
     "compute_target": {
       "type": "string",
-      "description": "Optional compute runtime target (local, tpu-vm, gke-xpk)."
+      "description": "Optional compute runtime target (e.g. local, tpu-vm, gke-job)."
     },
     "servers": {
       "type": "array",
@@ -80,19 +87,29 @@
     "checkpoint_bucket": {
       "type": "string",
       "pattern": "^gs://",
-      "description": "Optional gs:// bucket for shared checkpoints: onboarding stages a Hugging Face model there once (stage_checkpoint.py) and every job reads it from GCS instead of the Hub. On gke_job the pods must be able to read it (a pod_service_account, or the profile's own staging_bucket); otherwise, and by default, onboarding stages into the profile's staging_bucket."
+      "description": "Optional gs:// bucket for shared checkpoints: onboarding stages a Hugging Face model or local checkpoint directory there once (stage_checkpoint.py) and every job reads it from GCS instead of the Hub. On gke_job the pods must be able to read it (a pod_service_account, or the profile's own staging_bucket); otherwise, and by default, onboarding stages into the profile's staging_bucket."
     }
   },
   "examples": [
     {
       "prompt": "Benchmark meta-llama/Llama-3.1-8B-Instruct on TPU against CPU.",
       "run_id": "20260923T120000Z-000000000000",
+      "accelerator_type": "tpu7x",
       "model": {
         "model_id": "meta-llama/Llama-3.1-8B-Instruct",
         "task": "text-generation"
       },
       "mode": "benchmark",
       "compute_target": "tpu-vm"
+    },
+    {
+      "prompt": "Measure serving candidate m-tp2xdp4 against the baseline: serve /workspace/optimization-heuristics/changes/m-tp2xdp4/deployments.json, benchmark it with the baseline's bench_request at the baseline's points, and compare with the baseline summaries /workspace/bench/baseline_summary.json. Candidates: /workspace/optimization-heuristics/candidates.json.",
+      "run_id": "20260923T120000Z-000000000000",
+      "model": {
+        "model_id": "google/gemma-4-31B-it"
+      },
+      "accelerator_type": "tpu7x",
+      "mode": "candidate"
     }
   ]
 }

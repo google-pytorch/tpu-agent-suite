@@ -12,39 +12,57 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Onboarding Definition of Done (items 1-4): a vLLM server on TPU, a coherent
-# completion over HTTP, measured baseline benchmark sweeps across the required ISL/OSL
-# regimes (1k/1k, 8k/1k), and commands/artifacts to reproduce the result.
-# all-pass: every criterion must pass, so this dimension is 0 or 1.
+# Scoring framework: the onboarding half of the instruction's definition
+# of done (items 1-5): a vLLM server on TPU, a coherent completion
+# over HTTP, the measured baseline benchmark tables, and the
+# commands to reproduce the baseline. all-pass: every criterion must pass,
+# so this dimension is 0 or 1.
 
 [judge]
 judge = "vertex_ai/gemini-3.8-flash"
+reasoning_effort = "high"
 atif-trajectory = "/logs/agent/trajectory.json"
+# Read top-level files from the specialist artifact directories staged under
+# /logs/artifacts/ (falling back to top-level /logs/artifacts only when no
+# specialist artifact directory is used).
+files = [
+  "/logs/artifacts/tpu-model-onboarding",
+  "/logs/artifacts/tpu-diagnostics",
+  "/logs/artifacts/tpu-kernel-development",
+  "/logs/artifacts/tpu-performance-optimization",
+  "/logs/artifacts",
+]
 timeout = 600
 
 [[criterion]]
 name = "vllm_server_on_tpu"
 type = "binary"
 weight = 1.0
-description = "Definition of done 1: a vLLM server serving openai/gpt-oss-20b ran on TPU hardware (the TPU type and topology the run was configured for: GKE_TPU_ACCELERATOR and GKE_TPU_TOPOLOGY in the agent's environment), using torch_tpu. Fails if the model was served by anything other than vLLM (a standalone inference script, a toy HTTP wrapper such as FastAPI, http.server or Flask, or an unbatched single-stream loop), if it used torch_xla / pytorch_xla or the tpu-inference repo, or if it ran anywhere other than on TPU. It must appear in tool output in the trajectory; the agent's own claim or its final report alone does not count. Cite the Step IDs of the vLLM launch and of the output showing it serving on TPU."
+description = "Definition of done 1: a vLLM server serving required model ran on TPU hardware (the TPU type and topology the run was configured for, whatever generation: GKE_TPU_ACCELERATOR and GKE_TPU_TOPOLOGY in the agent's environment), using torch_tpu. Fails if the model was served by anything other than vLLM (a standalone inference script, a toy HTTP wrapper such as FastAPI, http.server or Flask, or an unbatched single-stream loop), if it used torch_xla / pytorch_xla or the tpu-inference repo, or if it ran anywhere other than on TPU. It must appear in tool output in the trajectory, and the attached artifact files must record it; the agent's own claim or its final report alone does not count. Cite the Step IDs of the vLLM launch and of the output showing it serving on TPU."
 
 [[criterion]]
 name = "completion_over_http"
 type = "binary"
 weight = 1.0
-description = "Definition of done 2: the vLLM server for openai/gpt-oss-20b answered a completion request over HTTP with coherent output: text that follows from the prompt, not an empty completion, garbage, a run of repeated tokens or punctuation, or an error. Both the request and the response must be shown. It must appear in tool output in the trajectory; the agent's own claim or its final report alone does not count. Cite the Step IDs and quote the request and the response."
+description = "Definition of done 2: the vLLM server for required model answered a completion request over HTTP with coherent output: text that follows from the prompt, not an empty completion, garbage, a run of repeated tokens or punctuation, or an error. Both the request and the response must be shown. It must appear in tool output in the trajectory, and the attached artifact files must record it; the agent's own claim or its final report alone does not count. Cite the Step IDs and quote the request and the response."
 
 [[criterion]]
 name = "baseline_benchmarks_reported"
 type = "binary"
 weight = 1.0
-description = "Definition of done 3: the vLLM server for openai/gpt-oss-20b was benchmarked over HTTP with a serving benchmark using random fixed-length prompts that generate their output length, across the required ISL/OSL combinations (1k/1k, 8k/1k; plus 1k/8k if requested in the prompt), each with a concurrency sweep (1, 2, 4, ... doubling until throughput gains fall under 10% or requests fail), and the measured numbers (TTFT, ITL, output throughput) are reported in a markdown table or recorded in benchmark tool outputs in the trajectory (including runs that measured the required regimes in tool output before hitting a wall-clock timeout). A combination or concurrency that could not run passes if it is documented in the failure table or trajectory rather than silently dropped. Fails if numbers are estimated, invented, or have no matching benchmark run in the trajectory. Cite the Step IDs of the benchmark runs and quote the peak throughput for each ISL/OSL combination."
+description = "Definition of done 3: the baseline vLLM server for required model was benchmarked over HTTP with a serving benchmark using random fixed-length prompts that generate exactly their output length, on both ISL/OSL combinations (1k/1k, 8k/1k), each with a concurrency sweep (1, 2, 4, ... doubling until throughput gains fall under 10% or requests fail), and the measured numbers are reported in a markdown table with one row per (ISL/OSL, concurrency) point (TTFT, ITL, output throughput). A combination or concurrency that could not run passes if it is in the failure table rather than dropped. The table must be saved in the attached artifact files, and every number in it must match benchmark output in the trajectory; fails if numbers are estimated, invented, or have no matching benchmark run. Cite the Step IDs of the benchmark runs and quote the peak throughput for each ISL/OSL combination."
 
 [[criterion]]
 name = "baseline_reproduce_commands"
 type = "binary"
 weight = 1.0
-description = "Definition of done 4: the agent gave the exact commands, scripts, or manifests to reproduce the result from scratch (deploying the vLLM server for openai/gpt-oss-20b on TPU and running the benchmark suite), and they match what it actually ran in the trajectory. Fails if no commands/scripts were created or given, or they differ from what was run. Cite the Step IDs."
+description = "Definition of done 4: the agent gave the exact commands to reproduce the baseline from scratch (deploying the vLLM server for required model on TPU and running the baseline benchmark suite), and they match what it actually ran in the trajectory. They must be saved in the attached artifact files. Fails if no commands were given, or they are incomplete or differ from what was run. Cite the Step IDs."
+
+[[criterion]]
+name = "no_stale_servers"
+type = "binary"
+weight = 1.0
+description = "By the end of the run, every job the agent started on the cluster was cancelled or had finished: failed server attempts, check and benchmark jobs, and the final server. Each must show a cancel or a terminal status in tool output in the trajectory, and each row of job_log.md (attached) must have an end time. Fails if any server job the agent started is left running at the end, or if the job log is missing jobs the trajectory shows were started. Cite the Step IDs of each cancel."
 
 [scoring]
 aggregation = "all-pass"

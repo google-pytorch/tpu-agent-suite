@@ -1,4 +1,4 @@
-.PHONY: help build build-experimental verify-experimental dist archives verify validate-kb lint coverage coverage-html coverage-diff test test-all test-framework test-package test-knowledge-base test-scripts clean
+.PHONY: help build build-experimental verify-experimental dist archives verify validate-kb lint coverage coverage-html coverage-diff test test-all test-framework test-package test-knowledge-base test-scripts test-e2e clean
 
 PYTHON ?= python3
 COVERAGE_RC := .coveragerc
@@ -32,6 +32,7 @@ help:
 	@echo "  test-package        Run package translation, parity, and lint tests only"
 	@echo "  test-knowledge-base Run the tpu-knowledge-base index resolve and search tests only"
 	@echo "  test-scripts        Run companion *_test.py suites (local only; needs extra deps)"
+	@echo "  test-e2e            Run live harness CLI tests (needs claude/agy/cursor/codex on PATH)"
 	@echo ""
 	@echo "Coverage targets (need: pip install coverage diff-cover):"
 	@echo "  coverage-html   Coverage plus a browsable HTML report"
@@ -110,10 +111,19 @@ test-knowledge-base:
 # dependency, so discovering the whole directory errors on collection rather
 # than skipping. Install harbor and run the directory directly to get those as well.
 test-eval:
+	$(PYTHON) -m unittest discover -s eval/tests -p "test_antigravity_session_supervisor.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_attention_analyze.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_claude_session_supervisor.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_invoked_subagent.py" -v
+	$(PYTHON) -m unittest discover -s eval/tests -p "test_cpu_batch_verifier.py" -v
 
+
+# Live harness CLI tests. Each test skips itself when its binary is absent,
+# so this is safe to run with only some harnesses installed -- but a run
+# that skips everything still exits 0, so check the skip count before
+# trusting a green result.
+test-e2e:
+	RUN_HARNESS_CLI_E2E=1 $(PYTHON) -m unittest framework.tests.test_hooks_e2e -v
 
 test-scripts:
 	@fail=0; for f in $$(find package -name '*_test.py' | sort); do \

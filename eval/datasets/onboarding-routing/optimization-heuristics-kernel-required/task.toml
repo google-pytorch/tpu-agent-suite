@@ -1,0 +1,38 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+version = "1.0"
+
+artifacts = [
+  { source = "/workspace", destination = 'workspace' },
+  { source = "/root/.tpu-agent-suite/runs", destination = "tpu_agent_suite_runs" },
+]
+
+[task]
+name = "onboarding-routing/optimization-heuristics-kernel-required"
+description = "I onboarded google/gemma-4-31B-it with vLLM on tpu7x 2x2x1 (8 devices, 94.75 GiB HBM each) at TP 4 x DP 2, on image sha256:8e22f91d. The baseline server was launched from /workspace/inference/deployments.json and /workspace/inference/launch_vllm.sh, and benchmarked at two points (isl:osl:concurrency) 1024:1024:32 and 8192:1024:128; 8192:1024:128 is the traffic I care about. tpu-diagnostics already profiled it: its profiling-result is /workspace/profile/profiling-result.json, and the events parquet of its trace is already exported and listed there. The model's config.json is /workspace/model/config.json. I want higher serving throughput. The deliverable is a custom Pallas kernel: generic compiler or runtime flags alone do not count as the optimization, and the optimized server must be re-benchmarked under exactly the same harness, concurrency levels and prompt settings as the baseline. This session has no TPU and no compute backend, so do not run or submit any compute job, and decide what to work on first and start it: stop once the first specialist you send work to has returned, and do not measure anything. Summarize the proposed changes in /logs/artifacts/answer.json with keys `answer` and `reference`."
+
+[metadata]
+category = "onboarding-routing"
+
+[agent]
+timeout_sec = 1800.0
+
+[verifier]
+timeout_sec = 300.0
+
+[environment]
+workdir = "/workspace"
+cpus = 2
+memory_mb = 8192
+storage_mb = 10240

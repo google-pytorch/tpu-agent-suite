@@ -74,8 +74,8 @@ Every claim the agents make about TPUs must cite something a reader can check.
 - **tpu-knowledge-base ships with every install.** Its index maps keywords to
   public URLs, along with the prompts and templates it uses to answer. The
   index and cached pages live under `data/tpu-knowledge-base/`. A memory block
-  tells every session to ask tpu-knowledge-base for TPU facts rather than answer
-  from memory.
+  tells every session doing the suite's work to ask tpu-knowledge-base for TPU
+  facts rather than answer from memory.
 - **The citation comes from a live fetch.** tpu-knowledge-base fetches one page
   during the session and cites that URL. The failure it exists to prevent is a
   URL the model recalls from memory without fetching it, which may be wrong or

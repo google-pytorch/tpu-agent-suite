@@ -19,7 +19,7 @@ enforces the package's contracts while its agents run.
 - The **runtime** ships inside every build and runs during agent sessions. It
   can see each request and result as it happens.
 - **Compute** gives every agent one family of commands, `compute …`, that works
-  the same way on five different backends.
+  the same way across four built-in backends (plus external drivers).
 
 ## Why a framework
 
@@ -63,7 +63,9 @@ and obvious on the user's machine.
 
 ## Compiler
 
-`compiler.py` runs in CI and on the author's machine. It has five commands:
+`compiler.py` runs in CI and on the author's machine. The file is the
+command-line entry point; the build behind it lives in `framework/builder/`.
+It has five commands:
 
 - **`compose`** prints the manifest together with everything the compiler
   discovered from it. Use it to see exactly what a build will contain.
@@ -150,8 +152,9 @@ are kept there rather than repeated here.
 | Cursor | `.cursor/rules/<package>.mdc` and `skills/`; the rule file inlines each skill that delegates | `Task` | `.cursor/hooks.json` |
 
 - Tool names and hook event names for each harness live in two tables,
-  `tool-mappings.json` and `event-mappings.json`. The list of supported
-  harnesses is derived from them rather than repeated in code.
+  `tool-mappings.json` and `event-mappings.json`. Each harness has one
+  adaptor module under `framework/harnesses/`; a test keeps the adaptors
+  and the tables naming the same harnesses.
 - Each harness has a parity test suite. It checks that every prose unit is
   built, that every prompt has its execution contract, and that no token is
   left unreplaced.

@@ -8,8 +8,6 @@ it got there.
 
 ## Tasks
 
-### Onboarding (`onboarding-*`)
-
 One task per model. The brief, the image and the verifier are identical
 across all four; the model is the variable, so "size the topology yourself"
 has more than one right answer and a run that hardcodes a slice stops
@@ -22,23 +20,15 @@ scoring.
 | [`onboarding-mistral-small-24b`](./onboarding-mistral-small-24b/) | `mistralai/Mistral-Small-24B-Instruct-2501` | 24B dense | no | yes |
 | [`onboarding-gpt-oss-20b`](./onboarding-gpt-oss-20b/) | `openai/gpt-oss-20b` | 20.2B / 4B MoE | no | yes |
 
-### Onboarding + Kernel Optimization (`tpu-inference-*-vllm`)
-
-End-to-end tasks that require both onboarding a model onto `torch_tpu` + vLLM
-and optimizing its serving throughput by profiling with XProf, authoring and
-autotuning a custom Pallas kernel, integrating it into vLLM, and re-running
-the full serving benchmark sweep.
-
-| Task | Model | Params | Gated |
-| :--- | :--- | :--- | :--- |
-| [`tpu-inference-gemma-4-31b-it-vllm`](./tpu-inference-gemma-4-31b-it-vllm/) | `google/gemma-4-31B-it` | 31B dense | no |
-| [`tpu-inference-gpt-oss-20b-vllm`](./tpu-inference-gpt-oss-20b-vllm/) | `openai/gpt-oss-20b` | 20.2B / 4B MoE | no |
-| [`tpu-inference-qwen3-8-27b-vllm`](./tpu-inference-qwen3-8-27b-vllm/) | `Qwen/Qwen3.8-27B` | 27B dense | no |
+Combined onboarding and kernel-optimization tasks (`tpu-inference-*-vllm`) live
+in [`tpu-inference-vllm`](../tpu-inference-vllm/), while kernel optimization on
+an already-onboarded server lives in
+[`nightly-close-gaps`](../nightly-close-gaps/).
 
 The model catalogue lives in
 [`hf-onboarding-torchtpu/README.md`](../hf-onboarding-torchtpu/README.md) --
 categories, target slices, recommended TP and gating for every model in scope.
-The five here are a subset of it, not a second list.
+The four here are a subset of it, not a second list.
 
 Gating is per-account and manual for the marked model: the token in use has
 `canReadGatedRepos`, so a 403 there means the account has not accepted that
@@ -65,12 +55,12 @@ is a control arm and installs nothing.
 - **`HF_TOKEN`** -- required for the gated models, ignored by the rest. The
   gated tasks declare `required_env = ["HF_TOKEN"]` under `[metadata]`. When
   it is unset *or empty* on the host, `run.py` drops those tasks from a
-  dataset run (announced on stderr and in the GitHub step summary) so the
-  rest still run, and refuses a task named alone with `--task`. A missing CI
-  secret arrives as `""`, which `${HF_TOKEN:-}` forwards unchanged, and the
+  dataset run (announced on stderr) so the rest still run, and refuses a task
+  named alone with `--task`. A missing CI secret arrives as `""`, which `${HF_TOKEN:-}` forwards unchanged, and the
   trial would otherwise end at the first 401 inside the pod.
 - The image is built from each task's `environment/Dockerfile`: the
-  `torchtpu-vllm-dev` nightly plus node, git and tokamax. Harbor's GKE path
+  `nexus-host` image (`eval/images/nexus-host`), pinned by digest, plus
+  openssh-client, transformers, absl-py and pytest. Harbor's GKE path
   never reads `task.toml`'s `docker_image` (`run.py:286`), so no image is
   pinned there.
 - The tasks need a real v6e or v7 slice. Export the `GKE_*` variables for the

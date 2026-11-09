@@ -20,7 +20,7 @@
 #
 # After a rebuild, re-pin every task to the new digest (`git grep nexus-host@sha256`).
 #
-# This image is built by .github/workflows/host-image.yml and pushed to:
+# This image is built in CI and pushed to:
 #   us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host:latest
 # To build it yourself, run from the repository root:
 #   docker build -f eval/images/nexus-host/Dockerfile -t nexus-host package

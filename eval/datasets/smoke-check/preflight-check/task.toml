@@ -36,3 +36,6 @@ cpus = 2
 memory_mb = 8192
 storage_mb = 10240
 build_timeout_sec = 900.0
+
+[environment.env]
+TASK_AGENT_PERSONA = "tpu-model-onboarding"

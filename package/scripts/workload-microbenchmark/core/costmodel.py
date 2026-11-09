@@ -604,8 +604,9 @@ def compare(cells: dict[str, dict], base: dict[str, Any], cand: dict[str, Any],
     by_class_delta   seconds each class saved (+) or cost (-), and its share of the net change
     guardrails       the heaviest decode cell (typical TPOT) and every mixed cell (TTFT and the
                      TPOT tail: decodes wait through them), each base vs cand
-    served_gain      MODELLED: the job's output tok/s if its busy time shrank by `speedup` and
-                     its idle (client think) time stayed: (busy + idle) / (busy / speedup + idle)
+    served_gain      MODELLED: the job's output tok/s if its covered busy time shrank by `speedup`,
+                     unmeasured busy time stayed at 1.0x, and idle (client think) time stayed:
+                     (busy + idle) / (busy * (covered_share / speedup + 1 - covered_share) + idle)
     significant      |speedup - 1| beats the largest of the arms' repeat spreads and, on the
                      served basis, their profile spreads (`profile_spread`)
     """
@@ -659,11 +660,16 @@ def compare(cells: dict[str, dict], base: dict[str, Any], cand: dict[str, Any],
                           (base.get("profile_spread") or {}).get("spread_pct"),
                           (cand.get("profile_spread") or {}).get("spread_pct"),
                           0.0) if x is not None)
-    gain = ((busy_s + idle_s) / (busy_s / sp + idle_s)
-            if sp and busy_s and idle_s is not None else None)
+    cov = min(1.0, max(0.0, sum(cells[n]["share"] for n in both)))
+    gain = None
+    if sp and cov > 0 and busy_s and idle_s is not None:
+        busy_after = busy_s * (cov / sp + (1.0 - cov))
+        gain = (busy_s + idle_s) / (busy_after + idle_s)
     return {
         "cells_compared":
         len(both),
+        "covered_share":
+        round(cov, 4),
         "t_mix_base_s":
         round(tb, 4),
         "t_mix_cand_s":
@@ -695,6 +701,6 @@ def compare(cells: dict[str, dict], base: dict[str, Any], cand: dict[str, Any],
         "served_output_gain_modelled":
         round(gain, 4) if gain else None,
         "served_gain_rule":
-        "(busy + idle) / (busy / speedup + idle), the job's measured busy "
-        "and idle; modelled, not measured"
+        "(busy + idle) / (busy * (covered_share / speedup + 1 - covered_share) + idle), "
+        "the job's measured busy and idle; modelled, not measured"
     }

@@ -1,0 +1,4 @@
+Onboard and verify inference for the model `Qwen/Qwen3-0.6B` on TPU using the inference workflow (`torch-tpu-inference`) in verification mode (quick set up and tear down). Run `onboarding_preflight.py` directly on the TPU node without `--cpu-requests`, and skip numerical parity (`capture_parity.py` / `compare_parity.py`) since the model is unmodified (`STATUS: COMPATIBLE`). Deploy the model with the `vllm` inference engine (not `custom_fastapi`), using a single replica (`tensor_parallel_size: 1`, `data_parallel_size: 1`, `--tp 1`), `max_model_len: 256`, and `max_num_seqs: 4`, and skipping GCS checkpoint staging (`stage_checkpoint.py`) so XLA compilation and startup complete quickly. Proceed without checking in. Accept all suggested defaults and do not stop to confirm the plan.
+
+Important execution instructions:
+- Proceed without checking in; do not stop or wait for user confirmation before executing on TPU.

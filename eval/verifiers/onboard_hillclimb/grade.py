@@ -54,16 +54,17 @@ def _find_repo_root() -> Path:
 
 
 _REPO_ROOT = _find_repo_root()
-_NIGHTLY_DIR = _REPO_ROOT / "eval" / "datasets" / "nightly-onboard-optimize"
+_TPU_INFERENCE_DIR = _REPO_ROOT / "eval" / "datasets" / "tpu-inference-vllm"
 _NIGHTLY_TASK_TESTS: Dict[str, Path] = {
-    "gemma": _NIGHTLY_DIR / "tpu-inference-gemma-4-31b-it-vllm" / "tests",
-    "gpt-oss": _NIGHTLY_DIR / "tpu-inference-gpt-oss-20b-vllm" / "tests",
-    "qwen": _NIGHTLY_DIR / "tpu-inference-qwen3-8-27b-vllm" / "tests",
+    "gemma":
+    _TPU_INFERENCE_DIR / "tpu-inference-gemma-4-31b-it-vllm" / "tests",
+    "gpt-oss": _TPU_INFERENCE_DIR / "tpu-inference-gpt-oss-20b-vllm" / "tests",
+    "qwen": _TPU_INFERENCE_DIR / "tpu-inference-qwen3-8-27b-vllm" / "tests",
 }
 
 UUID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-DEFAULT_DOWNLOAD_DIR = Path("/tmp/harbor_jobs")
+DEFAULT_DOWNLOAD_DIR = Path.home() / ".cache" / "harbor_jobs"
 DEFAULT_EXPORT_DIR = _REPO_ROOT / "jobs"
 
 DEFAULT_VERIFIERS = [
@@ -354,10 +355,9 @@ def resolve_verifiers_dir(model_name: Optional[str] = None,
     return _NIGHTLY_TASK_TESTS["gemma"]
 
 
-def _is_agent_suite_trial(workspace_dir: Optional[Path]) -> bool:
-    if workspace_dir is None:
+def _is_agent_suite_trial(trial_dir: Optional[Path]) -> bool:
+    if trial_dir is None:
         return False
-    trial_dir = workspace_dir.parent if workspace_dir.name == "workspace" else workspace_dir
     manifest = trial_dir / "artifacts" / "manifest.json"
     if manifest.is_file():
         try:
@@ -440,15 +440,13 @@ def stage_verifier_tests(
     staged_artifacts.mkdir(parents=True, exist_ok=True)
 
     if workspace_dir is not None:
-        trial_root = (workspace_dir.parent
-                      if workspace_dir.name == "workspace" else workspace_dir)
         for rel in (
                 "artifacts/logs/artifacts",
                 "artifacts/workspace_logs_artifacts",
                 "artifacts",
                 "logs/artifacts",
         ):
-            cand_art = trial_root / rel
+            cand_art = workspace_dir / rel
             if not cand_art.is_dir():
                 continue
             for child in cand_art.iterdir():
@@ -518,14 +516,14 @@ def stage_verifier_tests(
                                  f'judge = "{judge_model}"', content)
             judge_file.write_text(content, encoding="utf-8")
 
-        vtc_file = dst / "valid_tool_calls.py"
-        if vtc_file.exists():
-            vtc_content = vtc_file.read_text(encoding="utf-8")
-            vtc_file.write_text(
-                vtc_content.replace('"/logs/', f'"{logs_str}/').replace(
-                    '"/tests/', f'"{tests_str}/'),
-                encoding="utf-8",
-            )
+        if v == "efficiency":
+            for py_file in dst.glob("*.py"):
+                py_content = py_file.read_text(encoding="utf-8")
+                py_file.write_text(
+                    py_content.replace('"/logs/', f'"{logs_str}/').replace(
+                        '"/tests/', f'"{tests_str}/'),
+                    encoding="utf-8",
+                )
 
         inv_check_file = dst / "check.py"
         if v == "invoked_subagent" and inv_check_file.exists():
@@ -604,6 +602,9 @@ def compute_reward_diff(original: Dict[str, Any],
         "onboarding_success",
         "hillclimb_success",
         "efficiency",
+        "trajectory_score",
+        "valid_tool_calls",
+        "framework_directed_penalty",
         "cheating",
         "invoked_subagent",
     ]
@@ -648,7 +649,9 @@ def format_reward_diff(diff: Dict[str, Dict[str, Any]]) -> str:
         "onboarding_success",
         "hillclimb_success",
         "efficiency",
+        "trajectory_score",
         "valid_tool_calls",
+        "framework_directed_penalty",
         "optimization_steps",
         "cheating",
         "cheating_outcome",
@@ -701,8 +704,6 @@ def regrade_trial(
                       else model_name)
     verifiers_dir = resolve_verifiers_dir(resolved_model, trial_dir)
     trajectory_path = find_trajectory_file(trial_dir)
-    workspace_dir = trial_dir / "workspace" if (
-        trial_dir / "workspace").exists() else trial_dir
     verifier_dir = trial_dir / "verifier"
 
     trial_title = f"'{trial_dir.name}'" if total_trials == 1 else f"trial {trial_index}/{total_trials} ('{trial_dir.name}')"
@@ -746,7 +747,7 @@ def regrade_trial(
             model_name=resolved_model,
             judge_model=judge_model,
             verifiers_dir=verifiers_dir,
-            workspace_dir=workspace_dir,
+            workspace_dir=trial_dir,
             logs_dir=staged_logs,
         )
 
@@ -1079,6 +1080,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help=
         f"Comma-separated verifiers (Available: {','.join(AVAILABLE_VERIFIERS)})"
     )
+    parser.add_argument(
+        "--download-dir",
+        type=Path,
+        default=DEFAULT_DOWNLOAD_DIR,
+        help="Directory to search for or download Harbor jobs into.",
+    )
     parser.add_argument("--verbose",
                         "-v",
                         action="store_true",
@@ -1099,15 +1106,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         log_step(1, f"Using job at '{job_dir}' for regrade")
     elif job_id:
         job_dir = locate_local_job_dir(
-            job_id, [DEFAULT_DOWNLOAD_DIR, _REPO_ROOT / "jobs"])
+            job_id, [args.download_dir, _REPO_ROOT / "jobs"])
         if job_dir:
             log_step(1, f"Using existing local job at '{job_dir}' for regrade")
         else:
             log_step(
                 1,
-                f"Downloading job '{job_id}' from Harbor platform into {DEFAULT_DOWNLOAD_DIR}"
+                f"Downloading job '{job_id}' from Harbor platform into {args.download_dir}"
             )
-            job_dir = download_job(job_id, DEFAULT_DOWNLOAD_DIR)
+            job_dir = download_job(job_id, args.download_dir)
     else:
         print(
             f"Error: Target '{target}' is not an existing path and contains no valid UUID.",

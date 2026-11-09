@@ -149,6 +149,73 @@ class StepMix(unittest.TestCase):
             mix.build({"requests": [], "step_slices": None}, self.D)
 
 
+class DecodeClasses(unittest.TestCase):
+    """The decode classes follow from the job: tokens per request (1 + MTP k) and mns."""
+    EDGES = ["1.0", "8.0", "16.0", "32.0", "512.0", "+Inf"]
+
+    @staticmethod
+    def _deploy(spec_tokens, mns):
+        return Deploy(tp=8,
+                      mnbt=4096,
+                      mns=mns,
+                      spec_method="mtp" if spec_tokens else None,
+                      spec_tokens=spec_tokens)
+
+    def _classes(self, spec_tokens, mns):
+        from core import mix
+        return [(n, lo, hi, bins) for n, lo, hi, bins in mix.decode_classes(
+            self.EDGES, self._deploy(spec_tokens, mns))]
+
+    def test_mtp3_mns8_is_the_reference_split(self):
+        # the <=1-token bin holds no whole 4-token request: it joins D1-2
+        self.assertEqual(self._classes(3, 8), [("D1-2", 1, 2, [0, 1]),
+                                               ("D3-4", 3, 4, [2]),
+                                               ("D5-8", 5, 8, [3])])
+
+    def test_no_mtp_counts_one_token_per_request(self):
+        self.assertEqual(self._classes(0, 8), [("D1", 1, 1, [0]),
+                                               ("D2-8", 2, 8, [1])])
+
+    def test_more_running_requests_add_classes(self):
+        self.assertEqual([c[0] for c in self._classes(3, 16)],
+                         ["D1-2", "D3-4", "D5-8", "D9-16"])
+        self.assertEqual([c[0] for c in self._classes(0, 64)],
+                         ["D1", "D2-8", "D9-16", "D17-32", "D33-64"])
+
+    def test_no_mtp_mix_reads_batch_from_the_right_bin(self):
+        # 0-99 s: four requests decoding without MTP, 25 steps/s of 4 tokens (bin <=8)
+        from core import mix
+        rows = [[t, 0, 25, 0, 0, 0, 0, 4, 4, 4.0] for t in range(100)]
+
+        def req(c):
+            return {
+                "conv": c,
+                "turn": 1,
+                "kind": "main",
+                "phase": "profiling",
+                "t0": 0.0,
+                "t1": 100.0,
+                "ttft_ms": 1.0,
+                "isl": 1000,
+                "osl": 2500,
+                "error": False
+            }
+
+        m = mix.build(
+            {
+                "step_slices": {
+                    "edges": self.EDGES,
+                    "rows": rows
+                },
+                "requests": [req(c) for c in "abcd"]
+            }, self._deploy(0, 8))
+        self.assertEqual(m["steps"], {"D1": 0, "D2-8": 2500, "mixed": 0})
+        dec = [c for c in m["cells"] if c["kind"] == "decode"]
+        self.assertTrue(dec and all(c["class"] == "D2-8" for c in dec))
+        batch = sum(c["batch"] * c["steps"] for c in dec) / 2500
+        self.assertAlmostEqual(batch, 4.0, places=2)  # MTP-4 rule would say 1
+
+
 class MixPlan(unittest.TestCase):
     D = StepMix.D
 

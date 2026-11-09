@@ -47,16 +47,6 @@ def credential_refused(proc: subprocess.CompletedProcess[str]) -> bool:
         REFUSED_PATTERN.search(proc.stderr or ""))
 
 
-def active_gcloud_account() -> str:
-    """The active gcloud account, or "" if there is none."""
-    proc = base.probe_run([
-        "gcloud", "auth", "list", "--filter=status:ACTIVE",
-        "--format=value(account)"
-    ])
-    lines = proc.stdout.strip().splitlines() if proc.returncode == 0 else []
-    return lines[0].strip() if lines else ""
-
-
 def adc_token() -> tuple[str, str]:
     """An ADC access token and "", or "" and why there is none."""
     proc = base.probe_run(
@@ -108,7 +98,7 @@ def access_denied(adc: str,
                   context: str | None = None,
                   kubeconfig: str | None = None) -> ClusterAccessDenied:
     """The error for a cluster that refused the gcloud account and ADC."""
-    account = active_gcloud_account()
+    account = base.active_gcloud_account()
     identities = [
         f"the gcloud account {account}"
         if account else "gcloud (no active account)", adc
@@ -210,7 +200,7 @@ def adc_fallback_check(driver: Any,
     """A warning when the cluster refused the gcloud account but let ADC in."""
     if not getattr(driver, "using_adc", False):
         return []
-    account = active_gcloud_account()
+    account = base.active_gcloud_account()
     context = base.current_context(kubectl) or None
     return [
         PreflightCheck(

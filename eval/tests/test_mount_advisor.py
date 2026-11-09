@@ -205,6 +205,65 @@ class TestSkillMountAdvisor(unittest.TestCase):
         self.assertEqual(updates.mounts, advisor.get_mounts())
         self.assertEqual(updates.env, advisor.get_container_env())
 
+    def _user_scope(self, harness: str) -> SkillMountAdvisor:
+        for name in (".claude", ".agents", ".tpu-agent-suite"):
+            (self.staged_ws / name).mkdir(exist_ok=True)
+        (self.staged_ws / "CLAUDE.md").write_text("# project memory")
+        (self.staged_ws / "AGENTS.md").write_text("# project memory")
+        dist = Path(self.tmp_dir.name) / "dist"
+        dist.mkdir(exist_ok=True)
+        answers = Path(self.tmp_dir.name) / "answers.json"
+        answers.write_text("{}")
+        return SkillMountAdvisor(
+            staged_workspace=self.staged_ws,
+            harness=harness,
+            central_pkg_dir=self.central_dir,
+            user_scope=True,
+            staged_dist=dist,
+            answers_file=answers,
+        )
+
+    def test_user_scope_mounts_what_the_installer_reads(self) -> None:
+        """A user-scope arm installs in the trial: it gets the distribution
+        and its answers, never the result of a host-side install."""
+        for harness in ("claude-code", "antigravity", "codex"):
+            with self.subTest(harness=harness):
+                mounts = self._user_scope(harness).get_mounts()
+                targets = {m["target"]: m for m in mounts}
+                self.assertTrue(
+                    targets["/opt/tpu-agent-suite/dist"]["read_only"])
+                self.assertTrue(
+                    targets["/opt/tpu-agent-suite/answers.json"]["read_only"])
+                for staged in (
+                        "/workspace/.claude",
+                        "/workspace/CLAUDE.md",
+                        "/workspace/.agents",
+                        "/workspace/AGENTS.md",
+                        "/root/.agents",
+                        "/workspace/.tpu-agent-suite",
+                        "/root/.tpu-agent-suite/packages/tpu-agent-suite@0.1.0",
+                ):
+                    self.assertNotIn(staged, targets)
+
+    def test_user_scope_keeps_the_session_supervisor(self) -> None:
+        targets = {
+            m["target"]
+            for m in self._user_scope("claude-code").get_mounts()
+        }
+        self.assertIn("/usr/local/bin/claude_session_supervisor_hook.sh",
+                      targets)
+
+    def test_user_scope_without_a_distribution_fails_loudly(self) -> None:
+        advisor = SkillMountAdvisor(
+            staged_workspace=self.staged_ws,
+            harness="claude-code",
+            user_scope=True,
+            staged_dist=Path(self.tmp_dir.name) / "missing",
+            answers_file=Path(self.tmp_dir.name) / "missing.json",
+        )
+        with self.assertRaises(FileNotFoundError):
+            advisor.get_mounts()
+
 
 if __name__ == "__main__":
     unittest.main()

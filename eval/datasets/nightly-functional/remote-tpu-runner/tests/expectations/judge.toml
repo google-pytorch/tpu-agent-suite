@@ -13,25 +13,19 @@
 # limitations under the License.
 
 [judge]
-judge = "vertex_ai/gemini-3.5-flash"
+judge = "vertex_ai/gemini-3.8-flash"
 atif-trajectory = "/logs/agent/trajectory.json"
 timeout = 600
 
 [[criterion]]
-description = "Profiles the TPU hardware on the remote GKE cluster rather than the local agent container."
+description = "Verifies the remote GKE TPU cluster configuration and sizes the accelerator hardware (using runtime.py config show and tpu-knowledge-base following hardware_profiling.md, or via compute inspect) rather than inspecting only the local agent container."
 type = "binary"
 weight = 1.0
 
 [[criterion]]
-description = "Reports the TPU hardware profile returned by the cluster."
+description = "Verifies that TPU hardware is configured/present on the cluster (chips > 0 and job_devices > 0; score 0 if status is 'no_accelerator', COMPUTE_NOT_CONFIGURED, or chips is 0) and reports the TPU hardware profile (accelerator type, chips, job_devices, total HBM capacity hbm_gb, and HBM per device hbm_gb_per_device)."
 type = "binary"
 weight = 1.0
-
-[[criterion]]
-description = "Routes the request from tpu-agent to tpu-model-onboarding to run the remote execution."
-type = "binary"
-weight = 1.0
-
 
 [scoring]
 aggregation = "weighted_mean"

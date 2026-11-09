@@ -30,7 +30,7 @@
     },
     "args": {
       "type": "object",
-      "description": "Normalized dictionary of parameters supplied to the tool or subagent."
+      "description": "Normalized dictionary of parameters supplied to the tool or subagent. On SubagentStop it may also carry `fully_idle` (boolean: no work of this agent's own is outstanding), `fully_idle_source` (`harness` when the harness reported it, `ledger` when derived from the agent's recorded background launches and the harness's live-task list) and, when not idle, `outstanding_work` (the live tasks, each with `task_id`, `task_type` and `launched_at`)."
     },
     "output": {
       "description": "Execution output, deliverable, or result payload (populated for PostToolUse and SubagentStop events)."
@@ -58,6 +58,10 @@
           "type": "string",
           "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$",
           "description": "Active TPU agent suite run identifier for the current session."
+        },
+        "harness": {
+          "type": "string",
+          "description": "Name of the harness the event came from (tool and termination events)."
         }
       },
       "required": [

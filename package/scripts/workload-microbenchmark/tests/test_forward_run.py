@@ -19,6 +19,7 @@ Run from scripts/workload-microbenchmark/: `python3 -m unittest discover tests`.
 import json
 import os
 import sys
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -159,6 +160,94 @@ class CacheParts(unittest.TestCase):
         dst2 = tempfile.mkdtemp()
         fr._restore_parts(old, dst2)
         self.assertEqual(digest(src), digest(dst2))
+
+    def test_a_relative_output_path_is_read_from_the_working_directory(self):
+        """Saves to a relative path, as a job does with the default `--out`.
+
+        `forward_run.py` passes `wmb_out/wmb/forward/compile_cache.tgz`, which
+        is relative to the job's working directory. `_save_parts` must write
+        the file there, not under its own temporary directory.
+        """
+        import tempfile
+
+        from core import forward_run as fr
+        src = tempfile.mkdtemp()
+        open(os.path.join(src, "f"), "wb").write(os.urandom(1000))
+        work = tempfile.mkdtemp()
+        os.makedirs(os.path.join(work, "wmb_out", "wmb", "forward"))
+        cwd = os.getcwd()
+        os.chdir(work)
+        try:
+            fr._save_parts(src, "wmb_out/wmb/forward/compile_cache.tgz")
+        finally:
+            os.chdir(cwd)
+        self.assertTrue(
+            os.path.isfile(
+                os.path.join(work, "wmb_out", "wmb", "forward",
+                             "compile_cache.tgz")))
+
+    def test_a_failed_save_raises(self):
+        """Raises when tar cannot write the output file.
+
+        Before this check, a failed tar went unnoticed, and the job crashed
+        later with a less clear error.
+        """
+        import tempfile
+
+        from core import forward_run as fr
+        src = tempfile.mkdtemp()
+        open(os.path.join(src, "f"), "wb").write(os.urandom(1000))
+        missing = os.path.join(tempfile.mkdtemp(), "no_such_dir", "out.tgz")
+        with self.assertRaises(RuntimeError):
+            fr._save_parts(src, missing)
+
+    def test_an_empty_cache_saves_an_empty_archive(self):
+        """Saves an empty cache directory as an archive with no parts."""
+        import tempfile
+
+        from core import forward_run as fr
+        out = os.path.join(tempfile.mkdtemp(), "out.tgz")
+        fr._save_parts(tempfile.mkdtemp(), out)
+        dst = tempfile.mkdtemp()
+        fr._restore_parts(out, dst)
+        self.assertEqual(os.listdir(dst), [])
+
+    def test_scratch_space_is_private_and_removed(self):
+        """Keeps the scratch files in a private temporary directory.
+
+        A fixed path such as `/tmp/wmb_parts_out` raises PermissionError on a
+        shared VM when another user already owns it. Both functions must
+        create their scratch directory under `tempfile.gettempdir()` and
+        remove it when they finish.
+        """
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        from core import forward_run as fr
+        src = tempfile.mkdtemp()
+        open(os.path.join(src, "f"), "wb").write(os.urandom(1000))
+        out = os.path.join(tempfile.mkdtemp(), "out.tgz")
+        dst = tempfile.mkdtemp()
+        scratch = tempfile.mkdtemp()
+        parts = []  # every part archive a tar command writes or reads
+        real_popen = subprocess.Popen
+
+        def spy(args, *rest, **kw):
+            parts.extend(a for a in args
+                         if os.path.isabs(a) and a.endswith("part0.tgz"))
+            return real_popen(args, *rest, **kw)
+
+        with mock.patch.object(tempfile, "tempdir", scratch), \
+                mock.patch.object(subprocess, "Popen", spy):
+            fr._save_parts(src, out)
+            self.assertEqual(os.listdir(scratch), [])
+            fr._restore_parts(out, dst)
+            self.assertEqual(os.listdir(scratch), [])
+        self.assertEqual(len(parts), 2)  # one save, one restore
+        for p in parts:
+            self.assertTrue(p.startswith(scratch + os.sep), p)
+        self.assertEqual(os.listdir(dst), ["f"])
 
 
 class CachePruneGuards(unittest.TestCase):
@@ -345,6 +434,182 @@ class ForwardCmdDefaults(unittest.TestCase):
         self.assertRegex(
             open(os.path.join(SCRIPTS, "core", "forward_run.py")).read(),
             r'"--iters",\s*type=int,\s*default=10\b')
+
+
+class Supervise(unittest.TestCase):
+    """Tests for forward_run.supervise.
+
+    Each test replaces forward_run.py with a short stand-in script. Like vLLM, the
+    stand-in starts its engine as a separate process. Each test runs supervise in a new
+    Python interpreter, the way the recipe does, so that the test can check what
+    supervise prints.
+    """
+
+    READY = ("[t+    1.0s] engine init (weights + KV + compile of buckets "
+             "[16]): 1.0 s")
+    ENGINE_ERROR = (
+        "(EngineCore pid=786) RuntimeError: Worker failed with error "
+        "'failed to compile MLIR module: CompileTimeScopedVmemOom', "
+        "please check the stack trace above for the root cause")
+
+    def _fake(self, body):
+        """Writes a stand-in for forward_run.py; returns (stand-in, OUT, PIDS)."""
+        import tempfile
+        d = tempfile.mkdtemp()
+        fake, out, pids = (os.path.join(d, n)
+                           for n in ("fake_forward_run.py", "out", "pids"))
+        with open(fake, "w") as f:
+            f.write("import os, subprocess, sys, time\n"
+                    f"OUT = {out!r}\nPIDS = {pids!r}\n" + body)
+        return fake, out, pids
+
+    def _supervise_cmd(self, fake, out, timeout_s, grace_s):
+        """Returns the command that runs supervise around `fake`, as the recipe does."""
+        code = ("import sys; from core.forward_run import supervise; "
+                f"sys.exit(supervise([], {out!r}, {timeout_s}, {grace_s}, "
+                f"[sys.executable, {fake!r}]))")
+        return [sys.executable, "-c", code]
+
+    def _run(self, body, timeout_s=60, grace_s=0.5):
+        """Runs supervise around a stand-in; returns (process, failure.json, PIDS)."""
+        import subprocess
+        fake, out, pids = self._fake(body)
+        p = subprocess.run(self._supervise_cmd(fake, out, timeout_s, grace_s),
+                           cwd=SCRIPTS,
+                           capture_output=True,
+                           text=True,
+                           timeout=120)
+        failure = os.path.join(out, "failure.json")
+        f = json.load(open(failure)) if os.path.exists(failure) else None
+        ids = ([int(x) for x in open(pids).read().split()]
+               if os.path.exists(pids) else [])
+        return p, f, ids
+
+    #: A stand-in whose engine process prints ERR to standard error, and then neither
+    #: exits nor logs anything else. The stand-in waits for its engine, as vLLM's main
+    #: process does.
+    STUCK_ENGINE = (
+        "print('ENGINE ARGS: --model x', flush=True)\n"
+        "eng = subprocess.Popen([sys.executable, '-c', 'import sys, time; "
+        "print(sys.argv[1], file=sys.stderr, flush=True); time.sleep(600)', "
+        "ERR])\n"
+        "open(PIDS, 'w').write(f'{os.getpid()} {eng.pid}')\n"
+        "eng.wait()\n")
+
+    def assertExited(self, pids):
+        from core import forward_run as fr
+        self.assertEqual(len(pids), 2)
+        for pid in pids:
+            self.assertIn(fr._proc_state(pid), (None, "Z"))
+
+    def test_an_engine_that_logs_a_start_up_error_and_stays_alive_is_stopped(
+            self):
+        from core import forward_run as fr
+        p, f, pids = self._run(f"ERR = {self.ENGINE_ERROR!r}\n" +
+                               self.STUCK_ENGINE)
+        self.assertEqual(p.returncode, fr.STOPPED_RC)
+        self.assertEqual((f["stage"], f["reason"]),
+                         ("engine start-up", "start_up_error"))
+        self.assertEqual(f["detail"], self.ENGINE_ERROR)
+        self.assertEqual(f["cause_context"][0], self.ENGINE_ERROR)
+        # supervise copies the run's output, unchanged, to its standard output.
+        self.assertIn("ENGINE ARGS: --model x\n" + self.ENGINE_ERROR, p.stdout)
+        self.assertIn(
+            "WMB FAILED during engine start-up. Reason: start_up_error.",
+            p.stderr)
+        self.assertExited(pids)
+
+    def test_a_start_up_that_hangs_stops_at_the_limit(self):
+        # The early ValueError says nothing about where start-up stopped, so
+        # cause_context stays empty and `collect` prints the end of log_tail.
+        from core import forward_run as fr
+        p, f, pids = self._run("ERR = 'still compiling'\n"
+                               "print('ValueError: harmless', flush=True)\n" +
+                               self.STUCK_ENGINE,
+                               timeout_s=0.5)
+        self.assertEqual(p.returncode, fr.STOPPED_RC)
+        self.assertEqual((f["reason"], f["start_up_limit_s"]),
+                         ("start_up_timeout", 0.5))
+        self.assertEqual(f["cause_context"], [])
+        self.assertEqual(f["log_tail"][-1], "still compiling")
+        self.assertExited(pids)
+
+    def test_a_cancel_of_the_supervisor_stops_the_run(self):
+        # `compute job cancel` sends SIGTERM to the process group of the recipe. The
+        # run leads a process group of its own, so supervise must stop it.
+        import signal
+        import subprocess
+        fake, out, pids_file = self._fake("ERR = 'compiling'\n" +
+                                          self.STUCK_ENGINE)
+        sup = subprocess.Popen(self._supervise_cmd(fake, out, 600, 600),
+                               cwd=SCRIPTS,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
+                               start_new_session=True)
+        try:
+            deadline, pids = time.time() + 60, []
+            while len(pids) < 2 and time.time() < deadline:
+                time.sleep(0.2)
+                if os.path.exists(pids_file):
+                    pids = [int(x) for x in open(pids_file).read().split()]
+            os.killpg(sup.pid, signal.SIGTERM)
+            self.assertEqual(sup.wait(timeout=60), 128 + signal.SIGTERM)
+        finally:
+            if sup.poll() is None:
+                sup.kill()
+        self.assertExited(pids)
+        self.assertFalse(os.path.exists(os.path.join(out, "failure.json")))
+
+    def test_a_run_whose_engine_starts_is_not_stopped(self):
+        # vLLM logs a start-up error, but the engine becomes ready anyway. Then the
+        # same error is logged again, and the steps run past both the grace period
+        # and the start-up limit.
+        p, f, _ = self._run(
+            "print('ENGINE ARGS: --model x', flush=True)\n"
+            f"print({self.ENGINE_ERROR!r}, file=sys.stderr, flush=True)\n"
+            "time.sleep(0.2)\n"
+            f"print({self.READY!r}, flush=True)\n"
+            "time.sleep(0.2)\n"
+            f"print({self.ENGINE_ERROR!r}, file=sys.stderr, flush=True)\n"
+            "time.sleep(1)\n"
+            "os.makedirs(OUT, exist_ok=True)\n"
+            "open(os.path.join(OUT, 'result.json'), 'w').write('{{}}')\n",
+            timeout_s=0.5)
+        self.assertEqual(p.returncode, 0)
+        self.assertIsNone(f)
+
+    def test_the_recipe_runs_forward_run_under_supervise_and_packs_the_failure(
+            self):
+        # This test runs the real recipe and the real forward_run.py, with arguments
+        # that forward_run.py rejects.
+        import shutil
+        import subprocess
+        import tarfile
+        import tempfile
+
+        from core import cli
+        d = tempfile.mkdtemp()
+        shutil.copy(os.path.join(SCRIPTS, "core", "forward_run.py"), d)
+        recipe = os.path.join(d, "recipe.py")
+        with open(recipe, "w") as f:
+            f.write(
+                cli._RECIPE.format(plan="x.steps.json",
+                                   out=cli.OUT_TGZ,
+                                   image="img",
+                                   args=["--no-such-flag"],
+                                   start_timeout_s=45 * 60))
+        p = subprocess.run([sys.executable, recipe],
+                           capture_output=True,
+                           text=True,
+                           timeout=120)
+        # The recipe passes on the exit code from argparse.
+        self.assertEqual(p.returncode, 2)
+        with tarfile.open(os.path.join(d, cli.OUT_TGZ)) as t:
+            f = json.load(t.extractfile("./wmb/forward/failure.json"))
+        self.assertEqual((f["stage"], f["reason"]),
+                         ("before engine start-up", "exited"))
+        self.assertTrue(
+            any("required: --steps" in line for line in f["log_tail"]))
 
 
 class HarnessSalt(unittest.TestCase):

@@ -2,6 +2,7 @@
 name: workload-microbenchmark
 description: Turns a finished serving job (e.g. a GLM-5.2 AgentX run) into representative, per-rank microbenchmark configs that run on a small slice (2x2x1, scaled mode) or on the job's own slice with its own sharding (mirror mode, e.g. 2x2x2) — representative cells and weights derived from the job's own requests, per-rank shapes, a per-rank "twin" of the model with one layer per layer kind, the component benchmarks needed where the twin deviates, a feasibility gate, and which benchmark level can decide the question. Users can override the deployment ("remove DCP", "dcp=8", "mnbt=8192", a kernel env) and every dependent value is re-derived. Use when asked to "build a microbenchmark for job j-…", "make a representative benchmark for this AgentX run", "onboard <model> for microbenchmarking", "what if we drop DCP", "derive L1 configs", or when a kernel or sharding-implementation change needs an A/B at the workload's real shapes. Onboarding a new model writes code for review under <work>/models/<MODEL_DIR>/; day-to-day configs go to <work>/ (default ./.work).
 scripts:
+- scripts/common/serving_benchmark.py
 - scripts/workload-microbenchmark/GLM-5.2-FP8/config/agentx-2x2x2-tp16-dcp16-ep.bars.json
 - scripts/workload-microbenchmark/GLM-5.2-FP8/config/agentx-2x2x2-tp16-dcp16-ep.json
 - scripts/workload-microbenchmark/GLM-5.2-FP8/config/agentx-2x2x2-tp16-dcp16-ep.source.json
@@ -21,6 +22,7 @@ scripts:
 - scripts/workload-microbenchmark/core/evidence.py
 - scripts/workload-microbenchmark/core/forward_run.py
 - scripts/workload-microbenchmark/core/jobdata.py
+- scripts/workload-microbenchmark/core/jobdata_agentx.py
 - scripts/workload-microbenchmark/core/mix.py
 - scripts/workload-microbenchmark/core/project.py
 - scripts/workload-microbenchmark/core/report.py
@@ -187,7 +189,7 @@ cli.py points   <twin.json> [--override dcp=8 ...] [--no-mtp] [--min-share 0.002
                 [--point NAME=cached/input/output@C ... [--with-mix]] [--top K | --combined] \
                 [--sampling | --no-sampling]   # step mix -> one plan per cell (--top/--combined: one plan)
 cli.py mix-rollup --plans <dir> <job-id> ... [--baseline <ids>]   # the cost model -> cost_model.json
-cli.py forward-cmd --steps <f.steps.json> [--image <path|job>] [--repeats N] [--no-profile] \
+cli.py forward-cmd --steps <f.steps.json> [--image <path|job> | --interpreter <python>] [--repeats N] [--no-profile] \
                    --compute "{{runtime}} compute"   # writes <plan>.recipe.py, prints the compute submit command
                                              # (default: the source job's image; profile on)
 cli.py collect <job-id> --steps <f.steps.json>   # after job artifacts: files the cache, prints
@@ -205,6 +207,29 @@ cli.py run ...                   # L1 A/B driver: NOT BUILT YET
   never calls `{{runtime}}`. A source serving job's directory must hold its Kubernetes JobSet
   manifest as `recipe.yaml` (the served command and env are read from it), and under `outputs/`
   its aiperf records and metrics and its `vllm.log`, or the server log under `logs/`.
+- **A server this package started** (`{{runtime}} compute submit --serve`) needs no
+  `recipe.yaml`: it is read from vLLM's own log.
+  - **Args:** the API server's `non-default args: {...}` line, as `vllm serve` flags.
+  - **Prefix caching:** the engine config line (`enable_prefix_caching=`), when the flag was left
+    at vLLM's default.
+  - **Page size:** vllm_torchtpu's `Using KV cache block size: N` line.
+  - **Checkpoint config:** `config.json` from the model path in those args, or this host's Hugging
+    Face cache.
+  - **Env:** vLLM logs none. Env the model always needs comes from its model.py `TWIN_ENV`
+    (source `model` in the ENV block); anything else is `--override env.NAME=value`.
+
+  Fetch the server job's artifacts into `<work>/jobs/<server-job-id>/`, and the client job's into
+  its `outputs/`:
+  - **aiperf** (`profile_export.jsonl`, per-request records): sets the measured window; the step
+    mix is built as for any job.
+  - **the package's own client** ({{script:common/serving_benchmark.py}}, `summary.json`, no
+    per-request records): each cell is fixed lengths at a fixed concurrency with every prompt new,
+    so there is no step mix to recover. The snapshot keeps the cells (`summary_cells`) and models
+    the requests from them (a closed loop, labelled), and `points` makes one point per cell
+    (`<cell>=0/<isl>/<osl>@<concurrency>`). The server counters need the aiperf window, so MTP
+    acceptance falls back to the ceiling (1 + spec tokens). The pod cannot see its image, so
+  `forward-cmd` needs `--image` (container backends) or `--interpreter` (host backends). ITL
+  percentiles are not logged, so the G0 closure is skipped.
 - **Overrides:** `tp`, `dp`, `dcp`, `pcp`, `ep`, `block_size`, `mnbt`, `mns`, `max_model_len`,
   `prefix_caching`, `spec_tokens`, …, or `env.<NAME>=<value>`. Unknown keys are an error.
 - **An infeasible override is refused** (exit 3) with alternatives: the minimum DCP for the recorded
@@ -242,9 +267,12 @@ step, which is 3% of that job, and never compiled the bucket-16 program that run
 **What `points` builds** ({{script:workload-microbenchmark/core/mix.py}}, from the snapshot):
 - **Classify every second of the measured window.** The inputs are aiperf's 1-s scrape of
   `vllm:iteration_tokens_total` (observed when a step *ends*) and `num_requests_running`, kept in
-  the snapshot as `step_slices`. Under MTP k a decoding request is 1+k tokens, so steps of ≤8 / ≤16
-  / ≤32 tokens are the **D1-2 / D3-4 / D5-8** decode classes, and a step over 32 tokens carries a
-  prefill chunk (**mixed**). Class step times are fitted on fully busy decode-only seconds. The
+  the snapshot as `step_slices`. A decoding request is 1+k tokens under MTP k (1 without), so each
+  histogram bin up to mns × (1+k) tokens is the decode class of the requests it can hold
+  (`mix.decode_classes`): under MTP 3 with mns 8, ≤8 / ≤16 / ≤32 tokens are **D1-2 / D3-4 / D5-8**;
+  without MTP, ≤1 / ≤8 are **D1 / D2-8**. A longer step carries a prefill chunk (**mixed**). The
+  bins are the histogram's (1, 8, 16, 32, 512), so a class can span several batch sizes; its batch
+  comes from the requests decoding in its seconds. Class step times are fitted on fully busy decode-only seconds. The
   rest of a second is mixed when a long step is in flight, else idle (client think time, which no
   benchmark prices).
 - **Validated** on `j-c964a8b6`, whose server also logged every scheduler step (corrected for async
@@ -432,7 +460,7 @@ slows another shows its net effect.
 | **guardrails** | the heaviest decode cell (typical TPOT) and every mixed cell (TTFT, and the TPOT tail: decodes wait through a prefill step), baseline vs candidate | a lower `T_mix` bought by slower prefill steps worsens latency; a regressed guardrail is named |
 | **noise** | `T_mix` per repeat and its spread; `significant` when `|speedup − 1|` beats the larger arm's spread | a margin inside the spread is two candidates, not a win |
 | **coverage** | the share of busy time the measured cells cover, and any cell without a job | a missing cell is listed, never counted as zero |
-| **served gain (modelled)** | `(busy + idle) / (busy / speedup + idle)` with the source job's measured busy and idle | throughput also contains the client's think time, which no kernel shortens |
+| **served gain (modelled)** | `(busy + idle) / (busy * (covered_share / speedup + 1 - covered_share) + idle)` with the source job's measured busy and idle | throughput also contains unmeasured cells and the client's think time, which no kernel shortens |
 
 **When it is valid.** `T_mix` holds the job's step counts fixed, so it decides changes that make a
 step of the same shape cheaper: kernels, collectives, env flags, layouts. It does **not** decide
@@ -446,7 +474,7 @@ For those, `T_mix` is at most a per-step hint, and the verdict needs L2 (fixed-w
 or L3 (the real run).
 
 **It is modelled, not measured.** `T_mix` is a microbenchmark prediction. An optimization is only
-`accepted` after {{skill:critical-review}} and {{skill:accuracy-check}}; the end-to-end run is the last word.
+`accepted` after {{skill:critical-review}} and an accuracy gate (`serving_eval.py`, as {{skill:close-gaps}} runs it); the end-to-end run is the last word.
 
 ## Image and environment: audit both before trusting a number
 
@@ -461,21 +489,21 @@ The twin's env has these sources, and every output says which one each key came 
 | **override** | `--override env.NAME=value` | same |
 | **image** | the Dockerfile's env and vllm-torchtpu's `envs.py` defaults | only inside the job: `result.json` → `effective_env`, each key tagged `plan` / `forward_run` / `image/pod` |
 
-- **The image under test is always named, never a moving tag.**
-  - **Default `--image job`:** the image the source job ran (`source_image` in the plan). The run
-    then measures the code the workload was recorded on.
-  - **An A/B names each arm's build:** `--image <repo:tag@sha256:…>`, exactly as the build printed
-    it (see "Change → build → microbenchmark").
-  - **Never use `inferencex/vllm:latest` as an arm.** It is the shared InferenceX *base* image
-    (vLLM v0.27 with a stale vllm-torchtpu on `PYTHONPATH`, last pushed 2026-08-25) that the
-    AgentX image build starts from. It is not the current code, and
-    it is not ours to retag.
-- **Tags are pinned to their digest.** `forward-cmd` resolves the image to `…@sha256:…` through
-  Artifact Registry. The job runs that exact image (`compute submit --image`), its recipe records
-  it, and the compile cache is keyed by it, so a rebuilt tag never reuses an older build's cache.
-  If the registry can't be read, it warns and runs the tag as is. `--image` selects the container
-  image on a backend that runs jobs in containers; check with `{{runtime}} compute inspect` that
-  the configured backend does.
+- **The code under test is always named: an image or an environment, by backend.** Check the
+  profile's backend first (`{{runtime}} compute inspect`):
+  - **Container backend (`gke_job`): `--image`.** Default `--image job` is the image the
+    source job ran (`source_image` in the plan), so the run measures the code the workload was
+    recorded on. An A/B names each arm's build: `--image <repo:tag@sha256:…>`. A server read from
+    its vLLM log has no image record, so its plans need an explicit `--image`.
+  - **Host backends (`local`, `gce_tpu_vm`, `gke_pod`): `--interpreter`.** These run the job on the
+    host and **ignore `--image`**. An arm is the Python environment holding that arm's vllm-torchtpu:
+    `--interpreter <python>`, passed to `compute submit --interpreter`. `forward-cmd` refuses both
+    together.
+  - **Never a moving tag (`:latest`)** as an arm: it is not a fixed build, and it is not ours to retag.
+- **Image tags are pinned to their digest.** `forward-cmd` resolves the image to `…@sha256:…`
+  through Artifact Registry. The job runs that exact image, its recipe records it, and the compile
+  cache is keyed by it, so a rebuilt tag never reuses an older build's cache. If the registry
+  can't be read, it warns and runs the tag as is. An `--interpreter` arm keys the cache by its path.
 - **A different image runs the source job's args and env.** Flags the image's vLLM does not know
   are translated (`--no-dcp-q-replicate` → `VLLM_DCP_Q_REPLICATE=0` on newer vLLM) and listed in
   `result.json` → `compat`. Anything else fails at argument parsing; it does not pass silently.
@@ -497,50 +525,74 @@ The twin's env has these sources, and every output says which one each key came 
 
 The workflow for measuring a vllm-torchtpu change (a kernel, a collective, an env default) against
 the workload. The two arms differ **only by the change**: both are built the same way from
-vllm-torchtpu commits, and both run the same cell plans.
+vllm-torchtpu commits, and both run the same cell plans. An arm is an image on a container
+backend and a Python environment on a host backend (see "Image and environment").
 
 **0. The representative config** (once per source job; reuse it for every change):
 ```bash
-{{runtime}} compute job artifacts --job-id <job-id> --out-dir <work>/jobs/<job-id>   # the latest AgentX job
-cli.py derive GLM-5.2-FP8 --job <job-id>               # snapshot -> config -> twin
+{{runtime}} compute job artifacts --job-id <job-id> --out-dir <work>/jobs/<job-id>   # the latest full benchmark
+cli.py derive <MODEL_DIR> --job <job-id>               # snapshot -> config -> twin
 cli.py points <twin.json>                              # step mix -> <dir>/<cell>.steps.json
 ```
 
 **1. Make the change** in a vllm-torchtpu checkout (`<vllm-torchtpu>`), on a branch off the
-commit you are comparing against (`BASE`). Commit it and **push the branch**: the build clones from
-GitHub, so a local-only commit fails the checkout.
+commit you are comparing against (`BASE`), and commit it. If your image build clones from GitHub,
+**push the branch**: a local-only commit fails the checkout.
 
-**2. Preflight** the change ({{skill:change-preflight}}): the cheapest check that it does what it
+**2. Preflight** the change: the cheapest check that it does what it
 claims and is still correct (unit test, op microbenchmark). Don't build or queue TPU jobs on an
 unchecked change.
 
-**3. Build both arms** with the same script, one per commit. For GLM-5.2 AgentX that is the AgentX
-build script: vllm-torchtpu installed with its deps on the InferenceX base, version pins checked,
-and the AgentX server env baked in. This package does not ship that script; if the caller has
-none and supplies no images, that is a blocker.
-```bash
-bash <AgentX build script> <BASE-sha>        # -> IMAGE=…  DIGEST=…   (the baseline arm)
-bash <AgentX build script> <CHANGE-sha>      # -> IMAGE=…  DIGEST=…   (the candidate arm)
-```
-- Record both `repo:tag@sha256:…` and the base digest each build prints; the report names them.
-- For another model, build with your team's vllm-torchtpu image build instead. Either way, both arms come from the same build path.
-- To compare against what the source job ran, the baseline can be `--image job`. The arms then
-  differ by everything between that image and your commit, not only your change; say so in the
-  report.
+**3. Build both arms** the same way, one per commit (`BASE`, then `CHANGE`):
+- **Container backend:** one image per commit, from the build that makes your serving images. This
+  package ships no image build; if the caller has none and supplies no images, that is a blocker.
+  Record each `repo:tag@sha256:…`; the report names them.
+- **Host backend:** one Python environment per commit on the host, each a copy of the profile's
+  `python_interpreter` environment with vllm-torchtpu installed from that commit. Record each
+  interpreter path and commit; `result.json` → `image_source` confirms what each job ran.
+- To compare against what the source job ran, the baseline can be `--image job` (container
+  backends). The arms then differ by everything between that image and your commit, not only
+  your change; say so in the report.
 
-**4. Run one job per arm, both at once.** The same `--top K` plan on each arm's image. Each arm
-is its own image, so each has its own compile cache. A cold job is a complete measurement: compile
+**4. Run one job per arm, both at once** (on a host backend with one TPU host, one after the
+other: each job holds the chips). The same `--top K` plan on each arm. Each arm has its own
+compile cache. A cold job is a complete measurement: compile
 time is spent in engine init, outside the timed steps, so **no warm run is required**.
 ```bash
 cli.py forward-cmd --steps <dir>/<plan>.steps.json --image <baseline repo:tag@sha256:…> --compute "{{runtime}} compute" \
     --recipe <dir>/<plan>.baseline.recipe.py
 cli.py forward-cmd --steps <dir>/<plan>.steps.json --image <candidate repo:tag@sha256:…> --compute "{{runtime}} compute" \
     --recipe <dir>/<plan>.candidate.recipe.py
+# host backend: --interpreter <baseline env>/bin/python3 and <candidate env>/bin/python3 instead of --image
 ```
-Each prints a `{{runtime}} compute submit --recipe … --image … --input … --output wmb_out.tgz`
-command; run both. Give each arm its own `--recipe`: both arms share the plan, and the default
+Each prints a `{{runtime}} compute submit --recipe … --image …` (or `--interpreter …`) `--input …
+--output wmb_out.tgz` command; run both.
+- **`gke_job` needs a `staging_bucket`** for these jobs: inputs over 900 KiB and outputs over
+  1 MiB travel through it, and a restored compile cache (up to ~2 GiB in) and `wmb_out.tgz` (the
+  cache save and profiles, out) are both over. Without one the job cannot return its results;
+  set it up first (the install guide's "Large files on `gke_job`"). Give each arm its own `--recipe`: both arms share the plan, and the default
 recipe path is next to it. For full coverage, run the per-cell plans instead: one job per cell
 per arm, all launched at once.
+- **A failed job reports why it failed.** vLLM's engine is the process that compiles and
+  runs the model. The engine can log a fatal error during start-up and then keep running.
+  vLLM's own wait for the engine does not cover every stage of start-up, so such a job
+  can hold its chips until someone cancels it. To prevent this, the recipe runs `forward_run.py` under `supervise`.
+  `supervise` stops the job in two cases:
+  - vLLM logs a start-up error, and the job has not exited one minute later.
+  - Engine start-up lasts longer than the limit that `forward-cmd --engine-start-timeout`
+    sets. By default, the limit is the plan's `VLLM_ENGINE_READY_TIMEOUT_S` if it sets
+    one, and otherwise 45 minutes. Set the limit longer than a cold compile of the
+    plan takes. A cold compile cannot reuse cached compile results, and it can print
+    nothing for many minutes. If the plan does not set `VLLM_ENGINE_READY_TIMEOUT_S`,
+    vLLM's own default wait can end a slow start-up first, so set it in the plan's
+    `twin.env` for a plan that compiles for a long time.
+
+  A job that ends without `result.json` returns `wmb/forward/failure.json` instead. The
+  file records the reason that the job ended, the cause of the failure, and the last lines
+  of the log. The cause is the first error line of the job, together with the four lines
+  that follow it. If the engine became ready, only the lines after that point count.
+  `collect` prints the cause. Read the cause before you resubmit the job, because the
+  same plan on the same image is likely to fail the same way.
 
 **5. Collect and score.** Fetch (`{{runtime}} compute job artifacts --job-id <job-id> --out-dir
 <work>/jobs/<job-id>`) and `collect` every job, have the profiles read ("Reading the profile"),
@@ -554,7 +606,7 @@ deltas, the guardrails, and the modelled served gain (see "Cost model").
 **6. Report and gate.** Write REPORT.md from `cost_model.json`, `result.json`, `xprof_steps.json`
 and `evidence.json` (see below). A microbenchmark win is modelled: run {{skill:critical-review}} on
 it, and take the change to the end-to-end run (a `{{runtime}} compute submit --serve` job and its client) and
-{{skill:accuracy-check}} before calling it `accepted`. If the change alters the schedule (chunk size, `mnbt`, speculative tokens,
+its `serving_eval.py` accuracy gate before calling it `accepted`. If the change alters the schedule (chunk size, `mnbt`, speculative tokens,
 admission), `T_mix` cannot decide it; go to L2 / L3 directly.
 
 ## A run, end to end
@@ -732,13 +784,26 @@ paths fully resolved. `<res>` is the directory of the job's `result.json`, which
 prints; the trace is the rank-0 `.xplane.pb` it names:
 
 ```json
-{"prompt": "Read the rank-0 trace of workload-microbenchmark job <job-id> and write two files. (1) <res>/trace_events.json: every event of the 'XLA Modules' and 'XLA Ops' lines of the /device:TPU:0 plane, with no event limit, as {\"events\": [{\"line\": <line name>, \"name\": <the full event name, HLO text included>, \"start_ns\": <start>, \"duration_ns\": <duration>}]}. (2) <res>/hlo_categories.json: the HLO op profile by category, IDLE included, as [{\"category\": ..., \"total_self_time_ms\": ..., \"op_count\": ..., \"top_op\": ...}]. Then report the fields below and the top ops.", "run_id": "<run_id>", "traces": [{"path": "<rank-0 .xplane.pb>", "label": "<job-id>"}], "report_path": "{{runs}}/<run_id>/artifacts/workload-microbenchmark/<job-id>/tpu_profiling_report.md", "fields": ["step_time_ms", "device_busy_ms"], "top_ops": 20}
+{"prompt": "EXPORT ONLY. No analysis, no report, no findings. Read the rank-0 trace of workload-microbenchmark job <job-id> and write exactly two files, then hand back immediately.\n(1) <res>/trace_events.json: every event of the 'XLA Modules' and 'XLA Ops' lines of the /device:TPU:0 plane, with no event limit, as {\"events\": [{\"line\": <line name>, \"name\": <the full event name, HLO text included>, \"start_ns\": <start>, \"duration_ns\": <duration>}]}.\n(2) <res>/hlo_categories.json: the HLO op profile by category, IDLE included, as [{\"category\": ..., \"total_self_time_ms\": ..., \"op_count\": ..., \"top_op\": ...}].\nRules:\n- Do only what is needed for these two files. Do not compute metrics, rank ops, read graphs, open kernel source, or explain anything.\n- Wrap every shell command in `timeout 120`. Never run `xprof` without a subcommand (it starts a server and never exits); for help, use `<subcommand> --help` under `timeout 30`.\n- Total budget 10 minutes. If a file cannot be written in that time, stop and hand back `failed` with the last command and its error.\n- Do not install, upgrade or remove any package. If XProf is unusable, hand back `failed` at once.\n- Hand back as soon as both files exist: their absolute paths, sizes and event counts, nothing else.", "run_id": "<run_id>", "traces": [{"path": "<rank-0 .xplane.pb>", "label": "<job-id>"}]}
 ```
 
-- Branch on the result's `status`. On `reported`, check that both files exist, then run
+- **Send no `fields`, `top_ops` or `report_path`.** Each one asks for analysis beyond the two
+  files, and the agent then goes looking for tools to do it. An earlier version of this request
+  asked for step time, device busy and the top 20 ops. The export finished in about a minute, but
+  the agent then spent over an hour hunting for those numbers, 72 minutes of it on one bare `xprof`
+  call that never exited.
+- **The caller enforces the budget; the prompt only asks for it.** If the delegation has not handed
+  back after 10 minutes, stop it, and treat the job as having no profile split.
+- **Never install XProf to unblock it.** If the agent reports XProf missing, tell the user. The
+  interpreter it uses is usually the one the server runs on, and installing XProf there changes
+  shared packages (numpy, protobuf, setuptools).
+- **Check the files yourself; do not trust the hand-back.** Whatever the result's `status`, check
+  that both files exist and are non-empty. The agent keeps session output under the run's
+  artifacts, so it may write them there instead of `<res>`; copy them into `<res>`. Then run
   `collect` again: it splits the profile (`xprof_steps.json`) and rebuilds `evidence.json`.
-- On `failed` or `needs_input`, the job has no profile split. Say so in the report; the twin
-  basis of the cost model still holds, and the served bases list the job's cells as missing.
+- **Missing files mean no profile split.** If either file is missing (agent `failed`,
+  `needs_input`, or stopped), say so in the report. The twin basis of the cost model still holds,
+  and the served bases list the job's cells as missing.
 - One request per job. Several jobs can go in one request, one `traces` entry each with its
   job id as `label`, when the prompt names each job's `<res>`.
 
@@ -843,6 +908,7 @@ In the workspace:
    | `feasibility_checks(f, d)` | no | model-specific problems (head / KV-head divisibility, unsupported DCP, ...) |
    | `state_bytes_per_seq_per_rank(f, d)` | models with recurrent state | recurrent state per running sequence per rank, counted against the KV budget and in twin memory |
    | `COMPONENTS` | yes | the exact-shape component benchmarks for the twin's deviations |
+   | `TWIN_ENV` | no | env the model always runs with (e.g. a kernel switch it needs on TPU), applied under the job's own env and overrides; the only env source for a server read from its vLLM log |
 
 2. `cli.py onboard <MODEL_DIR> --job <id>`, then `cli.py selftest` and the unit tests.
 3. Read the generated `<work>/models/<MODEL_DIR>/examples/<name>.md`. Every number must be

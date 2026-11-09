@@ -13,20 +13,14 @@
 # limitations under the License.
 
 [judge]
-judge = "vertex_ai/gemini-3.5-flash"
+judge = "vertex_ai/gemini-3.8-flash"
 atif-trajectory = "/logs/agent/trajectory.json"
 timeout = 600
 
 [[criterion]]
-description = "Synthesizes benchmark_tpu.py for Causal LM with TPU/XLA device placement."
+description = "Synthesizes benchmark_tpu.py for Causal LM with PyTorch/TPU (torch_tpu) device placement and replaces the benchmark_model placeholder."
 type = "binary"
 weight = 1.0
-
-[[criterion]]
-description = "Routes the request from tpu-agent to tpu-model-onboarding to synthesize the benchmark script."
-type = "binary"
-weight = 1.0
-
 
 [scoring]
 aggregation = "weighted_mean"

@@ -156,6 +156,15 @@ try:
     steps_node = find_criterion(details.get("execution_report"), "steps")
     if steps_node is not None and isinstance(steps_node.get("raw"), (int, float)):
         scores["regimes_measured_judge"] = int(steps_node["raw"])
+    eff_node = details.get("efficiency")
+    for ename in ("trajectory_score", "valid_tool_calls", "framework_directed_penalty"):
+        enode = find_criterion(eff_node, ename)
+        if enode is not None:
+            ev = enode.get("value")
+            if not isinstance(ev, (int, float)) or isinstance(ev, bool):
+                ev = enode.get("raw")
+            if isinstance(ev, (int, float)) and not isinstance(ev, bool):
+                scores[ename] = round(float(ev), 4)
 except (OSError, ValueError):
     pass
 
@@ -206,10 +215,15 @@ if onboard_val is not None and isinstance(scores.get("efficiency"), (int, float)
     scores["onboarding_success"] = onboarding
 
     # Only calculate efficiency if onboarding is a success (all DoD criteria pass)
-    valid_tool_calls = float(scores["efficiency"])
+    trajectory_score = float(scores.get("trajectory_score", 1.0))
+    valid_tool_calls = float(scores.get("valid_tool_calls", scores["efficiency"]))
+    framework_directed_penalty = float(scores.get("framework_directed_penalty", 1.0))
+    scores["trajectory_score"] = round(trajectory_score, 4)
     scores["valid_tool_calls"] = round(valid_tool_calls, 4)
-    scores["efficiency_raw"] = round(valid_tool_calls, 4)
-    efficiency = round(valid_tool_calls * onboarding, 4)
+    scores["framework_directed_penalty"] = round(framework_directed_penalty, 4)
+    efficiency_raw = trajectory_score * valid_tool_calls * framework_directed_penalty
+    scores["efficiency_raw"] = round(efficiency_raw, 4)
+    efficiency = round(efficiency_raw * onboarding, 4)
     scores["efficiency"] = efficiency
 
     w_onboarding = weights.get("onboarding_success", 0.6)
@@ -224,7 +238,9 @@ output_cols = [
     "reward",
     "onboarding_success",
     "efficiency",
+    "trajectory_score",
     "valid_tool_calls",
+    "framework_directed_penalty",
     "cheating",
     "regime_coverage",
     "peak_tps_1k_1k",

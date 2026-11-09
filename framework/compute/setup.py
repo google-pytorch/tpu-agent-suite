@@ -17,9 +17,9 @@
 ...) and suggests a value for each from this machine. `compute setup apply` creates or updates one profile from a set of
 answers.
 `compute setup verify` checks that a profile's target works and records the
-result in verification.json. `config show/set/use` lists the profiles and
-their setup state, changes individual settings, and picks which profile a run
-(or, by default, every run) uses.
+result in verification.json. `config show/set/use/remove` lists the profiles
+and their setup state, changes individual settings, picks which profile a run
+(or, by default, every run) uses, and removes profiles.
 
 Two rules hold for every command here:
 
@@ -50,11 +50,12 @@ import re
 import sys
 from typing import Any, Callable
 
-from framework import utils
+from framework import jsonio, paths, utils
 
 from . import config, env_check, probes
 from .drivers import (ComputeConfigError, ComputeDriver, PreflightCheck,
-                      get_driver, list_drivers, validate_field_format)
+                      get_driver, list_drivers, registry,
+                      validate_field_format)
 
 Path = pathlib.Path
 
@@ -83,12 +84,39 @@ def _package_file(*parts: str) -> Path:
 
 def _questions() -> dict[str, dict[str, Any]]:
     """questions.json entries keyed by question name."""
-    spec = utils.load_json(_package_file("environment", "questions.json"))
+    spec = jsonio.load_json(_package_file("environment", "questions.json"))
     return {q["name"]: q for q in spec["questions"]}
 
 
 def _schema() -> dict[str, Any]:
-    return utils.load_json(_package_file("schemas", "environment.json"))
+    """Return the environment.json schema, extended for external drivers.
+
+    The package schema lists the built-in backends in the `backend` enum and
+    their setup fields in `params`, and it rejects any other value. An
+    external driver (see `drivers/external.py`) is not known to the package,
+    so this function adds each external backend name to the enum. It also
+    adds each setup field of an external driver that the schema does not
+    already define. These added fields accept any JSON value, because the
+    driver's own `from_params` validates them.
+
+    Example: an external driver registered as `my_backend` with
+    `SETUP_FIELDS = SetupFields(required=("target",))` makes a profile with
+    `"backend": "my_backend"` and `"params": {"target": "a"}` valid.
+    """
+    schema = jsonio.load_json(_package_file("schemas", "environment.json"))
+    profile = schema["properties"]["profiles"]["additionalProperties"]
+    backend = profile["properties"]["backend"]
+    params = profile["properties"]["params"]["properties"]
+    for name in registry.EXTERNAL_DRIVERS:
+        driver_cls = get_driver(name)
+        if driver_cls is None:
+            continue
+        if name not in backend["enum"]:
+            backend["enum"].append(name)
+        for field in sorted(driver_cls.SETUP_FIELDS.all_fields()):
+            params.setdefault(
+                field, {"description": f"{name} backend (external driver)."})
+    return schema
 
 
 def _is_profile_field(question: dict[str, Any] | None) -> bool:
@@ -227,7 +255,7 @@ def _environment(package: str | None,
             error_code="MISSING_FIELD")
     ws = Path(workspace) if workspace is not None else Path.cwd()
     try:
-        env, path = utils.resolve_environment(package, ws)
+        env, path = paths.resolve_environment(package, ws)
     except ValueError as exc:
         raise ComputeConfigError(f"environment.json is not valid JSON: {exc}",
                                  error_code="INVALID_FIELD") from exc
@@ -235,12 +263,12 @@ def _environment(package: str | None,
         # This package's ledger without environment.json, in the workspace or
         # (a user-scope install) the central store: apply may repair it.
         base = utils.parse_package_tag(package)[0]
-        for tpu_agent_suite_dir in (utils.tpu_agent_suite_dir_for(ws),
-                                    utils.get_tpu_agent_suite_home()):
-            ledger = tpu_agent_suite_dir / utils.OWNERSHIP_FILE
-            if (ledger.is_file()
-                    and utils.load_json_doc(ledger).get("package") == base):
-                return {}, tpu_agent_suite_dir / utils.ENVIRONMENT_FILE
+        for tpu_agent_suite_dir in (paths.tpu_agent_suite_dir_for(ws),
+                                    paths.get_tpu_agent_suite_home()):
+            ledger = tpu_agent_suite_dir / paths.OWNERSHIP_FILE
+            if (ledger.is_file() and
+                    jsonio.load_json_or_empty(ledger).get("package") == base):
+                return {}, tpu_agent_suite_dir / paths.ENVIRONMENT_FILE
         raise ComputeConfigError(str(exc), error_code="MISSING_FIELD") from exc
     if path is None:
         raise ComputeConfigError(
@@ -286,7 +314,7 @@ def _update_environment(
                 "Refusing to write an environment.json that fails its schema:\n"
                 + "\n".join(errors),
                 error_code="INVALID_FIELD")
-        utils.write_json(path, doc)
+        jsonio.write_json(path, doc)
         return doc, path
 
 
@@ -545,7 +573,7 @@ def config_show(*,
     env, path = _environment(package, workspace)
     profiles, default = config.normalize_environment_profiles(env)
     active, source = config.resolve_profile_name(env, profile_override, run_id)
-    results = utils.load_json_doc(path.parent / utils.VERIFICATION_FILE)
+    results = jsonio.load_json_or_empty(path.parent / paths.VERIFICATION_FILE)
     return {
         **{
             k: v
@@ -812,22 +840,80 @@ def config_use(*,
             "No active run to switch; pass --run-id, or --default to change "
             "the default profile.",
             error_code="MISSING_FIELD")
-    run_file = utils.get_run_root(run_id) / "run.json"
+    run_file = paths.get_run_root(run_id) / "run.json"
     if not run_file.is_file():
         raise ComputeConfigError(f"Run {run_id!r} has no run.json.",
                                  error_code="MISSING_FIELD")
     check(
         config.normalize_environment_profiles(
             _environment(package, workspace)[0])[0])
-    utils.write_json(run_file, {
-        **utils.load_json_doc(run_file), "compute_profile": target
-    })
+    jsonio.write_json(
+        run_file, {
+            **jsonio.load_json_or_empty(run_file), "compute_profile": target
+        })
     return {
         "status": "ok",
         "scope": "run",
         "run_id": run_id,
         "profile": target
     }
+
+
+def config_remove(*,
+                  profile: str,
+                  user_confirmed: bool = False,
+                  package: str | None = None,
+                  workspace: Path | str | None = None,
+                  run_id: str | None = None) -> dict[str, Any]:
+    """Remove a named compute profile from environment.json.
+
+    Requires `user_confirmed=True` after the user asks to remove the profile.
+    If the removed profile was `default`, `default` moves to the first
+    remaining profile, or `None` when none remain. If `run_id` has a `run.json`
+    pinned to `profile`, `compute_profile` is cleared there too.
+    """
+    target = (profile or "").strip()
+    if not target:
+        raise ComputeConfigError("config remove requires a profile name.",
+                                 error_code="MISSING_FIELD")
+    if not user_confirmed:
+        raise ComputeConfigError(
+            "Removing a compute profile requires --user-confirmed after the "
+            "user asks to remove it.",
+            error_code="CONFIRMATION_REQUIRED")
+
+    def remove(doc: dict[str, Any]) -> bool:
+        if target not in doc["profiles"]:
+            raise config.unknown_profile_error(target, "config remove",
+                                               doc["profiles"])
+        del doc["profiles"][target]
+        if doc.get("default") not in doc["profiles"]:
+            doc["default"] = next(iter(doc["profiles"]), None)
+        return True
+
+    written, path = _update_environment(package, workspace, remove)
+    unpinned_run = False
+    if run_id:
+        try:
+            run_file = paths.get_run_root(run_id) / "run.json"
+        except utils.TpuAgentSuiteError:
+            run_file = None
+        if run_file is not None and run_file.is_file():
+            run_doc = jsonio.load_json_or_empty(run_file)
+            if run_doc.get("compute_profile") == target:
+                run_doc.pop("compute_profile", None)
+                jsonio.write_json(run_file, run_doc)
+                unpinned_run = True
+    result: dict[str, Any] = {
+        "status": "ok",
+        "profile": target,
+        "default": written["default"],
+        "revision": written["revision"],
+        "path": str(path),
+    }
+    if unpinned_run:
+        result["unpinned_run"] = run_id
+    return result
 
 
 def read_answers(answers_arg: str) -> dict[str, Any]:
@@ -1075,9 +1161,9 @@ def verify_setup(*,
             "image": params.get("image"),
             "checked_at": record["checked_at"],
         }
-    results_file = path.parent / utils.VERIFICATION_FILE
+    results_file = path.parent / paths.VERIFICATION_FILE
     with _locked(path.parent):
-        loaded = utils.load_json_doc(results_file)
+        loaded = jsonio.load_json_or_empty(results_file)
         previous = loaded.get(key)
         if ("target_versions" not in record and isinstance(previous, dict)
                 and isinstance(previous.get("target_versions"), dict)):
@@ -1094,7 +1180,7 @@ def verify_setup(*,
             if isinstance(v, dict) and v.get("profile") != name
         }
         # The failures are kept so session start can show them (FAILED).
-        utils.write_json(results_file, {
+        jsonio.write_json(results_file, {
             **results, key: {
                 **record, "failed_checks": failed
             }

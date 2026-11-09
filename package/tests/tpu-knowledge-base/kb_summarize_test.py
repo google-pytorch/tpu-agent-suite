@@ -83,12 +83,15 @@ class InvocationTest(Isolated):
                 for flag in banned:
                     self.assertNotIn(flag, argv)
 
-    def test_a_build_names_no_tool(self):
-        """A CLI handed a url opens it unasked, so naming WebFetch only
-        tied the build to that tool's own summariser model."""
+    def test_claude_is_granted_webfetch_and_nothing_else(self):
+        """Headless claude fetches unasked only from its own list of
+        documentation domains, so a GitHub page needs the grant."""
         with self.ran() as run:
             summarize.build(ROW, "thing", ROW["url"], "summarise", "claude")
-        self.assertNotIn("--allowed-tools", run.call_args.args[0])
+        argv = run.call_args.args[0]
+        grant = argv.index("--allowedTools")
+        self.assertEqual(argv[grant + 1], "WebFetch")
+        self.assertEqual(argv.count("--allowedTools"), 1)
 
     def test_the_prompt_goes_after_an_end_of_options_marker(self):
         with self.ran() as run:

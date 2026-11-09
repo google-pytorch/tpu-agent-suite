@@ -97,8 +97,16 @@ rule. From vLLM a810316c08:
 [`verify_with_parallel_config`](https://github.com/vllm-project/vllm/blob/a810316c0894b8a43e53458ae5b14c9ad0b18b5d/vllm/config/model.py#L1508-L1520),
 run whenever `VllmConfig` builds an engine's configuration, and
 [`QKVParallelLinear`](https://github.com/vllm-project/vllm/blob/a810316c0894b8a43e53458ae5b14c9ad0b18b5d/vllm/model_executor/layers/linear.py#L1051-L1058),
-used by the attention layers of most models. vllm-torchtpu is not public, so
-whether it adds a constraint of its own is not known.
+used by the attention layers of most models. vllm-torchtpu (at `9725110e`)
+adds no general rule of its own, and relaxes this one for Qwen2: when the
+attention heads do not divide by TP, but divide by the KV heads and TP divides
+by the KV heads, it zero-pads each KV group's query heads
+([`gqa_head_padding.py`](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/gqa_head_padding.py#L58-L110)), so 28 attention
+heads with 4 KV heads start at TP 8. It is stricter in two places: with
+`VLLM_XLA_USE_SPMD` the KV heads must divide by TP
+([`runner/kv_cache_manager.py`](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/runner/kv_cache_manager.py#L1090-L1093)),
+and Kimi-K3 requires the attention heads to divide by TP
+([`models/vllm/kimi_k3/attention.py`](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/models/vllm/kimi_k3/attention.py#L226-L227)).
 
 ## Pitfalls
 

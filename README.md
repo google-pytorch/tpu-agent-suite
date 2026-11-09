@@ -31,8 +31,7 @@ and the suite are built.
   builds and installs the package, but leaves the agents without XProf.
 - Standalone CLI tools (backend-dependent):
   - **`gcloud`** ([Google Cloud CLI](https://cloud.google.com/sdk/docs/install)) for Cloud TPU VMs, GCS staging, and GCP credentials (`gcloud auth login && gcloud auth application-default login`)
-  - **`kubectl`** ([Kubernetes CLI](https://kubernetes.io/docs/tasks/tools/)) and **`gke-gcloud-auth-plugin`** (`gcloud components install gke-gcloud-auth-plugin`) for GKE Pod, Job and XPK workloads (`gcloud container clusters get-credentials <CLUSTER_NAME> --region=<REGION>`)
-  - **`xpk`** ([Accelerated Processing Kit](https://github.com/google/xpk)) for multi-node GKE cluster workloads
+  - **`kubectl`** ([Kubernetes CLI](https://kubernetes.io/docs/tasks/tools/)) and **`gke-gcloud-auth-plugin`** (`gcloud components install gke-gcloud-auth-plugin`) for GKE Pod and Job workloads (`gcloud container clusters get-credentials <CLUSTER_NAME> --region=<REGION>`)
 
 The installer checks only the host-side Python packages. The first session
 sets up your backend and checks its tools, credentials and target (see
@@ -46,7 +45,7 @@ Compile the canonical agent package into native distributions for every supporte
 make build
 ```
 
-This writes `dist/<harness>/tpu-agent-suite/` for `claude-code` and `antigravity`.
+This writes `dist/<harness>/tpu-agent-suite/` for `claude-code`, `codex`, `antigravity`, and `cursor`.
 
 ### 3. Install
 
@@ -74,14 +73,13 @@ What each request routes to, where workloads run, and where outputs land are in 
 | Guide | For |
 | :--- | :--- |
 | [`docs/install.md`](docs/install.md) | Host and TPU prerequisites, build, install scopes and backends, upgrade/uninstall |
-| [`docs/using.md`](docs/using.md) | What `tpu-agent` does with a request, and where its outputs go |
+| [`docs/using.md`](docs/using.md) | Prompting guide, what `tpu-agent` routes each request to, and where outputs land |
 | [`docs/developing.md`](docs/developing.md) | Dev environment, `make` loop, CI gates, adding agents, tpu-knowledge-base sources and eval contributions |
 | [`docs/design/`](docs/design/README.md) | How the framework and the suite are designed |
 | [`framework/README.md`](framework/README.md) | Compiler, installer, hooks, and runtime reference |
 | [`framework/compute/README.md`](framework/compute/README.md) | Compute CLI and backend drivers |
 | [`package/README.md`](package/README.md) | Converting an existing skill into a TPU agent suite package, step by step |
 | [`eval/README.md`](eval/README.md) | Running evaluations |
-| [`docs/using.md`](docs/using.md)  | Golden Prompts |
 
 ---
 
@@ -102,7 +100,7 @@ export GEMINI_API_KEY="your-api-key"
 ./eval/run.py --config claude-code/agent-suite --dataset tpu-hello-world
 ```
 
-> **Automated PR Evaluations**: Evaluations are automatically triggered via GitHub Actions whenever a pull request is opened or updated that modifies relevant parts of the agent packages or evaluation datasets.
+> **Automated PR Evaluations**: Smoke-check evaluations run automatically in CI whenever a pull request modifies agent packages, framework code, or evaluation files.
 
 For the full list of configs, credentials, and the interactive sandbox, see [`eval/README.md`](eval/README.md).
 
@@ -110,7 +108,7 @@ For the full list of configs, credentials, and the interactive sandbox, see [`ev
 
 ## Contribution & Code Review Policy
 
-All code contributions, tests, and agent packages live in this repository. Every pull request runs the following GitHub Actions workflows (defined in `.github/workflows/`):
+All code contributions, tests, and agent packages live in this repository. Every pull request runs the following CI checks:
 
 - **`make verify`**: manifest, delegation graph, schema, and knowledge base checks.
 - **`make test`**: framework and package test suites (translation parity per harness).

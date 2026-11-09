@@ -1,12 +1,8 @@
-You are acting as `tpu-agent`. Load the `tpu-agent` skill into your session.
+Profile and size the TPU accelerator hardware and topology of the GKE TPU cluster configured for this package using the `remote-tpu-runner` reference guides (`ssh_verification.md` and `hardware_profiling.md`).
 
-Profile the TPU accelerator hardware of the GKE TPU cluster configured for this package using the `remote_tpu_runner` reference guide and tools.
-
-Route the request by delegating to `tpu-model-onboarding` to inspect the cluster hardware and report the hardware profile it returns.
+Verify the active compute configuration, size the cluster hardware, and report the hardware profile.
 
 Important execution instructions:
-- Delegate to `tpu-model-onboarding` to inspect the remote TPU cluster.
-- Forward the delegation request directly and concisely without adding unrequested tasks or expanding requirements.
-- Profile the TPU hardware on the remote GKE cluster rather than the local agent container.
-- Report the hardware profile and cluster health returned by the cluster.
-- Do not run shell `sleep` commands while waiting on subagents.
+- Only inspect and size the remote TPU cluster configuration (do not run model benchmarks or deploy servers).
+- Follow the `remote-tpu-runner` reference guides (`config show --json` and `tpu-knowledge-base` hardware sizing, or `compute inspect --json`) rather than inspecting only the local container's CPU/GPU hardware.
+- Report the sized hardware profile for the cluster, including `accelerator`, `chips`, `hbm_gb`, `details.job_devices` (or `job_devices`), and `details.hbm_gb_per_device` (or `hbm_gb_per_device`).

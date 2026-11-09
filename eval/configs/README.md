@@ -35,13 +35,33 @@ Each harness directory holds the same eight:
 | `agy/baseline-remote.yaml` | `baseline.yaml`, with the agent in a GKE pod |
 | `agy/baseline-shared-capacity-remote.yaml` | `agent-suite-shared-capacity-remote.yaml`, with nothing installed |
 
+### User-scope installs
+
+Every SUT above is handed a project-scope install, staged on the host and
+mounted into `/workspace`. The `user-scope*.yaml` configs instead run
+`installer.py install --scope user` inside the trial, through the agents in
+`eval/agents/user_scope.py`, and start the harness in `/workspace`,
+outside `$HOME`. They go with the `user-scope-install` dataset, which scores
+whether the harness loaded the managed memory block and can delegate to an
+installed agent:
+
+| SUT (`--config`) | what runs |
+| --- | --- |
+| `claude-code/user-scope.yaml` | Claude Code after a user-scope install, in a pod on `harbor-nexus-cluster`; no TPU cluster |
+| `agy/user-scope.yaml` | Antigravity after a user-scope install, in a pod on `harbor-nexus-cluster`; no TPU cluster |
+| `codex/user-scope.yaml` | Codex after a user-scope install, in local docker; needs `OPENAI_API_KEY`, so workstation only |
+| `codex/user-scope-codex-home.yaml` | `codex/user-scope.yaml`, with `CODEX_HOME` set under `$HOME` for the install and the session |
+
+Scheduled nightly evaluations run the first two (`claude-code/user-scope.yaml`
+and `agy/user-scope.yaml`) against `user-scope-install`.
+
 ## What gets installed: all, none, or subset
 
-There is one package, and a run installs one of three things:
+A run installs one of three things:
 
 | mode | installs | chosen by |
 | --- | --- | --- |
-| **all** | the whole package: every skill `package.release.json` releases (`tpu-agent` is the entry point) | the config: `agent-suite.yaml` |
+| **all** | the whole package `PACKAGE_MANIFEST` names: every skill its manifest releases (`tpu-agent` is the entry point) | the config: `agent-suite.yaml` |
 | **none** | nothing; the control arm | the config: `baseline.yaml` |
 | **subset** | only the skills you name, for debugging | `--skills` on `run.py` or `sandbox.sh` |
 
@@ -52,6 +72,32 @@ There is one package, and a run installs one of three things:
 `agent-suite.yaml`, and `baseline-remote.yaml` to `agent-suite-remote.yaml`, apart from `job_name`, so the only difference between the two arms
 is the package.
 
+### Which package: `PACKAGE_MANIFEST`
+
+Each config sets `PACKAGE_MANIFEST: ${PACKAGE_MANIFEST:-package.release.json}`
+in its agent env. Its value is the file name of the manifest in `package/` an
+agent-suite arm installs:
+
+| `PACKAGE_MANIFEST` | installs |
+| --- | --- |
+| `package.release.json` (the default) | tpu-agent-suite |
+| `package.experimental.json` | tpu-agent-suite-experimental: the release package plus the vLLM optimization skills (close-gaps, decompose-optimization, workload-microbenchmark, accuracy-check, ...) |
+
+Export it to run any config with another package; nothing else changes:
+
+```bash
+PACKAGE_MANIFEST=package.experimental.json python3 eval/run.py -c claude-code/agent-suite -d <dataset>
+```
+
+A new package needs only its manifest in `package/`, named
+`package.<label>.json`, to be chosen the same way; `<label>` is its short name
+in job names. A value that is not a manifest there is refused rather
+than read as release (`eval/utils.py` `resolve_manifest`). A run on any
+package but the release one says so in its job name
+(`cc-agent-suite-experimental`, from the manifest's file name), so dashboards
+keep it apart from the release runs. A control arm installs nothing, whatever
+the value.
+
 **subset** is a command-line choice, never a config key:
 
 ```bash
@@ -59,8 +105,8 @@ python3 eval/run.py -c claude-code/agent-suite --skills tpu-agent -d smoke-check
 ./eval/sandbox.sh -c claude-code/agent-suite --skills tpu-agent
 ```
 
-The names are checked against what `package.release.json` releases, and each skill is
-built whole, with everything it reaches. `--skills` is refused with a
+The names are checked against what the config's package releases, and each
+skill is built whole, with everything it reaches. `--skills` is refused with a
 `baseline` config, which has nothing to choose from, and in CI, which always
 runs the whole package. A subset's job name says so (`cc-agent-suite-subset-agent`),
 so it is never read as a scored agent-suite run.

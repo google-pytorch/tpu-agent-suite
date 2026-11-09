@@ -3,9 +3,9 @@ title: "Size a Serving Topology and Batch for Decode"
 type: playbook
 tags: [workload, performance, memory, precision, parallelism]
 created: 2026-09-04
-updated: 2026-09-04
+updated: 2026-10-27
 sources: 3
-human_reviewed: true
+human_reviewed: false
 aliases: ["inference sizing", "serving recipe", "latency throughput tradeoff"]
 target_imports:
 - serving_topology
@@ -32,7 +32,7 @@ book's Part 7/8 procedure as steps ([scaling-book, Part 7](../sources/2025-scali
 2. **Parameter bytes** by dtype (70B: 140 GB bf16, 70 GB int8, 35 GB int4)
    ([scaling-book, Part 8](../sources/2025-scaling-book-applied-inference.md)).
 3. **Minimum slice by memory**: `ceil((params + B·S·KV) / HBM_per_chip)` rounded to a real
-   topology. Signal: for LLaMA 3-70B on v5e (16 GB): bf16 4×4, int8 4×2, int4 2×2 — with
+   topology. Signal: for LLaMA 3-70B on v5e (16 GiB): bf16 4×4, int8 4×2, int4 2×2 — with
    only ~43 KV caches of 8k left, i.e. tiny batches ([scaling-book, Part 8](../sources/2025-scaling-book-applied-inference.md)).
 4. **Critical batch** for the dtype plan: `B_crit = β · C / W_hbm` (240 bf16, 120 int8
    weights + bf16 FLOPs on v5e; per-generation on
@@ -42,7 +42,7 @@ book's Part 7/8 procedure as steps ([scaling-book, Part 7](../sources/2025-scali
    with batch while step time is weight-load-bound (4×8 bf16 → batch 140, 1.6× the QPS/chip
    of 4×4) ([scaling-book, Part 8](../sources/2025-scaling-book-applied-inference.md)).
 6. **Step-time floor**: `B·KV / W_hbm_total + max(2·B·params / C_total, params / W_hbm_total)`.
-   Signal: 17 ms at BS 32 int8 on a v5e 4×2; 19 ms when the cache fills 16 GB per chip
+   Signal: 17 ms at BS 32 int8 on a v5e 4×2; ~20 ms when the cache fills the chip's 16 GiB
    ([prefill-vs-decode](../concepts/prefill-vs-decode.md)).
 7. **Model-parallel limits.** Compute-bound: `Y ≤ M_Y·F/α_ici` (≈16–26 for `F = 28.7k` on
    v5e with two axes). Latency-bound (small batch): `Y ≤ F / (B·β)`, `β = W_hbm/W_ici`
@@ -69,7 +69,7 @@ book's Part 7/8 procedure as steps ([scaling-book, Part 7](../sources/2025-scali
   ([scaling-book, Part 8](../sources/2025-scaling-book-applied-inference.md)).
 - Small-batch collectives are latency-bound below ~45 kB per shard
   ([collective-costs](../concepts/collective-costs.md#latency-bound-regime)).
-- v5e-derived numbers reused on v6e (32 GB) or TPU7x (192 GiB, far higher HBM bandwidth):
+- v5e-derived numbers reused on v6e (32 GiB) or TPU7x (192 GiB, far higher HBM bandwidth):
   recompute every step.
 
 ## Verification

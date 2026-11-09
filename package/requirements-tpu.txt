@@ -7,10 +7,11 @@
 #   ImportError: .../glue_2_13_0/libpywrap_2_13_0_common.so: undefined symbol:
 #     torch::autograd::_wrap_outputs(...)
 # Bump this bound when torch_tpu ships a shim for a newer torch.
-torch>=2.13.0,<2.14
+# The torch and jax floors are the versions in lmsysorg/sglang:v0.1.0-tpu.
+torch>=2.11.0,<2.14
 # The libtpu that jax 0.11.0 pins (jax[tpu] pins one libtpu minor per release).
 libtpu>=0.0.44
-jax>=0.11.0
+jax>=0.10.2
 transformers>=4.40.0
 diffusers>=0.28.0
 tpu-info>=0.7.1
@@ -23,28 +24,14 @@ pytest>=8.0.0
 # use an access token from GCS_TOKEN_FILE when gcloud is missing.
 google-cloud-storage>=2.10.0
 
+# The `custom_fastapi` engine serves a model vLLM cannot, or one the user asked
+# to serve that way, from scripts/tpu-model-onboarding/inference.py, which
+# imports all three. fastapi 0.100 is the first release on pydantic 2.
+fastapi>=0.100.0
+pydantic>=2.0.0
+uvicorn>=0.20.0
+
 # tpu-kernel-development's PyTorch front end round-trips bf16/fp8 golden values through raw
 # uint bits, which numpy cannot represent. jax already pulls it in; listed so it
 # survives a change to jax's own dependencies.
 ml_dtypes>=0.5.0
-
-# DELIBERATELY NOT INSTALLED: torchax and torch_xla.
-#
-# tpu-kernel-development's `reference_mode: "torchax"` obtains the JAX reference
-# mechanically instead of having an agent hand-write it. It wants a torch the
-# rest of this file cannot have:
-#
-#   torchax 0.0.13 builds autocast and decomposition tables at import time keyed
-#   on aten overloads removed after torch 2.9 (aten.prod.dim_Dimname,
-#   aten.cholesky, aten.all.dimname), so it does not import against the
-#   torch>=2.13 pinned above.
-#
-#   torch_xla, which torchax pulls in for TPU execution, must match the torch
-#   minor version, and its newest release is 2.9.0.
-#
-# Installing either here would tear down the torch_tpu stack the rest of the
-# package runs on. So the loop probes for them and degrades instead:
-# `reference_mode` falls back to "llm_port" when `import torchax` fails, which
-# is the path that needs no extra dependency and is gated just as strictly.
-# Running torchax mode needs its own venv with the matching pins, reached with
-# `--interpreter` -- see references/tpu-kernel-development/torchax-oracle-pipeline.md.

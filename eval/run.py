@@ -41,8 +41,11 @@ from harbor.constants import HARBOR_VIEWER_JOBS_URL
 from eval.agents.installer_staging import collect_task_environment_answers
 from eval.mount_advisor import MountUpdates, SkillMountAdvisor
 from eval.staging import stage_composite_package
-from eval.utils import (find_repo_root, harness_for_config, is_control_arm,
-                        released_skills, skill_subset)
+from eval.utils import (RELEASE_MANIFEST, find_repo_root, harness_for_config,
+                        installs_at_user_scope, is_control_arm,
+                        package_identity, package_label, package_manifest,
+                        read_harness_pins, released_skills, resolve_manifest,
+                        skill_subset)
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,19 @@ def resolve_template(val: Any) -> str | None:
         var_name, default = match.group(1), match.group(2)
         return os.environ.get(var_name, default)
     return val_str
+
+
+def config_package_manifest(config: dict[str, Any]) -> str:
+    """Return the PACKAGE_MANIFEST value in `config`'s first agent env, unchecked.
+
+    Its `${VAR:-default}` template is resolved against the environment, and
+    an unset or empty value gives package.release.json (eval/utils.py
+    `package_manifest`).
+    """
+    agents = config.get("agents") or []
+    env = (agents[0].get("env") if agents else None) or {}
+    return package_manifest(
+        {"PACKAGE_MANIFEST": resolve_template(env.get("PACKAGE_MANIFEST"))})
 
 
 def available_configs() -> str:
@@ -906,7 +922,10 @@ def get_harbor_hub_url(job_dir: Path) -> str | None:
     job_id = data.get("id") if isinstance(data, dict) else None
     if not job_id:
         return None
-    return f"{HARBOR_VIEWER_JOBS_URL}/{job_id}"
+    viewer_jobs_url = (os.environ.get("HARBOR_VIEWER_JOBS_URL")
+                       or os.environ.get("HARBOR_VIEWER_URL")
+                       or HARBOR_VIEWER_JOBS_URL).rstrip("/")
+    return f"{viewer_jobs_url}/{job_id}"
 
 
 # GitHub rejects a step summary over 1 MiB, and a run can fail several trials
@@ -1243,6 +1262,8 @@ def setup_gke_credentials_if_needed(
         return None
 
     cluster_name = resolve_template(env.get("GKE_CLUSTER"))
+    if backend not in ("gke_job", "gke_pod") and not cluster_name:
+        return None
     project = resolve_template(env.get("GKE_PROJECT"))
     location = resolve_template(env.get("GKE_LOCATION"))
     # Early return if KUBECONFIG is not required and no GKE cluster is targeted
@@ -1344,6 +1365,7 @@ def setup_gke_credentials_if_needed(
             f"  That identity needs container.clusters.get on the cluster; set GKE_AUTH_ACCOUNT to one that has it."
         )
 
+    kubeconfig_path.chmod(0o644)
     return GkeCredentials(kubeconfig_path=kubeconfig_path)
 
 
@@ -1541,23 +1563,20 @@ _MOUNT_VARS = (
     "QUOTA_PROJECT",
 )
 
-# Package identity the staged install is keyed on.
-_STAGED_PKG_NAME = "tpu-agent-suite"
+HARNESS_PINS_FILE = REPO_ROOT / ".ci" / "pins.conf"
 
 
-def _resolve_staged_pkg_version() -> str:
-    pkg_json = REPO_ROOT / "package" / "package.release.json"
-    if pkg_json.is_file():
-        try:
-            return str(
-                json.loads(pkg_json.read_text(encoding="utf-8")).get(
-                    "version", "0.0.0"))
-        except Exception:
-            pass
-    return "0.0.0"
+def export_harness_pins() -> None:
+    """Export the harness CLI pins in .ci/pins.conf to the environment.
 
-
-_STAGED_PKG_VERSION = _resolve_staged_pkg_version()
+    The claude-code configs install `${CLAUDE_CODE_VERSION}`, so every trial
+    runs the Claude Code release the CI E2E job pins instead of npm's latest.
+    A value already in the environment wins, so one run can try another
+    release without a checkout change. agy needs no export: the eval adapter
+    reads the same file to install it.
+    """
+    for key, value in read_harness_pins(HARNESS_PINS_FILE).items():
+        os.environ.setdefault(key, value)
 
 
 def export_git_ref() -> None:
@@ -1644,18 +1663,13 @@ def export_host_adc(quota_project: str) -> None:
             f"No Application Default Credentials found at {adc}.\n"
             "Run: gcloud auth application-default login")
 
-    resolved = adc
     data = json.loads(adc.read_text(encoding="utf-8"))
-    if data.get("quota_project_id") != quota_project:
-        data["quota_project_id"] = quota_project
-        fd, tmp = tempfile.mkstemp(prefix="eval-adc-", suffix=".json")
-        os.close(fd)
-        resolved = Path(tmp)
-        resolved.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        resolved.chmod(0o644)
-        print(
-            f"==> injected quota_project_id ({quota_project}) into a temporary "
-            f"ADC: {resolved}")
+    data["quota_project_id"] = quota_project
+    resolved = Path(tempfile.mkdtemp(prefix="eval-adc-")) / "adc.json"
+    resolved.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    resolved.chmod(0o644)
+    print(
+        f"==> wrote ADC with quota_project_id ({quota_project}) to {resolved}")
 
     os.environ["HOST_ADC"] = str(resolved)
     # Same file, under the name the hf-onboarding config mounts.
@@ -1748,26 +1762,38 @@ def stage_package_if_needed(config: dict[str, Any],
         for k, v in first_agent_env.items()
     }
     compute = collect_task_environment_answers(resolved_agent_env)
+    control_arm = is_control_arm(config_path)
+    # A control arm installs nothing, so its PACKAGE_MANIFEST is not read.
+    manifest = RELEASE_MANIFEST
+    if not control_arm:
+        try:
+            manifest = resolve_manifest(package_manifest(resolved_agent_env),
+                                        REPO_ROOT)
+        except ValueError as exc:
+            raise RuntimeError(f"{config_path}: {exc}") from exc
 
     staging_result = stage_composite_package(
         harness,
-        control_arm=is_control_arm(config_path),
+        control_arm=control_arm,
         skills=skills,
         compute_answers=compute,
         repo_root=REPO_ROOT,
-        pkg_name=_STAGED_PKG_NAME,
-        pkg_version=_STAGED_PKG_VERSION,
+        manifest=manifest,
     )
 
     # Dynamically inject mounts and environment variables (session supervisor by default)
+    pkg_name, pkg_version = package_identity(manifest, REPO_ROOT)
     advisor = SkillMountAdvisor(
         staged_workspace=staging_result.staged_workspace,
         harness=harness,
         central_pkg_dir=staging_result.central_pkg_dir,
         repo_root=REPO_ROOT,
-        pkg_name=_STAGED_PKG_NAME,
-        pkg_version=_STAGED_PKG_VERSION,
+        pkg_name=pkg_name,
+        pkg_version=pkg_version,
         is_empty=staging_result.is_empty,
+        user_scope=installs_at_user_scope(config),
+        staged_dist=staging_result.staged_dist,
+        answers_file=staging_result.staged_root / "answers.json",
     )
     return advisor.get_updates()
 
@@ -2153,6 +2179,11 @@ def generate_job_name(
 
     target = resolve_target_slug(config, args)
     sut = resolve_sut_slug(config, config_path)
+    manifest = config_package_manifest(config)
+    if manifest != RELEASE_MANIFEST and not is_control_arm(config_path):
+        # Another package is another system under test; say so where the
+        # dashboards key on it, so its runs do not join the release ones.
+        sut += f"-{package_label(manifest)}"
     if skills:
         # A subset is not the system the agent-suite arm measures; say so where the
         # dashboards key on it.
@@ -2311,6 +2342,7 @@ def main() -> None:
                 " ADC configs in one run.")
         metadata_auth = auth_modes == {True}
         export_git_ref()
+        export_harness_pins()
         setup_host_auth(metadata_auth=metadata_auth)
 
         # Resolve jobs directory (supports optional -o / --jobs-dir override in harbor_args)
@@ -2334,23 +2366,32 @@ def main() -> None:
             target_suite_dir = compile_suite_if_needed(
                 suite, task_filter=tasks[0] if tasks else None)
 
-        subset = None
-        if args.skills:
-            if os.environ.get("GITHUB_RUN_ID"):
-                raise RuntimeError(
-                    "--skills is for debugging; CI runs the whole package")
-            try:
-                subset = skill_subset(args.skills, released_skills(REPO_ROOT))
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
+        if args.skills and os.environ.get("GITHUB_RUN_ID"):
+            raise RuntimeError(
+                "--skills is for debugging; CI runs the whole package")
 
         for config_path in config_paths:
             config = load_config(config_path)
             reject_removed_keys(config, config_path)
-            if subset and is_control_arm(config_path):
-                raise RuntimeError(
-                    f"--skills chooses part of the package, and {config_path} "
-                    "is a control arm, which installs nothing")
+            subset = None
+            if args.skills:
+                if is_control_arm(config_path):
+                    raise RuntimeError(
+                        f"--skills chooses part of the package, and "
+                        f"{config_path} is a control arm, which installs "
+                        "nothing")
+                # Checked against the package this config installs, so
+                # PACKAGE_MANIFEST=package.experimental.json can choose the
+                # skills only it ships.
+                try:
+                    subset = skill_subset(
+                        args.skills,
+                        released_skills(
+                            REPO_ROOT,
+                            resolve_manifest(config_package_manifest(config),
+                                             REPO_ROOT)))
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
             if target_suite_dir:
                 if tasks:
                     apply_tasks(config, tasks, dataset=str(target_suite_dir))
@@ -2375,13 +2416,14 @@ def main() -> None:
             )
             apply_mount_updates(config, updates)
             setup_vertex_if_needed(config)
-            loaded_configs.append((config_path, config, job_name))
+            # Each config's own subset: it was checked against its package.
+            loaded_configs.append((config_path, config, job_name, subset))
 
         results_summary: list[dict[str, Any]] = []
         overall_success = True
 
-        for idx, (config_path, config,
-                  job_name) in enumerate(loaded_configs, 1):
+        for idx, (config_path, config, job_name,
+                  subset) in enumerate(loaded_configs, 1):
 
             prefix = f"[{idx}/{len(config_paths)}] " if len(
                 config_paths) > 1 else ""

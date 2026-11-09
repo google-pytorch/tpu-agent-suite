@@ -24,14 +24,14 @@ import subprocess
 import uuid
 from typing import Any, Callable
 
+from framework import jsonio, paths
+
 Path = pathlib.Path
 
 
 def jobs_dir() -> Path:
     """Return the directory holding job records, creating it if needed."""
-    base_dir = os.environ.get("TPU_AGENT_SUITE_HOME")
-    root = Path(base_dir) if base_dir else Path.home() / ".tpu-agent-suite"
-    path = root / "runs" / "jobs"
+    path = paths.get_runs_root() / "jobs"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -51,6 +51,20 @@ def new_job_id() -> str:
     stamp = datetime.datetime.now(
         datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
     return f"job-{stamp}-{uuid.uuid4().hex[:6]}"
+
+
+def read_exit_code(path: Path) -> int | None:
+    """The exit code a launch wrapper wrote to `path`.
+
+    None while the file is missing; 1 when it cannot be read or holds no
+    number, so a mangled file never reads as success.
+    """
+    if not path.is_file():
+        return None
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return 1
 
 
 class ProcessUnknown(OSError):
@@ -165,7 +179,6 @@ class JobRecord:
     recipe_path: str = ""
     log_path: str = ""
     remote_dir: str = ""
-    workload_name: str = ""
     serve: bool = False
     # The compute profile the job was submitted under, so later commands for
     # it reach its target even after the run switches profile. None on
@@ -201,13 +214,8 @@ class JobRecord:
     @classmethod
     def load(cls, job_id: str) -> JobRecord | None:
         """Load a record by id, or None when it was never written."""
-        path = jobs_dir() / job_id / "job.json"
-        if not path.is_file():
-            return None
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, ValueError):
+        data = jsonio.load_json_or_empty(jobs_dir() / job_id / "job.json")
+        if not data:
             return None
         known = {f.name for f in dataclasses.fields(cls)}
         extra = data.pop("extra", {}) or {}
@@ -220,10 +228,10 @@ class JobRecord:
 
     def save(self) -> None:
         """Persist the record to its job directory."""
-        self.directory.mkdir(parents=True, exist_ok=True)
-        with open(self.directory / "job.json", "w",
-                  encoding="utf-8") as handle:
-            json.dump(dataclasses.asdict(self), handle, indent=2)
+        # Atomic, and in the same indent=2 layout job.json has always had.
+        jsonio.write_text_atomic(
+            self.directory / "job.json",
+            json.dumps(dataclasses.asdict(self), indent=2))
 
     def mark(self,
              status: str,
@@ -289,7 +297,7 @@ def reap_jobs(
     Each job is cancelled by its own backend's driver, resolved from its job
     id (the record names its backend and profile), so the driver decides
     what cancelling means there
-    (process group, Kubernetes Job, XPK workload) and what the record ends
+    (process group, Kubernetes Job) and what the record ends
     up saying. Returns the ids that ended CANCELLED and, separately, the ids
     whose cancel raised with the reason: a job the reaper could not stop is
     the one thing the caller must not be left to assume is gone.

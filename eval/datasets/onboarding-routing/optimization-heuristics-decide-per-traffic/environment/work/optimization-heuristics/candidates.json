@@ -1,0 +1,40 @@
+{
+ "baseline": {
+  "tp": 8,
+  "dp": 1,
+  "devices": 8,
+  "image": "sha256:8e22f91d",
+  "points": [
+   "1k1k-c32",
+   "1k1k-c128",
+   "8k1k-c32",
+   "8k1k-c128"
+  ]
+ },
+ "candidates": [
+  {
+   "cand_id": "m-tp4xdp2",
+   "kind": "mesh",
+   "status": "workload_dependent",
+   "rank": 1,
+   "serving_change": {
+    "tp": 4,
+    "dp": 2
+   },
+   "rationale": "one TP halving, two replicas"
+  },
+  {
+   "cand_id": "m-tp2xdp4",
+   "kind": "mesh",
+   "status": "workload_dependent",
+   "rank": 2,
+   "serving_change": {
+    "tp": 2,
+    "dp": 4
+   },
+   "rationale": "two TP halvings, four replicas"
+  }
+ ],
+ "reported_only": [],
+ "rejected_meshes": []
+}

@@ -1,0 +1,55 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reported only (it does not change the reward): one judge that explains the run.
+# Its value is in the `reasoning` of each criterion in
+# /logs/verifier/reward-details.json (test.sh also prints it to the verifier
+# log): the routing the agent chose, every step it performed, and an
+# explanation of what went wrong, if anything did.
+#
+# Expected routing: the prompt asks for the close-gaps skill if it is
+# available, and the agent's own approach otherwise (the baseline arm installs
+# no skills). close-gaps runs on the main thread and calls its own skills and
+# agents (workload-microbenchmark, decompose-optimization, critical-review,
+# exit-review, accuracy-check). The onboarding is provided in
+# /workspace/onboarded, so the model should not be onboarded again.
+
+[judge]
+judge = "vertex_ai/gemini-3.8-flash"
+reasoning_effort = "high"
+atif-trajectory = "/logs/agent/trajectory.json"
+timeout = 600
+
+[[criterion]]
+name = "routing"
+type = "binary"
+weight = 1.0
+description = "Explain the routing: list, in order, every skill and agent the agent invoked (what it was asked to do and what it returned), with Step IDs. If the close-gaps skill was available, pass if the optimization ran through it on the main thread (not inside a subagent), starting from the baseline job job-20261021054117-48973b. If it was not available, pass if the agent optimized from that baseline job on its own. In both cases, fail if the agent onboarded google/gemma-4-31B-it again. Otherwise fail, and say which hand-off went wrong and why."
+
+[[criterion]]
+name = "steps"
+type = "numeric"
+min = 0.0
+max = 10.0
+weight = 0.0
+description = "Explain the steps the agent performed, in order and with Step IDs: what it read of the onboarded baseline; how it ran the baseline (server, hardware, benchmark) and the baseline 1k/1k output tokens/s it measured; how it found what to optimize (with close-gaps: its microbenchmark baseline and ranked list of gaps); for each gap or change worked, the diagnosis, the changes tried and their measured results; the combined changes and their end-to-end result; the whole-model roofline; the accuracy check; and the optimized 1k/1k output tokens/s and speedup. Score with the number of microbenchmark A/B rounds the run measured (candidate arms, not the baseline jobs)."
+
+[[criterion]]
+name = "errors"
+type = "binary"
+weight = 1.0
+description = "Explain everything that went wrong, with Step IDs: failed or refused job submissions, crashes, out-of-memory errors, timeouts, bad or degenerate model output, benchmark requests that failed, a change kept without a measurement showing it helped, results reported without a benchmark run behind them, the onboarding's own numbers reported as this run's baseline, questions that left the run waiting on the user, and jobs or port forwards left running at the end. For each, give the error message, the likely cause, and whether and how the agent recovered. Pass if the run ended with no unrecovered error: the baseline and the optimized server were both benchmarked on the 1k/1k cell in this run, close-gaps finished if it was used, and every job the agent started was torn down. Otherwise fail and name the error that stopped the run."
+
+[scoring]
+aggregation = "weighted_mean"

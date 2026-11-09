@@ -52,8 +52,14 @@ the op list, the layer map or the shapes by hand.
 
 ## Run it this way
 
-Orchestrate in the main thread. Dispatch every bulk operation to a subagent: the roofline, the
-trace downloads, the op census, the source searches. Keep only tables in the main thread.
+Orchestrate from the thread that runs this skill, whether that is the main thread or a subagent.
+Dispatch every bulk operation to a subagent: the roofline, the trace downloads, the op census, the
+source searches. Keep only tables in the orchestrating thread.
+
+Unless a step names a package agent, "subagent" in this skill means a built-in subagent:
+`general-purpose` on Claude Code, `self` on Antigravity. A built-in subagent is not a package
+agent, so the "Direct delegation targets" line in your instructions does not forbid it. That line
+lists only the package agents you may call.
 
 The critical path is:
 
@@ -300,7 +306,7 @@ Require these back. Do not continue without them.
 | Required from the roofline | Consumed by | How |
 | --- | --- | --- |
 | Section 1, model structure: layer count, and the **layer type map** — which layer indices run which optional block, with period and offset if it is periodic | Step 3, Step 5.3.1 | in the reply |
-| Section 3, layer-by-layer: every op in a layer, with global and local operand and result shapes and dtypes | Step 3 count and shape reconciliation | **by path.** At 78 layers this is a large CSV. The Step 3 subagent reads it; it never enters the main thread |
+| Section 3, layer-by-layer: every op in a layer, with global and local operand and result shapes and dtypes | Step 3 count and shape reconciliation | **by path.** At 78 layers this is a large CSV. The Step 3 subagent reads it; it never enters the orchestrating thread |
 | Section 4, operation table: per-op HBM bytes, FLOPs, collective volume, `T_mem` / `T_comp` / `T_comm`, and which term binds | Step 4 floor, Step 5.2 | in the reply |
 | `roofline_data.json` | Step 3 and Step 4 join, so both joins are table operations and not arithmetic by hand | by path |
 | `config.json` | the diff in 2a, and the floor audit. Without it you cannot tell which dtypes were pinned from which were defaulted | by path |
@@ -353,8 +359,8 @@ the ranked table.
 The operator mapping needs the census and the list of operator names. It does not need any floor.
 Start it as soon as `windows.csv` exists, in parallel with the roofline dispatch:
 
-1. If Step 2a found an existing config, get the operator names in the main thread, in under 1 s:
-   `python3 {{script:roofline-analysis/roofline.py}} <config> --csv <workdir>/ops_names.csv --no-layers`.
+1. If Step 2a found an existing config, get the operator names in the orchestrating thread, in
+   under 1 s: `python3 {{script:roofline-analysis/roofline.py}} <config> --csv <workdir>/ops_names.csv --no-layers`.
    These are the names `roofline_data.json` will carry, unless the roofline reply changes the
    model structure. If no config exists, the subagent maps kernels to operators named from the
    source lines and shapes in the census, and Step 3b renames them to the roofline rows. Do not
@@ -368,7 +374,7 @@ Start it as soon as `windows.csv` exists, in parallel with the roofline dispatch
 One script reads `opmap.sql`, `windows.csv` and `roofline_data.json` and emits, per regime and
 operator: observed count, predicted count, ratio, measured ms, floor ms, headroom, ceiling, and
 the max/median and cross-rank columns of Step 4 item 6. It is a table operation of a few seconds.
-It runs in the main thread or in a short subagent. It never rebuilds the mapping.
+It runs in the orchestrating thread or in a short subagent. It never rebuilds the mapping.
 
 Act on the discrepancy as follows.
 
@@ -462,8 +468,10 @@ one**. Say in the report which regime every number belongs to.
 
 ## Step 5 — Diagnose each candidate, in this order
 
-Dispatch one subagent per full-report candidate from Step 4 item 7. Short-report candidates get no
-subagent. Never generate more than 10 candidate reports. The following procedures must be strictly
+Dispatch one built-in subagent (`general-purpose` on Claude Code, `self` on Antigravity) per
+full-report candidate from Step 4 item 7. Do not skip this step because tpu-diagnostics is your
+only direct delegation target: built-in subagents are not package agents. Short-report candidates
+get no subagent. Never generate more than 10 candidate reports. The following procedures must be strictly
 followed to find the root cause.
 
 Give every subagent the `opmap.sql` and `windows.csv` paths from Step 3, and the candidate's row

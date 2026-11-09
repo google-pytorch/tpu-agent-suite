@@ -20,6 +20,7 @@ import subprocess
 from typing import Any
 
 from . import auth_utils, base, registry, shell
+from .kubectl import Kubectl
 
 Path = pathlib.Path
 
@@ -41,15 +42,13 @@ class GkePodDriver(shell.RemoteShellDriver):
     Supplies the `RemoteShellDriver` transport primitives as `kubectl exec` and
     `kubectl cp`; the job lifecycle built on them is inherited. The pod must
     already be running -- this driver attaches to a workload, it does not create
-    one (`GkeXpkDriver` is the backend that launches cluster workloads).
+    one (`GkeJobDriver` is the backend that launches cluster workloads).
     """
 
     # app is the workload's own writable directory.
     JOB_ROOT = "/app/tpu_agent_suite_jobs"
     target_description = "pod"
     required_tools = base.GKE_TOOLS
-    # Set once the cluster refused the gcloud account but let ADC in.
-    using_adc = False
     runs_in_container = True
     CHECK_FIELDS = {
         "pod": ("pod", "namespace"),
@@ -70,10 +69,22 @@ class GkePodDriver(shell.RemoteShellDriver):
         kube_context: str | None = None,
     ) -> None:
         super().__init__(python_interpreter=python_interpreter)
-        self.namespace = namespace
+        self.kube = Kubectl(None, kube_context, namespace)
         self.pod = pod
         self.container = container
-        self.kube_context = kube_context
+
+    @property
+    def namespace(self) -> str:
+        return self.kube.namespace
+
+    @property
+    def kube_context(self) -> str | None:
+        return self.kube.kube_context
+
+    @property
+    def using_adc(self) -> bool:
+        """Whether the cluster refused the gcloud account but let ADC in."""
+        return self.kube.using_adc
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> GkePodDriver:
@@ -112,8 +123,7 @@ class GkePodDriver(shell.RemoteShellDriver):
     def _kubectl_base(self) -> list[str]:
         """Build a kubectl command scoped to this driver's context and
         namespace."""
-        return base.kubectl_prefix(
-            context=self.kube_context) + ["-n", self.namespace]
+        return self.kube.cmd(self.kube.ns())
 
     def _exec_prefix(self) -> list[str]:
         """Build the `kubectl exec` prefix addressing this pod's container."""
@@ -126,7 +136,7 @@ class GkePodDriver(shell.RemoteShellDriver):
             script: str,
             timeout: int | None = None) -> subprocess.CompletedProcess:
         proc = auth_utils.run_kubectl(
-            self,
+            self.kube,
             self._exec_prefix() +
             ["--", "sh", "-c", f"echo {EXEC_STARTED}\n{script}"],
             refused=_refused_before_exec,
@@ -148,7 +158,7 @@ class GkePodDriver(shell.RemoteShellDriver):
     def _cp(self, source: str,
             destination: str) -> subprocess.CompletedProcess:
         container = ["-c", self.container] if self.container else []
-        return auth_utils.run_kubectl(self,
+        return auth_utils.run_kubectl(self.kube,
                                       self._kubectl_base() +
                                       ["cp", source, destination] + container,
                                       timeout=120)
@@ -161,7 +171,7 @@ class GkePodDriver(shell.RemoteShellDriver):
     ) -> tuple[list[str], str]:
         """Tunnel to the configured pod; the driver already names its target."""
         auth_utils.resolve_credentials(
-            self,
+            self.kube,
             self._kubectl_base() + ["get", f"pod/{self.pod}", "-o", "name"])
         cmd = self._kubectl_base() + [
             "port-forward",
@@ -183,7 +193,8 @@ class GkePodDriver(shell.RemoteShellDriver):
     def _preflight_target(self, checks: list[base.PreflightCheck]) -> bool:
         """The cluster answers and the pod is Running."""
         if not auth_utils.cluster_check(
-                self, self._kubectl_base(), checks, namespace=self.namespace):
+                self.kube, self._kubectl_base(), checks,
+                namespace=self.namespace):
             return False
         proc = base.probe_run(
             self._kubectl_base() +

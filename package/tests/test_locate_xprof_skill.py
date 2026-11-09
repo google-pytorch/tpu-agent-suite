@@ -45,7 +45,7 @@ _REPO_ROOT = _PACKAGE_ROOT.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from framework import compiler  # noqa: E402
+from framework.builder import translate  # noqa: E402
 
 
 def _without_packaging():
@@ -308,7 +308,7 @@ class TestShipping(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out:
             dist = pathlib.Path(out) / "dist"
             with contextlib.redirect_stderr(io.StringIO()):
-                compiler.translate(_PACKAGE_ROOT, "claude-code", dist)
+                translate(_PACKAGE_ROOT, "claude-code", dist)
             self.assertTrue((dist / "scripts" / "tpu-diagnostics" /
                              "locate_xprof_skill.py").is_file())
             self.assertEqual(list(dist.rglob("skills/xprof")), [])

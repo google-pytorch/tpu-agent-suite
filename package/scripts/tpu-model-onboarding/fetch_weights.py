@@ -802,6 +802,13 @@ def fetch(model_id: str,
     import huggingface_hub
     from huggingface_hub import constants
 
+    if os.environ.get("HF_HUB_OFFLINE"):
+        dest = huggingface_hub.snapshot_download(model_id,
+                                                 revision=revision,
+                                                 local_files_only=True)
+        _say(f"{READY} {dest} (cached snapshot, nothing to download)")
+        return dest
+
     started = time.monotonic()
     try:
         info = huggingface_hub.HfApi().model_info(model_id,

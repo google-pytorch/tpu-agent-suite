@@ -60,13 +60,14 @@ MAX_COMPRESSION_RATIO = 2.4
 MIN_COMPRESSION_BYTES = 40
 MAX_NGRAM = 6
 MAX_CONSECUTIVE_REPEATS = 4
+OPENAI_ENGINES = ("vllm", "sglang")
 
 
 def build_request(engine: str, model_id: str, prompt: str, max_tokens: int,
                   chat: bool) -> tuple[str, dict]:
     """Return (path, payload) for the engine's own API shape."""
-    if engine == "vllm":
-        # vLLM serves the OpenAI spec and requires the model name in the body.
+    if engine in OPENAI_ENGINES:
+        # vLLM and SGLang serve the OpenAI spec and require the model name in the body.
         if chat:
             return "/v1/chat/completions", {
                 "model": model_id,
@@ -92,7 +93,7 @@ def build_request(engine: str, model_id: str, prompt: str, max_tokens: int,
 
 def extract_completion(engine: str, body: dict) -> str:
     """Pull the generated text out of whichever envelope the engine used."""
-    if engine == "vllm":
+    if engine in OPENAI_ENGINES:
         choices = body.get("choices") or []
         if not choices:
             return ""
@@ -193,10 +194,10 @@ def ask(port: int, engine: str, model_id: str, prompt: str, max_tokens: int,
         timeout: int) -> dict:
     """Send prompt and return what came back, prompt echo removed.
 
-    vLLM goes through the chat endpoint first, and falls back to plain
+    vLLM and SGLang go through the chat endpoint first, and fall back to plain
     completions only when the model has no chat template to apply.
     """
-    chat = engine == "vllm"
+    chat = engine in OPENAI_ENGINES
     while True:
         path, payload = build_request(engine, model_id, prompt, max_tokens,
                                       chat)
@@ -230,10 +231,10 @@ def main() -> int:
                         help="Local port (the forwarded one)")
     parser.add_argument("--engine",
                         default="custom_fastapi",
-                        choices=["custom_fastapi", "vllm"])
+                        choices=["custom_fastapi", "vllm", "sglang"])
     parser.add_argument("--model-id",
                         default="",
-                        help="Required by the vLLM OpenAI endpoint")
+                        help="Required by the vLLM/SGLang OpenAI endpoint")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--timeout", type=int, default=300)
@@ -243,8 +244,9 @@ def main() -> int:
     parser.add_argument("--output", default="verification.json")
     args = parser.parse_args()
 
-    if args.engine == "vllm" and not args.model_id:
-        print("--model-id is required for the vllm engine.", file=sys.stderr)
+    if args.engine in OPENAI_ENGINES and not args.model_id:
+        print(f"--model-id is required for the {args.engine} engine.",
+              file=sys.stderr)
         return 2
 
     result = ask(args.port, args.engine, args.model_id, args.prompt,

@@ -19,15 +19,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Optional dataset suite to scope the task check to (e.g. tpu-hello-world,
-# smoke-check, smart-hf-search). Configs are always validated as a whole,
-# since eval/configs/ is no longer partitioned by package.
-SUITE="${1:-}"
+# Optional dataset under eval/datasets/ to scope the task check to (e.g.
+# tpu-hello-world, smoke-check, smart-hf-search). Configs are always validated
+# as a whole, since eval/configs/ is no longer partitioned by package.
+DATASET="${1:-}"
 
-if [ -n "$SUITE" ]; then
-  echo "=== Verifying Harbor Setup (datasets/$SUITE) ==="
+if [ -n "$DATASET" ]; then
+  echo "=== Verifying Harbor Setup (datasets/$DATASET) ==="
 else
-  echo "=== Verifying Harbor Setup (all configs and datasets) ==="
+  echo "=== Verifying Harbor Setup (all configs, datasets, and suites) ==="
 fi
 
 # Resolve Harbor binary (fallback to PATH)
@@ -68,15 +68,15 @@ fi
 
 # 3. Validate schemas
 echo "Validating schemas..."
-export SUITE
+export DATASET
 "$PYTHON_BIN" - << 'EOF'
-import os, sys, yaml
+import os, sys, tempfile, yaml
 from pathlib import Path
 from harbor.models.job.config import JobConfig
 from harbor.models.task.config import TaskConfig
 
 eval_dir = Path("eval")
-suite = os.environ.get("SUITE", "")
+dataset_name = os.environ.get("DATASET", "")
 
 # Validate JobConfigs under configs/
 configs_dir = eval_dir / "configs"
@@ -101,46 +101,56 @@ for cfg_file in config_files:
         print(f"Error validating JobConfig {cfg_file}: {e}", file=sys.stderr)
         sys.exit(1)
 
-# Validate TaskConfigs under datasets/ and .datasets/
+# Validate TaskConfigs
 try:
     import tomllib
-    suites_dir = eval_dir / "suites"
-    from eval.suite_to_harbor.suite_to_harbor import compile_suite
-    if suites_dir.is_dir():
-        dot_datasets = eval_dir / ".datasets"
-        for suite_file in suites_dir.glob("**/*.yaml"):
-            with open(suite_file, "r", encoding="utf-8") as f:
-                s_data = yaml.safe_load(f) or {}
-            s_name = s_data.get("name") or s_data.get("suite_name") or suite_file.stem
-            sub_rel = suite_file.parent.relative_to(suites_dir)
-            target_suite_dir = dot_datasets / sub_rel if str(sub_rel) != "." else dot_datasets / s_name
-            task_tomls = list(target_suite_dir.glob("**/task.toml"))
-            stale = any(suite_file.stat().st_mtime > t.stat().st_mtime for t in task_tomls)
-            if not target_suite_dir.is_dir() or not task_tomls or stale:
-                compile_suite(suite_file, target_suite_dir)
 
-    # Every dataset is top-level now, so there is one place to look.
-    dataset_dir = eval_dir / "datasets" / suite if suite else eval_dir / "datasets"
-    if not dataset_dir.is_dir():
-        print(f"Error: Dataset directory not found: {dataset_dir}", file=sys.stderr)
-        sys.exit(1)
+    def validate_tasks(root: Path, source_suite: Path | None = None) -> None:
+        task_files = sorted(root.glob("**/task.toml"))
+        if not task_files:
+            print(f"WARNING: No task.toml files found under {source_suite or root}")
+            return
+        for task_path in task_files:
+            shown = (
+                f"{source_suite} [{task_path.parent.name}]"
+                if source_suite
+                else str(task_path)
+            )
+            try:
+                with open(task_path, "rb") as f:
+                    task_data = tomllib.load(f)
+                TaskConfig.model_validate(task_data)
+                print(f"✓ TaskConfig schema OK ({shown})")
+            except Exception as e:
+                print(f"Error validating TaskConfig {shown}: {e}", file=sys.stderr)
+                sys.exit(1)
 
-    task_files = sorted(dataset_dir.glob("**/task.toml"))
-    if not suite:
-        task_files += sorted(eval_dir.glob("**/.*datasets/**/task.toml"))
-
-    if not task_files:
-        print(f"WARNING: No task.toml files found under {dataset_dir}")
-
-    for task_path in task_files:
-        try:
-            with open(task_path, "rb") as f:
-                task_data = tomllib.load(f)
-            TaskConfig.model_validate(task_data)
-            print(f"✓ TaskConfig schema OK ({task_path})")
-        except Exception as e:
-            print(f"Error validating TaskConfig {task_path}: {e}", file=sys.stderr)
+    # Short path: verify only the specified dataset under eval/datasets/
+    if dataset_name:
+        dataset_dir = eval_dir / "datasets" / dataset_name
+        if not dataset_dir.is_dir():
+            print(f"Error: Dataset directory not found: {dataset_dir}", file=sys.stderr)
             sys.exit(1)
+        validate_tasks(dataset_dir)
+        sys.exit(0)
+
+    # Full path: verify all checked-in datasets and temporarily compiled suites
+    datasets_root = eval_dir / "datasets"
+    if not datasets_root.is_dir():
+        print(f"Error: Dataset directory not found: {datasets_root}", file=sys.stderr)
+        sys.exit(1)
+    validate_tasks(datasets_root)
+
+    suites_dir = eval_dir / "suites"
+    if suites_dir.is_dir():
+        from eval.suite_to_harbor.suite_to_harbor import compile_suite
+        with tempfile.TemporaryDirectory(prefix="eval_verify_suites_") as tmp_suites:
+            tmp_root = Path(tmp_suites)
+            for suite_file in sorted(suites_dir.glob("**/*.yaml")):
+                sub_rel = suite_file.relative_to(suites_dir).with_suffix("")
+                target_suite_dir = tmp_root / sub_rel
+                compile_suite(suite_file, target_suite_dir)
+                validate_tasks(target_suite_dir, source_suite=suite_file)
 except ImportError:
     print("Skipping TaskConfig schema validation (requires python 3.11+ or tomllib)")
 EOF

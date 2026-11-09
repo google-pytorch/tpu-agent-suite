@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -76,12 +77,12 @@ def collect_task_environment_answers(
             env_lookup.get("GKE_POD_SERVICE_ACCOUNT", ""),
         })
 
-    elif backend == "gke_xpk":
-        answers.update({
-            "cluster_name": env_lookup.get("GKE_CLUSTER", ""),
-            "zone": env_lookup.get("GKE_LOCATION", ""),
-            "project": env_lookup.get("GKE_PROJECT", ""),
-            "gcs_bucket": env_lookup.get("XPK_GCS_BUCKET", ""),
-        })
+    raw_extra_answers = env_lookup.get("COMPUTE_ANSWERS_JSON", "").strip()
+    if raw_extra_answers:
+        extra_answers = json.loads(raw_extra_answers)
+        if not isinstance(extra_answers, dict):
+            raise ValueError(
+                "COMPUTE_ANSWERS_JSON must decode to a JSON object")
+        answers.update(extra_answers)
 
     return answers

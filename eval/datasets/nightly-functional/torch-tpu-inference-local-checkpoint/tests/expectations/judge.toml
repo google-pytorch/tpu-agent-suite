@@ -1,0 +1,36 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[judge]
+judge = "vertex_ai/gemini-3.8-flash"
+atif-trajectory = "/logs/agent/trajectory.json"
+timeout = 600
+
+[[criterion]]
+description = "Verifies that the agent staged the local checkpoint directory (/workspace/checkpoints/local-qwen3-0.6b) to GCS using stage_checkpoint.py into a gs:// bucket prior to running remote preflight checks, producing a gs:// checkpoint URI. The judge must cite the exact turn number (Step ID) where stage_checkpoint.py was executed or where the staged gs:// checkpoint URI was produced."
+type = "binary"
+weight = 1.0
+
+[[criterion]]
+description = "Verifies that the inference workflow executed successfully on Cloud TPU in verification mode (not a failed run, crash, or mock/stub) using the vLLM engine and the staged gs:// checkpoint. The run must successfully deploy the model, probe health successfully (HTTP 200), verify text generation completion from the served model, and tear down the server afterwards. The judge must cite the exact turn number (Step ID) where inference verification succeeded and report the verification result (e.g., status code and generated text completion or health status) in its reasoning."
+type = "binary"
+weight = 1.0
+
+[[criterion]]
+description = "Verifies that the agent delivered a comprehensive final report to the user in the concluding turn of the conversation, summarizing the inference verification outcome and teardown status (rather than timing out or crashing). The judge must cite the exact turn number (Step ID) of the agent's final report to the user."
+type = "binary"
+weight = 1.0
+
+[scoring]
+aggregation = "weighted_mean"

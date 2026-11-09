@@ -15,9 +15,9 @@ features, or request improvements.
 ## Setting up linting, formatting, and static type checking
 
 ```bash
-pip install pre-commit
+pip install pre-commit pyyaml
 
-# Install hooks (the config declares both pre-commit and commit-msg hook types)
+# Install hooks (the config declares pre-commit, pre-push, and commit-msg hook types)
 pre-commit install
 
 # Manually run pre-commit (you shouldn't need to do this as it's run

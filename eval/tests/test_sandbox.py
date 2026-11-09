@@ -207,7 +207,8 @@ class TestSandbox(unittest.TestCase):
         elsewhere = self.tmp / "elsewhere"
         shadow = self.tmp / "shadow"
         (shadow / "framework").mkdir(parents=True)
-        (shadow / "package.release.json").write_text('{"version": "0.1.0"}\n')
+        (shadow /
+         "tpu-agent-suite-build.json").write_text('{"version": "0.1.0"}\n')
         (shadow / "framework" / "__init__.py").write_text("")
         # The real utils first, so only get_tpu_agent_suite_home differs: the rest of
         # the framework still has to import for the host compile to run at all.

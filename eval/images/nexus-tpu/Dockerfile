@@ -13,11 +13,10 @@
 # limitations under the License.
 
 # This file is an image that TPU workloads can run inside on the containerized
-# backends (e.g., gke_job, gke_pod, gke_xpk). This image is based on the latest
+# backends (e.g., gke_job, gke_pod). This image is based on the latest
 # vLLM-TorchTPU prod and includes everything in package/requirements-tpu.txt.
 #
-# This image is built nightly by .github/workflows/tpu-image.yml and
-# pushed to:
+# This image is built nightly in CI and pushed to:
 #   us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-tpu:latest
 # To build it yourself, run from the repository root:
 #   docker build -f eval/images/nexus-tpu/Dockerfile -t nexus-tpu package

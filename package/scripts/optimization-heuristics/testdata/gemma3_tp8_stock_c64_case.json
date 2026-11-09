@@ -1,0 +1,223 @@
+{
+  "case": "gemma3_27b_1k1k_c64",
+  "framework": "vllm_torchtpu",
+  "profiles": [
+    {
+      "key": "stock_c64_steady",
+      "role": "mixed",
+      "session_id": "baseline2.xplane.pb",
+      "result": {
+        "phase_stats": [
+          {
+            "phase": "decode",
+            "n_steps_per_device": 125.0,
+            "idle_frac": 0.0011493038,
+            "mean_bucket": 64.0,
+            "mean_dur_ms": 21.930780744,
+            "p90_dur_ms": 22.0934118
+          },
+          {
+            "phase": "all",
+            "n_steps_per_device": 125.0,
+            "idle_frac": 0.0011493038,
+            "mean_bucket": 64.0,
+            "mean_dur_ms": 21.930780744,
+            "p90_dur_ms": 22.0934118
+          }
+        ],
+        "class_share": [
+          {
+            "phase": "all",
+            "op_class": "attention_kernel",
+            "share": 0.6985940947,
+            "ms_per_step": 15.32071392
+          },
+          {
+            "phase": "all",
+            "op_class": "matmul",
+            "share": 0.1448401545,
+            "ms_per_step": 3.176457672
+          },
+          {
+            "phase": "all",
+            "op_class": "collective",
+            "share": 0.1211036232,
+            "ms_per_step": 2.655897008
+          },
+          {
+            "phase": "all",
+            "op_class": "other",
+            "share": 0.0286364371,
+            "ms_per_step": 0.628019424
+          },
+          {
+            "phase": "decode",
+            "op_class": "attention_kernel",
+            "share": 0.6985940947,
+            "ms_per_step": 15.32071392
+          },
+          {
+            "phase": "decode",
+            "op_class": "matmul",
+            "share": 0.1448401545,
+            "ms_per_step": 3.176457672
+          },
+          {
+            "phase": "decode",
+            "op_class": "collective",
+            "share": 0.1211036232,
+            "ms_per_step": 2.655897008
+          },
+          {
+            "phase": "decode",
+            "op_class": "other",
+            "share": 0.0286364371,
+            "ms_per_step": 0.628019424
+          }
+        ],
+        "top_ops": [
+          {
+            "base_op": "RPAd-p_64-bq_1_1-bkv_10240_10240-sw_1024",
+            "op_class": "attention_kernel",
+            "hlo_category": "custom-call",
+            "tf_op_type": "pallas_call",
+            "scope": "custom_kernel/custom_kernel/RPAd-p_64-bq_1_1-bkv_10240_10240-sw_1024/pallas_call",
+            "ms_per_step": 12.55248164,
+            "count_per_step": 51.656,
+            "share": 0.5723682064,
+            "phase": "decode"
+          },
+          {
+            "base_op": "fusion",
+            "op_class": "matmul",
+            "hlo_category": "convolution fusion",
+            "tf_op_type": "mm",
+            "scope": "mm/mm",
+            "ms_per_step": 2.870265784,
+            "count_per_step": 184.736,
+            "share": 0.1308784132,
+            "phase": "decode"
+          },
+          {
+            "base_op": "all-reduce",
+            "op_class": "collective",
+            "hlo_category": "all-reduce",
+            "tf_op_type": "distributed.all_reduce",
+            "scope": "distributed.all_reduce/distributed.all_reduce",
+            "ms_per_step": 2.655897008,
+            "count_per_step": 124.16,
+            "share": 0.1211036232,
+            "phase": "decode"
+          },
+          {
+            "base_op": "RPAd-p_64-bq_1_1-bkv_10240_10240",
+            "op_class": "attention_kernel",
+            "hlo_category": "custom-call",
+            "tf_op_type": "pallas_call",
+            "scope": "custom_kernel/custom_kernel/RPAd-p_64-bq_1_1-bkv_10240_10240/pallas_call",
+            "ms_per_step": 2.384105712,
+            "count_per_step": 9.928,
+            "share": 0.1087104805,
+            "phase": "decode"
+          },
+          {
+            "base_op": "RPAm-p_64-bq_32_32-bkv_2048_512-sw_1024",
+            "op_class": "attention_kernel",
+            "hlo_category": "custom-call",
+            "tf_op_type": "pallas_call",
+            "scope": "custom_kernel/custom_kernel/RPAm-p_64-bq_32_32-bkv_2048_512-sw_1024/pallas_call",
+            "ms_per_step": 0.322253968,
+            "count_per_step": 51.656,
+            "share": 0.0146941402,
+            "phase": "decode"
+          },
+          {
+            "base_op": "fusion",
+            "op_class": "other",
+            "hlo_category": "loop fusion",
+            "tf_op_type": "mean",
+            "scope": "mean/mean",
+            "ms_per_step": 0.317885232,
+            "count_per_step": 370.488,
+            "share": 0.0144949346,
+            "phase": "decode"
+          },
+          {
+            "base_op": "convolution_bitcast_fusion",
+            "op_class": "matmul",
+            "hlo_category": "convolution fusion",
+            "tf_op_type": "mm",
+            "scope": "mm/mm",
+            "ms_per_step": 0.306191888,
+            "count_per_step": 61.584,
+            "share": 0.0139617413,
+            "phase": "decode"
+          },
+          {
+            "base_op": "multiply_subtract_fusion",
+            "op_class": "other",
+            "hlo_category": "loop fusion",
+            "tf_op_type": "sub",
+            "scope": "sub/sub",
+            "ms_per_step": 0.111382656,
+            "count_per_step": 123.168,
+            "share": 0.0050788277,
+            "phase": "decode"
+          }
+        ],
+        "findings": [
+          {
+            "detector_id": "D11_recompilation",
+            "title": "XLA compilation inside the serving window",
+            "phase": "all",
+            "summary": "125 compile events (8.3 ms) happen after serving started; each blocks the engine loop.",
+            "evidence": [
+              {
+                "metric": "compile events",
+                "value": 125,
+                "unit": "",
+                "detail": "CommonPjRtLoadedExecutable::Execute (tt_jit_compile_mlir_as_strided)",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "diagnostic",
+            "confidence": "medium",
+            "est_step_fraction_saved": 0.0,
+            "validation": "Warm up all buckets before profiling; confirm no runtime compiles with the recompilation check enabled.",
+            "kernel_followup": null,
+            "source_refs": [],
+            "lever": "diagnostic",
+            "couples_with": [],
+            "score": 0.0
+          },
+          {
+            "detector_id": "D14_profile_hygiene",
+            "title": "Profile quality limits confidence",
+            "phase": "all",
+            "summary": "Re-profile to raise confidence: stop_trace stalls the engine (exclude the tail).",
+            "evidence": [
+              {
+                "metric": "stop_trace duration",
+                "value": 376.639649,
+                "unit": " ms",
+                "detail": "",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "diagnostic",
+            "confidence": "high",
+            "est_step_fraction_saved": 0.0,
+            "validation": "",
+            "kernel_followup": null,
+            "source_refs": [],
+            "lever": "diagnostic",
+            "couples_with": [],
+            "score": 0.0
+          }
+        ]
+      }
+    }
+  ]
+}

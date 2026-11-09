@@ -18,7 +18,7 @@ entry: vllm-torchtpu-attention-backend
 keyword: custom-attention-backend
 url: not applicable -- see Evidence
 authority: first-party-verified
-retrieved: 2026-10-05
+retrieved: 2026-10-20
 source_updated: not applicable
 generator: authored
 ---
@@ -27,7 +27,7 @@ generator: authored
 
 On the vllm-torchtpu plugin, `--attention-backend` is what picks the paged
 attention kernel. `CUSTOM` selects the plugin's batched-RPA backend, which runs
-tpu-inference's experimental `batched_rpa` kernel. Without the flag the plugin
+the plugin's own experimental `batched_rpa` kernel. Without the flag the plugin
 falls back to `FLASH_ATTN` and the non-batched RPA kernel, and on Gemma-4-31B-it
 that kernel fails to compile. This is why tpu-model-onboarding's vLLM recipe always
 passes `--attention-backend CUSTOM`.
@@ -42,23 +42,37 @@ passes `--attention-backend CUSTOM`.
 
 ## The dispatch chain
 
-Read from the plugin source in the task image (vLLM 0.29.0, torch_tpu
-0.1.1+release.2026.9.22). vllm-torchtpu is not public yet, so these paths are
-the image's, not a repository's.
+Read from vllm-project/vllm-torchtpu at `9725110e` (2026-10-20, vLLM 0.31.0).
 
 1. `--attention-backend CUSTOM` sets `attention_config.backend` to
-   `AttentionBackendEnum.CUSTOM`.
-2. The plugin registers `PallasBatchedRPAAttentionBackend` under that enum
-   (`vllm_torchtpu/layers/adapter/attention.py`,
-   `@register_backend(AttentionBackendEnum.CUSTOM)`). `TpuPlatform` chooses it
-   over `PallasAttentionBackend` when the backend is `CUSTOM`
-   (`vllm_torchtpu/platforms/tpu_platform.py`).
-3. Its Impl sets `use_batched_rpa=True`, which the backend's docstring says
-   "plumbs through `_pallas_rpa_kernel` → `attention()` →
-   `sharded_ragged_paged_attention()` to pick the batched kernel function".
-4. The kernel is tpu-inference's `kernels/experimental/batched_rpa`. The public
-   half of the dispatch, in tpu-inference's `attention_interface.py`, is
+   `AttentionBackendEnum.CUSTOM`. `TpuPlatform.get_attn_backend_cls` keeps
+   `FLASH_ATTN`, `CUSTOM` and `FLASH_ATTN_MLA`, forces MLA models to
+   `FLASH_ATTN_MLA`, and turns anything else into `FLASH_ATTN`
+   ([`platforms/tpu_platform.py`](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/platforms/tpu_platform.py#L565-L594)).
+2. `@register_backend(AttentionBackendEnum.CUSTOM)` registers
+   `PallasBatchedRPAAttentionBackend`, whose Impl is
+   `PallasBatchedRPAAttentionBackendImpl`
+   ([`layers/adapter/attention.py`](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/layers/adapter/attention.py#L720-L742)).
+3. That Impl sets `_kernel_entry = _pallas_rpa_kernel_batched`
+   ([L1644-L1647](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/layers/adapter/attention.py#L1644-L1647)), which passes
+   `rpa_func=ragged_paged_attention_batched` into `attention()`
+   ([L541-L546](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/layers/adapter/attention.py#L541-L546)). `FLASH_ATTN`'s
+   Impl keeps the default `_pallas_rpa_kernel_default`, the RPA v3 kernel. The
+   backend's docstring still describes a `use_batched_rpa` flag; no code sets
+   one.
+4. `attention()` calls `sharded_ragged_paged_attention`, which runs
+   `rpa_func`, except that head_dim 64 always takes the hd64 kernel
+   ([`layers/core/attention_interface.py`](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/layers/core/attention_interface.py#L353-L409)).
+5. `ragged_paged_attention_batched` is the plugin's own
+   `vllm_torchtpu/kernels/experimental/batched_rpa`
+   ([L32, L66](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/layers/core/attention_interface.py#L66)). Nothing in the
+   plugin imports tpu-inference. The 2026-10-05 reading of the task image's
+   plugin (vLLM 0.29.0, torch_tpu 0.1.1+release.2026.9.22) attributed the
+   kernel to tpu-inference; tpu-inference's own dispatch is
    `index.py get attention-kernel-dispatch`.
+
+`CUSTOM` with `VLLM_TPU_BLOCK_MAJOR_KV=1` raises `NotImplementedError`
+([L1228-L1238](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/layers/adapter/attention.py#L1228-L1238)).
 
 Without the flag:
 
@@ -66,22 +80,20 @@ Without the flag:
   to FLASH_ATTN.` and then `Using FLASH_ATTN backend.` `<X>` is whatever
   upstream vLLM chose. For Gemma-4 that is `TRITON_ATTN`, because its layers
   have two head sizes (256 and 512).
-- `FLASH_ATTN` maps to `PallasAttentionBackend`, which does not set
-  `use_batched_rpa`.
+- `FLASH_ATTN` maps to `PallasAttentionBackend`, whose Impl runs the RPA v3
+  kernel.
 
 With the flag, the startup log says `Using CUSTOM backend.` once per worker.
-
-Not determined here: how the per-call `use_batched_rpa` interacts with
-tpu-inference's `USE_BATCHED_RPA_KERNEL` environment variable.
 
 ## Tell which kernel ran
 
 - **Startup log:** `Using CUSTOM backend.` or `Using FLASH_ATTN backend.`
 - **Kernel names**, in a trace or a compile error: the kernel that ran out of
   VMEM without the flag (below) was
-  `RPAm-p_128-bq_512_512-bkv_2048_512-sw_1024`. That is the
-  `RPA<case>-p_<page_size>-bq_...` form that `attention-kernel-dispatch` gives
-  for RPA v3, not the `RPA<mode>-p<page_size>` form it gives for `batched_rpa`.
+  `RPAm-p_128-bq_512_512-bkv_2048_512-sw_1024`. That is RPA v3's
+  `RPA<case>-p_<page_size>-bq_...` form. The plugin's `batched_rpa` kernel is
+  named `RPA<mode>-<kv_layout>-p<page_size>-b...`
+  ([`batched_rpa/kernel.py`](https://github.com/vllm-project/vllm-torchtpu/blob/9725110e14e01caf8997519320ce5c6e1f5077c5/src/vllm_torchtpu/kernels/experimental/batched_rpa/kernel.py#L746-L750)).
 - When you profile a server, take the kernel's source file from the launch
   flags, not from a file with a similar name.
 
@@ -117,7 +129,8 @@ the attention backend, so they are not evidence either way:
 - **No performance comparison.** No run compared throughput or output agreement
   between the two backends on a model that serves under both.
 - **TPU VM, not the GKE image.** The comparison ran on a TPU VM with its own
-  plugin checkout. The dispatch chain was read from the GKE task image.
+  plugin checkout. The 2026-10-05 dispatch chain was read from the GKE task
+  image; the chain above is from the public repository.
 
 ## Sources
 

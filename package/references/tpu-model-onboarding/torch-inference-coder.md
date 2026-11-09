@@ -3,7 +3,9 @@ scripts:
   - scripts/tpu-model-onboarding/inference.py
   - scripts/tpu-model-onboarding/fetch_weights.py
   - scripts/common/discover_vllm_flags.sh
+  - scripts/common/discover_sglang_flags.sh
   - scripts/common/serve_vllm.sh
+  - scripts/common/serve_sglang.sh
   - scripts/tpu-model-onboarding/inference_test.py
   - scripts/tpu-model-onboarding/health_probe.py
   - scripts/tpu-model-onboarding/verify_inference.py
@@ -41,8 +43,9 @@ to read or execute, never output locations.
         c. Local path to checkpoint file
         d. URL to checkpoint file or model repo
 -   **`engine`**(Optional): The engine to be used for setting up the model for
-    inference. Default: `vllm` for supported CausalLM architectures; `custom_fastapi`
-    for non-LLMs, unwired models, or fallback.
+    inference. Default: `vllm` for supported CausalLM architectures (`sglang`
+    when explicitly requested); `custom_fastapi` for non-LLMs, unwired models,
+    or fallback.
 -   **`port`**(Optional): The port to use to setup the API for inference.
 
 ## How This Skill Reaches The Target
@@ -150,43 +153,94 @@ on the target's default interpreter, and the script resolves `vllm` from
 beside it, else from `PATH`.
 
 Populate the `deployments.json` with keys mapping to standard CLI arguments.
-For `vllm`, take the parallelism from `<inference_work>/tp_plan.json`, written
-by the `vllm-engine-compatibility` check:
+For `vllm` and `sglang`, take the parallelism from
+`<inference_work>/tp_plan.json`, written by the `engine-compatibility` check.
+The plan names its fields the vLLM way whichever engine it was run for; the
+manifest uses the engine's own keys, and the flags file is the one discovered
+for that engine (for `sglang`, run step 1 of the `sglang` recipe before
+writing the manifest):
+
+| Meaning | `tp_plan.json` field | `vllm` key (flag) | `sglang` key (flag) |
+|---|---|---|---|
+| Flags file | | `vllm_flags.txt` | `sglang_flags.txt` |
+| TP | `tensor_parallel_size` | `tensor_parallel_size` (`--tensor-parallel-size`) | `tp_size` (`--tp-size`) |
+| DP (replicas) | `data_parallel_size` | `data_parallel_size` (`--data-parallel-size`) | `dp_size` (`--dp-size`) |
+| Requests per replica | `max_num_seqs` | `max_num_seqs` (`--max-num-seqs`) | `max_running_requests` (`--max-running-requests`) |
+| Context length | | `max_model_len` (`--max-model-len`) | `context_length` (`--context-length`) |
+
+Below, "the TP key", "the DP flag" and so on mean that engine's column. Steps
+that read the manifest later (the benchmark's concurrency limit, a sweep's
+`--max-model-len`) read the same keys. SGLang on TPU may lower its requests
+per replica at startup; Step 3d checks for that and updates the manifest.
 
 Apply these in order; the first that matches decides:
 
 1.  **The user stated a TP** (the plan's `source` is `"user"`): use its
-    `tensor_parallel_size`, whatever else holds. Copy `data_parallel_size`
-    too when `--data-parallel-size` appears in `vllm_flags.txt`; when it does
-    not, omit it and run one replica, leaving the other devices unused.
-2.  **`--data-parallel-size` appears in `vllm_flags.txt`**: copy both
-    `tensor_parallel_size` and `data_parallel_size`. Their product is the
-    plan's `devices`, so no device sits idle.
-3.  **Otherwise** the engine cannot run replicas: copy
-    `tensor_parallel_size` and omit `data_parallel_size`. The plan's TP is
-    already the largest that fits, so a larger one would not start either;
-    any devices the replicas would have used sit idle.
+    `tensor_parallel_size` as the TP key, whatever else holds. Copy
+    `data_parallel_size` as the DP key too when the DP flag appears in the
+    flags file; when it does not, omit it and run one replica, leaving the
+    other devices unused.
+2.  **The DP flag appears in the flags file**: copy the plan's
+    `tensor_parallel_size` and `data_parallel_size` as the TP and DP keys.
+    Their product is the plan's `devices`, so no device sits idle.
+3.  **Otherwise** the engine cannot run replicas: copy the TP key and omit
+    the DP key. The plan's TP is already the largest that fits, so a larger
+    one would not start either; any devices the replicas would have used sit
+    idle.
 
 Record the choice in a `parallelism` object: `source` and `reason` from the
 plan, plus, under rule 1 without data parallelism or under rule 3, that data
-parallelism is unavailable in this vLLM build. When the plan's
+parallelism is unavailable in this engine build. When the plan's
 `smallest_fitting_tp` is below the TP you use, record it in `parallelism` too:
 benchmark numbers for this deployment are then measured on the single-engine
 layout, and any report of them must say that TP `smallest_fitting_tp` with
 more replicas also fits and may serve faster. `parallelism` is a record, not
-a vLLM flag.
+an engine flag.
+
+Set the requests-per-replica key when its flag appears in the flags file,
+from the first that applies:
+
+1.  A value the user states, or the patch registry's `serving` settings name.
+2.  The plan's value for the layout you deploy: `max_num_seqs.value` when
+    you deploy the plan's TP and DP, else the
+    `max_num_seqs_other_layouts` entry with your TP and DP (a manifest
+    without the DP key runs one replica: DP 1). A null there means omit the
+    key; do not go on to item 3.
+3.  A layout neither field lists (the registry's, say): the highest
+    `--points` concurrency divided by your DP, rounded up, when that is
+    above 8, and at least 8; otherwise omit the key.
+
+The value is per replica for both engines, so the server admits that value
+x DP requests at once. (SGLang divides `--max-running-requests` among
+replicas only under DP attention, which these recipes do not enable.) A null
+plan value means no `--points`, no KV estimate, no point asking a replica
+for more than 8, or a cache that holds fewer than 8 sequences at every
+point. With the key omitted, the engine keeps its own default; a sweep then
+runs without `--max-concurrency-limit`, and its top points may measure
+queueing rather than the server.
 
 **Check the layout with tpu-knowledge-base: required for every `vllm`
 deployment, before you write the manifest.** Delegate to
 {{agent:tpu-knowledge-base}} for `vllm-tp-dp-plan`, naming the model, the
-hardware, the TP x DP you are about to use and `smallest_fitting_tp`. The
+hardware, the serving image, the TP x DP you are about to use,
+`smallest_fitting_tp`, and the input length, output length and concurrency
+the request targets (the entry's rule for TP versus replicas depends on
+them). The
 plan's `reason` states the rule but not what is known to go wrong with it;
 that entry records the rule's evidence and its open caveats, such as a model
 that failed at the TP the rule picks. Do not skip the delegation because
 `reason` already explains the choice, or because the user did not ask.
 
 -   Copy every caveat that names this model, this TP or this hardware into
-    `parallelism.caveats`, and tell the user before launching.
+    `parallelism.caveats`, and tell the user before launching. Copy there too
+    every `kv_warnings` entry of `tp_plan.json`: each names a target point
+    the KV cache cannot hold. When the plan has a `traffic_rule`, copy it
+    too, with its
+    `tradeoff` and the layout it passed over (`instead_of`), and tell the
+    user: the plan chose fewer TP ranks for the target traffic. If
+    `--data-parallel-size` is not in `vllm_flags.txt`, use `instead_of`
+    rather than the plan's TP, since a halved TP without replicas leaves
+    half the devices idle.
 -   When the user asks why this TP, or wants a different one, answer from
     that entry and cite it. It uses the same terms (device, TP, replica, DP)
     as `tp_plan.json`.
@@ -210,10 +264,32 @@ Example for `vllm`:
       "max_model_len": 2048,
       "tensor_parallel_size": 8,
       "data_parallel_size": 1,
+      "max_num_seqs": 256,
       "parallelism": {
         "source": "recommended",
         "reason": "largest TP that divides 32 heads and whose weight shard (1.9 GiB) fits 80% of 32 GiB, leaving the most HBM for the KV cache and compiling one engine; TP 1 also fits and, with more replicas, may serve faster: pass --tp to measure it, at the cost of startup time and memory headroom",
         "smallest_fitting_tp": 1
+      }
+    }
+  ]
+}
+```
+
+Example for `sglang`:
+```json
+{
+  "deployments": [
+    {
+      "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+      "engine": "sglang",
+      "port": 8000,
+      "context_length": 2048,
+      "tp_size": 1,
+      "dp_size": 8,
+      "max_running_requests": 32,
+      "parallelism": {
+        "source": "user",
+        "reason": "the user asked for TP 1"
       }
     }
   ]
@@ -289,13 +365,18 @@ If the vLLM engine is requested:
     (changing `tensor_parallel_size` to `--tensor-parallel-size`, etc.), using
     only flags that appeared in `vllm_flags.txt`. Skip `parallelism`; it
     records why, and is not a flag.
-3.  You MUST forcefully append `--attention-backend CUSTOM` and `--host 0.0.0.0`
-    to the generated bash script. `--host 0.0.0.0` is what makes the port
-    forwardable; a server bound to `127.0.0.1` inside a pod cannot be reached.
-    `CUSTOM` selects vllm-torchtpu's `PallasBatchedRPAAttentionBackend`, which
-    runs tpu-inference's `kernels/experimental/batched_rpa` rather than RPA v3;
-    without it the plugin falls back to `FLASH_ATTN`, and Gemma-4-31B-it fails
-    to compile (ask {{agent:tpu-knowledge-base}} for `custom-attention-backend`).
+3.  You MUST append `--host 0.0.0.0` to the generated bash script, and
+    `--attention-backend CUSTOM` unless the manifest sets `attention_backend`
+    (a serving candidate's manifest can; step 2 has then appended it, and a
+    second `--attention-backend` would override it). `--host 0.0.0.0` is what
+    makes the port forwardable; a server bound to `127.0.0.1` inside a pod
+    cannot be reached. `CUSTOM` selects vllm-torchtpu's
+    `PallasBatchedRPAAttentionBackend`, which runs the plugin's
+    `kernels/experimental/batched_rpa` rather than RPA v3; without it the
+    plugin falls back to `FLASH_ATTN`, and Gemma-4-31B-it fails to compile
+    (ask {{agent:tpu-knowledge-base}} for `custom-attention-backend`). A
+    candidate's `FLASH_ATTN` runs RPA v3 deliberately, with the decode
+    blocks its env sets.
 4.  Start the server with `exec bash serve_vllm.sh <the vllm serve
     arguments>`, never with `vllm serve` directly (see step 7). It resolves
     `vllm` from beside `$TPU_AGENT_SUITE_PYTHON`, the interpreter the framework
@@ -393,6 +474,59 @@ exec bash serve_vllm.sh "openai/gpt-oss-20b" \
   --attention-backend CUSTOM
 ```
 
+### Recipe: `sglang`
+
+If the `sglang` engine is requested:
+
+1.  Discover the flags the installed build accepts with
+    `{{script:common/discover_sglang_flags.sh}}` before writing
+    `deployments.json`. Preflight's Step 3 job normally captured them already:
+    when its `preflight.json` has a `discover_sglang_flags.exit_code` of `0`,
+    use `<inference_work>/sglang_flags.txt` and skip this job. Otherwise run:
+    ```bash
+    {{runtime}} compute run --package {{package_tag}} \
+      --code {{script:common/discover_sglang_flags.sh}} \
+      --timeout 120 \
+      --output sglang_flags.txt:<inference_work>/sglang_flags.txt \
+      -- sglang_flags.txt
+    ```
+2.  Generate `<inference_work>/launch_sglang.sh` and start the server with
+    `exec bash serve_sglang.sh <the sglang.launch_server arguments>`
+    ({{script:common/serve_sglang.sh}}), which arms
+    `SGLANG_TORCH_PROFILER_DIR` and serves traces on port 8790. It also
+    raises SGLang's GPU-sized timeouts for TPU compilation
+    (`SGLANG_WARMUP_TIMEOUT=3600`, and `--watchdog-timeout 3600` and
+    `--dist-timeout 1800` where the build has the flag), keeping any the
+    recipe sets; don't lower them. Pass the manifest's `tp_size`, `dp_size`,
+    `max_running_requests` and `context_length` as `--tp-size`, `--dp-size`,
+    `--max-running-requests` and `--context-length` (each only when the key is
+    in the manifest; Task 1 already checked them against
+    `sglang_flags.txt`), plus `--served-model-name <model_id>`,
+    `--device tpu`, and `--host 0.0.0.0`. Skip `parallelism`; it is not a
+    flag:
+    ```bash
+    #!/bin/bash
+    set -eo pipefail
+    PY="${TPU_AGENT_SUITE_PYTHON:-python3}"
+    PY="$(command -v "${PY/#\~/$HOME}")" \
+      || { echo "no Python at ${TPU_AGENT_SUITE_PYTHON:-python3} on the target" >&2; exit 1; }
+    "$PY" fetch_weights.py "meta-llama/Llama-3.1-8B-Instruct" \
+      --path-file weights_path.txt || exit 1
+    export HF_HUB_OFFLINE=1
+    exec bash serve_sglang.sh "$(cat weights_path.txt)" \
+      --served-model-name "meta-llama/Llama-3.1-8B-Instruct" \
+      --port 8000 \
+      --tp-size 1 \
+      --dp-size 8 \
+      --max-running-requests 32 \
+      --context-length 2048 \
+      --device tpu \
+      --host 0.0.0.0
+    ```
+3.  Submit `<inference_work>/launch_sglang.sh` in Step 3a with
+    `--input {{script:common/serve_sglang.sh}}:serve_sglang.sh` and
+    `--input {{script:tpu-model-onboarding/fetch_weights.py}}:fetch_weights.py`.
+
 ## Task 3: Launch and Monitor Deployment
 
 ### Step 3a: Submit the daemon
@@ -414,7 +548,7 @@ else's. A `RUNNING` record is this deployment's server only if it is the
 `job_id` an earlier onboarding result returned for it, or carries the
 `--name <model>-serve` this run gave it. A new server spends 15-30 minutes
 starting up, and two hold twice the chips. Reuse it if any runtime limit
-(`declared_duration_minutes` in `compute inspect`'s `details`) still covers
+(the compute profile's `declared_duration_minutes`, from `config show`) still covers
 what is left to do: the limit less the time since the `start_time` that
 `job status` shows.
 
@@ -560,6 +694,22 @@ works; a short timeout keeps it under the shell's ten-minute limit. If it
 times out, the server said it was up, so connection-refused points at the
 forward: check that its PID is alive and re-establish it with Step 3c.
 
+For `sglang`, once health passes, check whether SGLang lowered the requests
+per replica to fit its compiled batch sizes. Its log names the value it
+runs with:
+
+```bash
+{{runtime}} compute job logs --package {{package_tag}} --job-id $JOB_ID \
+  | grep 'TPU batch limits after reconciliation' | tail -n 1
+```
+
+When that line's `max_running_requests` is below the manifest's, set
+`max_running_requests` in `deployments.json` and `--max-running-requests`
+in `launch_sglang.sh` to the line's value, and add the change to
+`parallelism.caveats`. Do not relaunch: the running server already uses the
+lower value, and later steps read it from the manifest. With no such line,
+or a value equal to the manifest's, change nothing.
+
 ### Step 3e: When a deployment fails
 
 Come here from Step 3b exit 2 or 4. Resubmitting the same deployment reproduces
@@ -635,33 +785,45 @@ the same failure, so every resubmission must answer a line from the log.
         Node preemption, taint eviction and memory pressure on the node look
         like this. Report it and stop; the configuration is not at fault,
         so there is nothing to change.
-    -   *Timeout*: the log names `Timed out waiting for engine core processes
-        to start`, or a `TimeoutError` from an RPC or a collective, while the
-        lines before it still show the engine compiling or loading (`Compiling
-        FX graph`, `TpuCompilerAdaptor`, weights loading) and no other
-        exception. The server was healthy and slow, not misconfigured: keep
-        the model's configuration. Resubmit once under a new `--name` with the
-        named timeout doubled, exported in `launch_vllm.sh` before `exec bash
-        serve_vllm.sh` (`VLLM_ENGINE_READY_TIMEOUT_S`,
-        `VLLM_ENGINE_ITERATION_TIMEOUT_S`, `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`
-        or `VLLM_DISTRIBUTED_TIMEOUT_S`). If it times out again at the doubled
-        value, report the last compile line before it, and stop.
+    -   *Timeout*: the log names one of the engine's timeout lines below,
+        while the lines before it still show the engine compiling or loading
+        (`Compiling FX graph`, `TpuCompilerAdaptor`, weights loading) and no
+        exception other than the timeout itself. The server was healthy and
+        slow, not misconfigured: keep the model's configuration. Resubmit once
+        under a new `--name` with the timeout that line names doubled,
+        exported in the launcher before its `exec bash serve_<engine>.sh`:
+        -   vLLM (`launch_vllm.sh`): `Timed out waiting for engine core
+            processes to start`, or a `TimeoutError` from an RPC or a
+            collective (`VLLM_ENGINE_READY_TIMEOUT_S`,
+            `VLLM_ENGINE_ITERATION_TIMEOUT_S`,
+            `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` or
+            `VLLM_DISTRIBUTED_TIMEOUT_S`).
+        -   SGLang (`launch_sglang.sh`): `Scheduler watchdog timeout` with
+            `self.soft=False` (`SGLANG_WATCHDOG_TIMEOUT_S`), `Initialization
+            failed. warmup error` followed by a `ReadTimeout`
+            (`SGLANG_WARMUP_TIMEOUT`), or a `TimeoutError` from a collective
+            (`SGLANG_DIST_TIMEOUT_S`).
+
+        If it times out again at the doubled value, report the last compile
+        line before it, and stop.
     -   *Configuration*: the log names an exception (`ValueError`,
         `RESOURCE_EXHAUSTED`, a vLLM argument error). Change the manifest or
         launcher so it addresses that exception, then resubmit under a new
         `--name`. A memory error at the planned TP is answered by a larger
         TP, and a larger TP needs fewer replicas: TP x DP must still equal
-        the device count. Rerun the `vllm-engine-compatibility` check with
+        the device count. Rerun the `engine-compatibility` check with
         `--tp <the larger TP>` (the next divisor of the device count above
-        the failed one) and take TP and DP from the new `tp_plan.json`, as
-        in Task 1; never change TP alone. When no larger divisor exists, or
+        the failed one) and the same `--points`, and take TP, DP and
+        requests per replica from the new `tp_plan.json`, as in Task 1; never
+        change TP alone. When no larger divisor exists, or
         the new plan's `ok` is false (the heads or the device layouts rule
         that TP out), keep the planned TP and DP and shrink what each
         engine holds instead. A hybrid model (the plan's
         `linear_attention_heads` is set) keeps a state slot per concurrent
-        sequence, so lower `max_num_seqs` first when `--max-num-seqs`
-        appears in `vllm_flags.txt`; otherwise, or for any other model,
-        lower `max_model_len`. Update `parallelism.reason` to name the
+        sequence, so lower the requests-per-replica key first when its flag
+        appears in the flags file (Task 1's table); otherwise, or for any
+        other model, lower the context-length key. Update
+        `parallelism.reason` to name the
         memory error.
     -   *Unknown*: `job logs` could not read the logs. Say so, include its
         error, and stop. Do not look for them another way.

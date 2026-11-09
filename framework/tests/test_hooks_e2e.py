@@ -27,16 +27,24 @@ import unittest
 from pathlib import Path
 from typing import Callable
 
-from framework.utils import (RUN_ID_PATTERN, TPU_AGENT_SUITE_HOME_SPELLING,
-                             SemVer, extract_all_json_objects,
-                             is_google_harness, read_jsonl, validate_instance,
-                             version_satisfies)
+from framework.jsonio import read_jsonl
+from framework.paths import TPU_AGENT_SUITE_HOME_SPELLING
+from framework.utils import (RUN_ID_PATTERN, SemVer, extract_all_json_objects,
+                             validate_instance, version_satisfies)
 
-START_RUN_TEST_PROMPT = (
-    "What is your active TPU agent suite run_id? "
-    "Output ONLY the run_id string. "
-    "Say you don't know if you are not aware of any run_id. "
-    "Do not make any tool call.")
+# How each harness CLI runs one prompt: the words before it, the words after
+# it, and the hook config the installer writes into the workspace.
+HARNESS_CLIS = {
+    "claude-code": (["claude", "-p"], [], ".claude/settings.json"),
+    "antigravity":
+    (["agy", "-p"], ["--dangerously-skip-permissions"], ".agents/hooks.json"),
+    "cursor": (["cursor", "-p"], [], ".cursor/hooks.json"),
+    "codex": (["codex", "exec"], [], ".codex/hooks.json"),
+}
+# Permission for Claude Code to run the sentinel's `touch`, so only a hook can
+# stop it. Variadic, so it must come after the prompt.
+CLAUDE_ALLOW_TOUCH = ("--allowedTools", "Bash(touch:*)")
+
 SCHEMA_VERIFIER_TEST_PROMPT = (
     "Please delegate to the 'tpu-diagnostics' subagent. "
     "Pass a JSON object as the subagent prompt with your active run_id and a "
@@ -54,12 +62,16 @@ SCHEMA_VERIFIER_TEST_PROMPT = (
 DIAGNOSTICS_REQUEST_SCHEMA = "schemas/profiling-request.json"
 DIAGNOSTICS_RESULT_SCHEMA = "schemas/profiling-result.json"
 
+SCHEMA_VERIFIER_SESSION_TIMEOUT_S = 180
+
 HANDBACK_DENY_TEST_PROMPT = (
     "Please delegate to the 'tpu-diagnostics' subagent. "
     "Pass a JSON object as the subagent prompt with your active run_id and a "
     "prompt field set to: 'This is a harness test of your hand-back channel, "
     "not a profiling run. Do not run any tool calls other than "
-    "SubagentHandback. First call SubagentHandback with the message "
+    "SubagentHandback. A refused SubagentHandback does not end your run: the "
+    "refusal comes back to you and you must call it again, so the first call "
+    "is not your only one. First call SubagentHandback with the message "
     "\"handshake\" and nothing else. When it is refused, hand back a "
     "schema-valid result with status \"invalid_input\"'. "
     "Your final reply must be only the subagent's JSON deliverable, copied "
@@ -163,12 +175,25 @@ def _claude_has_handback() -> bool:
         version, f">={CLAUDE_HANDBACK_MIN_VERSION}")
 
 
+def _needs_cli(harness: str):
+    """Skip unless the harness's CLI binary is on PATH."""
+    binary = HARNESS_CLIS[harness][0][0]
+    return unittest.skipIf(not shutil.which(binary),
+                           f"{binary} CLI binary not found in PATH")
+
+
 @unittest.skipUnless(
     os.environ.get("RUN_HARNESS_CLI_E2E"),
     "Set RUN_HARNESS_CLI_E2E=1 to run live harness CLI end-to-end tests",
 )
 class TestHooksCLIEndToEnd(unittest.TestCase):
-    """End-to-end tests imitating user CLI compilation, installation, and harness execution."""
+    """End-to-end tests imitating user CLI compilation, installation, and harness execution.
+
+    Every install lands in the test's temp dir and the harness reads it from
+    the workspace. Google harnesses merge ~/.gemini/config into the session
+    as well: run these with no global hooks or agents there, or the session
+    is not the one under test.
+    """
 
     def setUp(self):
         self._start_time = time.monotonic()
@@ -228,25 +253,29 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
     def _setup_and_run_harness_cli(
         self,
         harness: str,
-        cli_cmd: list[str],
-        hook_rel_path: str,
-        dist_name: str,
-        workspace_name: str,
-        log_prefix: str,
+        prompt: str,
+        name: str,
+        extra_args: tuple[str, ...] = (),
         timeout: int = 90,
         package_dir: Path | None = None,
         before_run: Callable[[Path], None] | None = None,
         expect_run: bool = True,
-    ) -> tuple[subprocess.CompletedProcess[str], Path, str]:
+    ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
         """Compile, install, and execute harness CLI end-to-end, asserting lifecycle initialization.
 
+        Runs `prompt` through the harness's CLI (`HARNESS_CLIS`), followed by
+        `extra_args`; `name` names the dist, workspace and logs.
         `before_run` is called with the workspace after the install is
         complete and patched, just before the harness is launched: for a
         test that breaks the install on purpose. `expect_run=False` skips the
         run-namespace assertions, for a test whose dispatcher cannot run.
+        Returns the CLI result, the run id ("" without a run) and workspace.
         """
-        dist_dir = self.temp_dir / dist_name
-        workspace = self.temp_dir / workspace_name
+        before, after, hook_rel_path = HARNESS_CLIS[harness]
+        cli_cmd = [*before, prompt, *after, *extra_args]
+        log_prefix = name
+        dist_dir = self.temp_dir / f"dist_{name}"
+        workspace = self.temp_dir / f"workspace_{name}"
         workspace.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init"],
                        cwd=str(workspace),
@@ -354,52 +383,7 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         ] if runs_dir.is_dir() else [])
         self.assertEqual(initial_runs, [])
 
-        # 3. Temporarily sync hooks and subagents to global discovery paths for Google harnesses
-        # Google harnesses discover active hooks from ~/.gemini/config/hooks.json and custom subagents from ~/.gemini/config/agents/.
-        if is_google_harness(harness):
-            global_hooks = Path.home() / ".gemini" / "config" / "hooks.json"
-            orig_hooks = (global_hooks.read_text(
-                encoding="utf-8") if global_hooks.is_file() else None)
-            local_hooks = workspace / hook_rel_path
-            if local_hooks.is_file():
-                global_hooks.parent.mkdir(parents=True, exist_ok=True)
-                global_hooks.write_text(
-                    local_hooks.read_text(encoding="utf-8"), encoding="utf-8")
-
-                def _restore_global_hooks(p=global_hooks, content=orig_hooks):
-                    if content is not None:
-                        p.write_text(content, encoding="utf-8")
-                    else:
-                        p.unlink(missing_ok=True)
-
-                self.addCleanup(_restore_global_hooks)
-
-            # Sync workspace agents to ~/.gemini/config/agents/ so CLI discovers them
-            local_agents_dir = workspace / ".agents" / "agents"
-            if local_agents_dir.is_dir():
-                global_agents_dir = Path.home(
-                ) / ".gemini" / "config" / "agents"
-                global_agents_dir.mkdir(parents=True, exist_ok=True)
-                copied_agents: list[tuple[Path, str | None]] = []
-                for agent_file in local_agents_dir.glob("*.md"):
-                    dest_file = global_agents_dir / agent_file.name
-                    orig_content = (dest_file.read_text(
-                        encoding="utf-8") if dest_file.is_file() else None)
-                    dest_file.write_text(
-                        agent_file.read_text(encoding="utf-8"),
-                        encoding="utf-8")
-                    copied_agents.append((dest_file, orig_content))
-
-                def _restore_global_agents(entries=copied_agents):
-                    for target, original in entries:
-                        if original is not None:
-                            target.write_text(original, encoding="utf-8")
-                        else:
-                            target.unlink(missing_ok=True)
-
-                self.addCleanup(_restore_global_agents)
-
-        # 4. Run prompt end-to-end using real harness CLI
+        # 3. Run prompt end-to-end using real harness CLI
         env = dict(os.environ)
         env["TPU_AGENT_SUITE_HOME"] = str(self.central_home)
 
@@ -444,9 +428,9 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         )
 
         if not expect_run:
-            return cli_res, runs_dir, "", workspace
+            return cli_res, "", workspace
 
-        # 5. Verify run namespace was created by session-run-init hook
+        # 4. Verify run namespace was created by session-run-init hook
         self.assertTrue(
             runs_dir.is_dir(),
             "Runs directory ~/.tpu-agent-suite/runs was not created")
@@ -479,31 +463,26 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
                       run_data.get("package", ""))
         self.assertTrue((run_entry / "artifacts").is_dir())
 
-        return cli_res, runs_dir, expected_run_id, workspace
+        return cli_res, expected_run_id, workspace
 
-    def _run_harness_cli_start_run_e2e(
-        self,
-        harness: str,
-        cli_cmd: list[str],
-        hook_rel_path: str,
-        dist_name: str,
-        workspace_name: str,
-        log_prefix: str,
-    ):
-        cli_res, _runs_dir, expected_run_id, _workspace = self._setup_and_run_harness_cli(
-            harness=harness,
-            cli_cmd=cli_cmd,
-            hook_rel_path=hook_rel_path,
-            dist_name=dist_name,
-            workspace_name=workspace_name,
-            log_prefix=log_prefix,
-            timeout=60,
-        )
-        self.assertIn(
-            expected_run_id,
-            cli_res.stdout,
-            f"{harness} agent was not aware of run_id {expected_run_id}. Output was:\n{cli_res.stdout}",
-        )
+    def _copy_package(self, name: str, edit: Callable[[Path, dict],
+                                                      None]) -> Path:
+        """Copy the package to `name` in the temp dir and let `edit` change it.
+
+        `edit` is handed the copy and its parsed manifest; the manifest is
+        written back once it returns.
+        """
+        test_pkg = self.temp_dir / name
+        if test_pkg.exists():
+            shutil.rmtree(test_pkg, ignore_errors=True)
+        shutil.copytree(self.package_dir, test_pkg)
+
+        pkg_json_path = test_pkg / "package.release.json"
+        pkg_manifest = json.loads(pkg_json_path.read_text(encoding="utf-8"))
+        edit(test_pkg, pkg_manifest)
+        pkg_json_path.write_text(json.dumps(pkg_manifest, indent=2),
+                                 encoding="utf-8")
+        return test_pkg
 
     def _create_schema_verifier_test_package(self) -> Path:
         """A package copy carrying the recorder the delegation assertions read.
@@ -512,17 +491,8 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         and `DIAGNOSTICS_RESULT_SCHEMA`, which the package's validators already
         enforce; the copy leaves the agent as it is and only adds the recorder.
         """
-        test_pkg = self.temp_dir / "pkg_schema_verifier"
-        if test_pkg.exists():
-            shutil.rmtree(test_pkg, ignore_errors=True)
-        shutil.copytree(self.package_dir, test_pkg)
-
-        pkg_json_path = test_pkg / "package.release.json"
-        pkg_manifest = json.loads(pkg_json_path.read_text(encoding="utf-8"))
-        self._add_event_recorder(test_pkg, pkg_manifest)
-        pkg_json_path.write_text(json.dumps(pkg_manifest, indent=2),
-                                 encoding="utf-8")
-        return test_pkg
+        return self._copy_package("pkg_schema_verifier",
+                                  self._add_event_recorder)
 
     def _add_event_recorder(self, test_pkg: Path, pkg_manifest: dict) -> None:
         """Give a package copy the recorder the delegation assertions read.
@@ -559,27 +529,18 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
             if e.get("event") == event
         ]
 
-    def _run_harness_cli_schema_verifier_e2e(
-        self,
-        harness: str,
-        cli_cmd: list[str],
-        hook_rel_path: str,
-        dist_name: str,
-        workspace_name: str,
-        log_prefix: str,
-    ):
+    def _run_harness_cli_schema_verifier_e2e(self, harness: str, name: str):
+        """Delegate to a subagent; the hooks hold request and result to their
+        contracts, and the request carries the run_id SessionStart gave the
+        caller -- its only source, since no tool call is allowed."""
         test_pkg = self._create_schema_verifier_test_package()
-        cli_res, _runs_dir, _expected_run_id, workspace = (
-            self._setup_and_run_harness_cli(
-                harness=harness,
-                cli_cmd=cli_cmd,
-                hook_rel_path=hook_rel_path,
-                dist_name=dist_name,
-                workspace_name=workspace_name,
-                log_prefix=log_prefix,
-                timeout=90,
-                package_dir=test_pkg,
-            ))
+        cli_res, expected_run_id, workspace = self._setup_and_run_harness_cli(
+            harness=harness,
+            prompt=SCHEMA_VERIFIER_TEST_PROMPT,
+            name=name,
+            timeout=SCHEMA_VERIFIER_SESSION_TIMEOUT_S,
+            package_dir=test_pkg,
+        )
 
         # 1. Verify the incoming delegation request conforms to the request contract
         pre_log_file = workspace / EVENT_RECORDER_LOG
@@ -618,6 +579,9 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
             f"Incoming delegation request payload violated "
             f"{DIAGNOSTICS_REQUEST_SCHEMA}: {req_errors}\nPayload: {payload_to_verify}",
         )
+        self.assertEqual(
+            payload_to_verify.get("run_id"), expected_run_id,
+            f"{harness} agent was not aware of run_id {expected_run_id}.")
 
         # 2. Verify the delivered result conforms to the result contract: on
         # the last SubagentStop fire, the one the hooks let through, and in the
@@ -673,42 +637,6 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
             )
         return fires[-1]
 
-    @unittest.skipIf(not shutil.which("claude"),
-                     "claude CLI binary not found in PATH")
-    def test_claude_code_cli_subagent_handback_e2e(self):
-        """E2E for Claude Code auto mode: the subagent must hand back through SubagentHandback, and the hooks hold that call to the contract."""
-        if not _claude_has_handback():
-            self.skipTest(
-                f"Claude Code < {CLAUDE_HANDBACK_MIN_VERSION} has no "
-                f"{CLAUDE_HANDBACK_TOOL}")
-        test_pkg = self._create_schema_verifier_test_package()
-        cli_res, _runs_dir, _run_id, workspace = (
-            self._setup_and_run_harness_cli(
-                harness="claude-code",
-                cli_cmd=[
-                    "claude",
-                    "-p",
-                    "--permission-mode",
-                    "auto",
-                    SCHEMA_VERIFIER_TEST_PROMPT,
-                ],
-                hook_rel_path=".claude/settings.json",
-                dist_name="dist_claude_handback",
-                workspace_name="workspace_claude_handback",
-                log_prefix="claude_handback",
-                timeout=180,
-                package_dir=test_pkg,
-            ))
-        final = self._assert_checked_by_one_road(workspace,
-                                                 require_handback=True)
-
-        self.assertTrue(
-            self._satisfies_diagnostics_result(final, test_pkg),
-            f"The delivered result did not satisfy {DIAGNOSTICS_RESULT_SCHEMA}: "
-            f"{final.get('output')!r}",
-        )
-        self._assert_delivered_in_stdout(cli_res.stdout, test_pkg)
-
     def _diagnostics_stop_fires(self, workspace: Path) -> list[dict]:
         """The recorded SubagentStop fires of 'tpu-diagnostics', in order."""
         return [
@@ -737,32 +665,26 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
             f"No result satisfying {DIAGNOSTICS_RESULT_SCHEMA} in the parent's "
             f"output:\n{stdout}")
 
-    @unittest.skipIf(not shutil.which("claude"),
-                     "claude CLI binary not found in PATH")
+    @_needs_cli("claude-code")
     def test_claude_code_cli_subagent_handback_deny_e2e(self):
-        """E2E for a refused hand-back: Claude Code must honour the hooks' tool denial, and the subagent retry until its result passes."""
+        """E2E for a refused hand-back: Claude Code must honour the hooks' tool denial, and the subagent retry until its result passes.
+
+        Also the auto-mode delivery road as a whole: the subagent may deliver
+        only through SubagentHandback, and the accepted call reaches the parent.
+        """
         if not _claude_has_handback():
             self.skipTest(
                 f"Claude Code < {CLAUDE_HANDBACK_MIN_VERSION} has no "
                 f"{CLAUDE_HANDBACK_TOOL}")
         test_pkg = self._create_schema_verifier_test_package()
-        cli_res, _runs_dir, _run_id, workspace = (
-            self._setup_and_run_harness_cli(
-                harness="claude-code",
-                cli_cmd=[
-                    "claude",
-                    "-p",
-                    "--permission-mode",
-                    "auto",
-                    HANDBACK_DENY_TEST_PROMPT,
-                ],
-                hook_rel_path=".claude/settings.json",
-                dist_name="dist_claude_handback_deny",
-                workspace_name="workspace_claude_handback_deny",
-                log_prefix="claude_handback_deny",
-                timeout=240,
-                package_dir=test_pkg,
-            ))
+        cli_res, _run_id, workspace = self._setup_and_run_harness_cli(
+            harness="claude-code",
+            prompt=HANDBACK_DENY_TEST_PROMPT,
+            name="claude_handback_deny",
+            extra_args=("--permission-mode", "auto"),
+            timeout=240,
+            package_dir=test_pkg,
+        )
         self._assert_checked_by_one_road(workspace, require_handback=True)
         # Every fire is a hand-back, the assertion above guarantees it.
         handbacks = self._diagnostics_stop_fires(workspace)
@@ -778,72 +700,61 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         # Only the parent's output shows Claude Code honoured the denial.
         self._assert_delivered_in_stdout(cli_res.stdout, test_pkg)
 
-    @unittest.skipIf(not shutil.which("claude"),
-                     "claude CLI binary not found in PATH")
-    def test_claude_code_cli_start_run_e2e(self):
-        """E2E test for Claude Code: compile -> install -> claude -p -> verify session-run-init hook."""
-        self._run_harness_cli_start_run_e2e(
-            harness="claude-code",
-            cli_cmd=[
-                "claude",
-                "-p",
-                START_RUN_TEST_PROMPT,
-            ],
-            hook_rel_path=".claude/settings.json",
-            dist_name="dist_claude",
-            workspace_name="workspace_claude",
-            log_prefix="claude",
-        )
-
-    @unittest.skipIf(not shutil.which("claude"),
-                     "claude CLI binary not found in PATH")
+    @_needs_cli("claude-code")
     def test_claude_code_cli_schema_verifier_e2e(self):
-        """E2E test for Claude Code: compile -> install -> delegate to subagent -> verify validate-delegate-request and validate-subagent-result hooks."""
-        self._run_harness_cli_schema_verifier_e2e(
-            harness="claude-code",
-            cli_cmd=[
-                "claude",
-                "-p",
-                SCHEMA_VERIFIER_TEST_PROMPT,
-            ],
-            hook_rel_path=".claude/settings.json",
-            dist_name="dist_claude_schema",
-            workspace_name="workspace_claude_schema",
-            log_prefix="claude_schema",
-        )
+        self._run_harness_cli_schema_verifier_e2e("claude-code",
+                                                  "claude_schema")
+
+    @_needs_cli("antigravity")
+    def test_antigravity_cli_schema_verifier_e2e(self):
+        self._run_harness_cli_schema_verifier_e2e("antigravity", "ag_schema")
+
+    @_needs_cli("cursor")
+    def test_cursor_cli_schema_verifier_e2e(self):
+        self._run_harness_cli_schema_verifier_e2e("cursor", "cursor_schema")
+
+    @_needs_cli("codex")
+    def test_codex_cli_schema_verifier_e2e(self):
+        self._run_harness_cli_schema_verifier_e2e("codex", "codex_schema")
+
+    def _for_each_policy(self, run: Callable[[str], None]) -> None:
+        """Run a scenario under `deny` and under `allow`.
+
+        Each policy gets a fresh central store: the setup asserts no run
+        exists yet, and the failure-log check reads the first record.
+        """
+        for on_failure in ("deny", "allow"):
+            with self.subTest(on_failure=on_failure):
+                shutil.rmtree(self.central_home, ignore_errors=True)
+                self.central_home.mkdir(parents=True)
+                run(on_failure)
 
     def _create_hung_hook_test_package(self, on_failure: str) -> Path:
         """Copy the package and guard `shell` with a hook that never answers."""
-        test_pkg = self.temp_dir / f"pkg_hung_hook_{on_failure}"
-        if test_pkg.exists():
-            shutil.rmtree(test_pkg, ignore_errors=True)
-        shutil.copytree(self.package_dir, test_pkg)
 
-        pkg_json_path = test_pkg / "package.release.json"
-        pkg_manifest = json.loads(pkg_json_path.read_text(encoding="utf-8"))
-        pkg_manifest.setdefault("hooks", []).append({
-            "name": HUNG_HOOK_NAME,
-            "event": "PreToolUse",
-            "matchers": ["shell"],
-            "command": f"cat > {HUNG_HOOK_PAYLOAD}; sleep 30",
-            "timeout": HUNG_HOOK_TIMEOUT_S,
-            "on_failure": on_failure,
-            "visibility": "external",
-        })
-        pkg_json_path.write_text(json.dumps(pkg_manifest, indent=2),
-                                 encoding="utf-8")
-        return test_pkg
+        def add_hung_hook(_test_pkg: Path, pkg_manifest: dict) -> None:
+            pkg_manifest.setdefault("hooks", []).append({
+                "name":
+                HUNG_HOOK_NAME,
+                "event":
+                "PreToolUse",
+                "matchers": ["shell"],
+                "command":
+                f"cat > {HUNG_HOOK_PAYLOAD}; sleep 30",
+                "timeout":
+                HUNG_HOOK_TIMEOUT_S,
+                "on_failure":
+                on_failure,
+                "visibility":
+                "external",
+            })
 
-    def _run_harness_cli_hung_hook_e2e(
-        self,
-        harness: str,
-        cli_cmd: list[str],
-        hook_rel_path: str,
-        dist_name: str,
-        workspace_name: str,
-        log_prefix: str,
-        on_failure: str = "deny",
-    ):
+        return self._copy_package(f"pkg_hung_hook_{on_failure}", add_hung_hook)
+
+    def _run_harness_cli_hung_hook_e2e(self,
+                                       harness: str,
+                                       prefix: str,
+                                       extra_args: tuple[str, ...] = ()):
         """A hook that hangs: dispatch's verdict on it must reach the harness.
 
         hook-dispatch settles a hook that outruns its timeout by its
@@ -856,18 +767,21 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         the reason given. With `allow`, it must run, and the failure must
         still be on record in the workspace's hook failure log.
         """
+        self._for_each_policy(lambda on_failure: self._hung_hook_once(
+            harness, f"{prefix}_hung_hook_{on_failure}", extra_args, on_failure
+        ))
+
+    def _hung_hook_once(self, harness: str, name: str,
+                        extra_args: tuple[str, ...], on_failure: str):
         test_pkg = self._create_hung_hook_test_package(on_failure)
-        cli_res, _runs_dir, _run_id, workspace = (
-            self._setup_and_run_harness_cli(
-                harness=harness,
-                cli_cmd=cli_cmd,
-                hook_rel_path=hook_rel_path,
-                dist_name=dist_name,
-                workspace_name=workspace_name,
-                log_prefix=log_prefix,
-                timeout=120,
-                package_dir=test_pkg,
-            ))
+        cli_res, _run_id, workspace = self._setup_and_run_harness_cli(
+            harness=harness,
+            prompt=HUNG_HOOK_TEST_PROMPT,
+            name=name,
+            extra_args=extra_args,
+            timeout=120,
+            package_dir=test_pkg,
+        )
 
         # The attempt was made and the hung hook fired for it: the event it
         # saved names the command. Without this, a model that never called
@@ -918,117 +832,59 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
             f"Expected {HUNG_HOOK_NAME}'s timeout reason in the output:\n"
             f"{cli_res.stdout}")
 
-    @unittest.skipIf(not shutil.which("claude"),
-                     "claude CLI binary not found in PATH")
-    def test_claude_code_cli_hung_hook_denies_e2e(self):
-        """E2E for Claude Code: a hung PreToolUse hook's deny is honoured."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="claude-code",
-            cli_cmd=[
-                "claude",
-                "-p",
-                HUNG_HOOK_TEST_PROMPT,
-                # Permission to run it, so only the hook can stop it.
-                # Variadic, so it must come after the prompt.
-                "--allowedTools",
-                "Bash(touch:*)",
-            ],
-            hook_rel_path=".claude/settings.json",
-            dist_name="dist_claude_hung_hook",
-            workspace_name="workspace_claude_hung_hook",
-            log_prefix="claude_hung_hook",
-        )
+    @_needs_cli("claude-code")
+    def test_claude_code_cli_hung_hook_e2e(self):
+        self._run_harness_cli_hung_hook_e2e("claude-code", "claude",
+                                            CLAUDE_ALLOW_TOUCH)
 
-    @unittest.skipIf(not shutil.which("agy"),
-                     "agy CLI binary not found in PATH")
-    def test_antigravity_cli_hung_hook_denies_e2e(self):
-        """E2E for Antigravity: a hung PreToolUse hook's deny is honoured."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="antigravity",
-            cli_cmd=[
-                "agy",
-                "-p",
-                HUNG_HOOK_TEST_PROMPT,
-                "--dangerously-skip-permissions",
-            ],
-            hook_rel_path=".agents/hooks.json",
-            dist_name="dist_ag_hung_hook",
-            workspace_name="workspace_ag_hung_hook",
-            log_prefix="agy_hung_hook",
-        )
+    @_needs_cli("antigravity")
+    def test_antigravity_cli_hung_hook_e2e(self):
+        self._run_harness_cli_hung_hook_e2e("antigravity", "ag")
 
-    @unittest.skipIf(not shutil.which("cursor"),
-                     "cursor CLI binary not found in PATH")
-    def test_cursor_cli_hung_hook_denies_e2e(self):
-        """E2E for Cursor: a hung PreToolUse hook's deny is honoured."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="cursor",
-            cli_cmd=[
-                "cursor",
-                "-p",
-                HUNG_HOOK_TEST_PROMPT,
-            ],
-            hook_rel_path=".cursor/hooks.json",
-            dist_name="dist_cursor_hung_hook",
-            workspace_name="workspace_cursor_hung_hook",
-            log_prefix="cursor_hung_hook",
-        )
+    @_needs_cli("cursor")
+    def test_cursor_cli_hung_hook_e2e(self):
+        self._run_harness_cli_hung_hook_e2e("cursor", "cursor")
 
-    @unittest.skipIf(not shutil.which("codex"),
-                     "codex CLI binary not found in PATH")
-    def test_codex_cli_hung_hook_denies_e2e(self):
-        """E2E for Codex: a hung PreToolUse hook's deny is honoured."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="codex",
-            cli_cmd=[
-                "codex",
-                "exec",
-                HUNG_HOOK_TEST_PROMPT,
-            ],
-            hook_rel_path=".codex/hooks.json",
-            dist_name="dist_codex_hung_hook",
-            workspace_name="workspace_codex_hung_hook",
-            log_prefix="codex_hung_hook",
-        )
+    @_needs_cli("codex")
+    def test_codex_cli_hung_hook_e2e(self):
+        self._run_harness_cli_hung_hook_e2e("codex", "codex")
 
     def _create_missing_runtime_test_package(self, on_failure: str) -> Path:
         """Copy the package; guard `shell` with a hook of the given policy, and
         add a Stop hook with the default policy. Neither will ever run: the
         test removes the dispatcher before the session starts."""
-        test_pkg = self.temp_dir / f"pkg_missing_runtime_{on_failure}"
-        if test_pkg.exists():
-            shutil.rmtree(test_pkg, ignore_errors=True)
-        shutil.copytree(self.package_dir, test_pkg)
 
-        pkg_json_path = test_pkg / "package.release.json"
-        pkg_manifest = json.loads(pkg_json_path.read_text(encoding="utf-8"))
-        pkg_manifest.setdefault("hooks", []).extend([{
-            "name": MISSING_RUNTIME_GUARD_NAME,
-            "event": "PreToolUse",
-            "matchers": ["shell"],
-            "command": "true",
-            "on_failure": on_failure,
-            "visibility": "external",
-        }, {
-            "name": MISSING_RUNTIME_STOP_NAME,
-            "event": "Stop",
-            "command": "true",
-            "visibility": "external",
-        }])
-        pkg_json_path.write_text(json.dumps(pkg_manifest, indent=2),
-                                 encoding="utf-8")
-        return test_pkg
+        def add_hooks(_test_pkg: Path, pkg_manifest: dict) -> None:
+            pkg_manifest.setdefault("hooks", []).extend([{
+                "name":
+                MISSING_RUNTIME_GUARD_NAME,
+                "event":
+                "PreToolUse",
+                "matchers": ["shell"],
+                "command":
+                "true",
+                "on_failure":
+                on_failure,
+                "visibility":
+                "external",
+            }, {
+                "name":
+                MISSING_RUNTIME_STOP_NAME,
+                "event":
+                "Stop",
+                "command":
+                "true",
+                "visibility":
+                "external",
+            }])
 
-    def _run_harness_cli_missing_runtime_e2e(
-        self,
-        harness: str,
-        cli_cmd: list[str],
-        hook_rel_path: str,
-        dist_name: str,
-        workspace_name: str,
-        log_prefix: str,
-        on_failure: str,
-    ):
+        return self._copy_package(f"pkg_missing_runtime_{on_failure}",
+                                  add_hooks)
+
+    def _run_harness_cli_missing_runtime_e2e(self,
+                                             harness: str,
+                                             prefix: str,
+                                             extra_args: tuple[str, ...] = ()):
         """runtime.py gone from the store: the shell fallback alone answers.
 
         This is the bug's repro on a real session. Every hook command runs
@@ -1038,6 +894,12 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         with `deny` it must not. Either way the session must end: the Stop
         hook carries the default `deny`, and a block there is what looped.
         """
+        self._for_each_policy(lambda on_failure: self._missing_runtime_once(
+            harness, f"{prefix}_missing_runtime_{on_failure}", extra_args,
+            on_failure))
+
+    def _missing_runtime_once(self, harness: str, name: str,
+                              extra_args: tuple[str, ...], on_failure: str):
         test_pkg = self._create_missing_runtime_test_package(on_failure)
 
         def remove_runtime(_workspace: Path) -> None:
@@ -1048,19 +910,16 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
                 runtime.rename(runtime.with_suffix(".py.moved"))
 
         started = time.monotonic()
-        cli_res, _runs_dir, _run_id, workspace = (
-            self._setup_and_run_harness_cli(
-                harness=harness,
-                cli_cmd=cli_cmd,
-                hook_rel_path=hook_rel_path,
-                dist_name=dist_name,
-                workspace_name=workspace_name,
-                log_prefix=log_prefix,
-                timeout=MISSING_RUNTIME_SESSION_TIMEOUT_S,
-                package_dir=test_pkg,
-                before_run=remove_runtime,
-                expect_run=False,
-            ))
+        cli_res, _run_id, workspace = self._setup_and_run_harness_cli(
+            harness=harness,
+            prompt=MISSING_RUNTIME_TEST_PROMPT,
+            name=name,
+            extra_args=extra_args,
+            timeout=MISSING_RUNTIME_SESSION_TIMEOUT_S,
+            package_dir=test_pkg,
+            before_run=remove_runtime,
+            expect_run=False,
+        )
         elapsed = time.monotonic() - started
 
         sentinel = workspace / MISSING_RUNTIME_SENTINEL
@@ -1085,230 +944,14 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
             f"dispatcher may still be blocking the turn from ending. Output "
             f"was:\n{cli_res.stdout}\n{cli_res.stderr}")
 
-    @unittest.skipIf(not shutil.which("claude"),
-                     "claude CLI binary not found in PATH")
+    @_needs_cli("claude-code")
     def test_claude_code_cli_missing_runtime_e2e(self):
-        """E2E for Claude Code: with runtime.py gone, the fallback's exit code
-        is read as the policy on PreToolUse, and Stop does not loop."""
-        for on_failure in ("allow", "deny"):
-            with self.subTest(on_failure=on_failure):
-                self._run_harness_cli_missing_runtime_e2e(
-                    harness="claude-code",
-                    cli_cmd=[
-                        "claude",
-                        "-p",
-                        MISSING_RUNTIME_TEST_PROMPT,
-                        "--allowedTools",
-                        "Bash(touch:*)",
-                    ],
-                    hook_rel_path=".claude/settings.json",
-                    dist_name=f"dist_claude_missing_runtime_{on_failure}",
-                    workspace_name=(
-                        f"workspace_claude_missing_runtime_{on_failure}"),
-                    log_prefix=f"claude_missing_runtime_{on_failure}",
-                    on_failure=on_failure,
-                )
+        self._run_harness_cli_missing_runtime_e2e("claude-code", "claude",
+                                                  CLAUDE_ALLOW_TOUCH)
 
-    @unittest.skipIf(not shutil.which("agy"),
-                     "agy CLI binary not found in PATH")
+    @_needs_cli("antigravity")
     def test_antigravity_cli_missing_runtime_e2e(self):
-        """E2E for Antigravity: with runtime.py gone, the fallback's exit code
-        is read as the policy on PreToolUse, and Stop does not loop."""
-        for on_failure in ("allow", "deny"):
-            with self.subTest(on_failure=on_failure):
-                self._run_harness_cli_missing_runtime_e2e(
-                    harness="antigravity",
-                    cli_cmd=[
-                        "agy",
-                        "-p",
-                        MISSING_RUNTIME_TEST_PROMPT,
-                        "--dangerously-skip-permissions",
-                    ],
-                    hook_rel_path=".agents/hooks.json",
-                    dist_name=f"dist_ag_missing_runtime_{on_failure}",
-                    workspace_name=f"workspace_ag_missing_runtime_{on_failure}",
-                    log_prefix=f"agy_missing_runtime_{on_failure}",
-                    on_failure=on_failure,
-                )
-
-    @unittest.skipIf(not shutil.which("claude"),
-                     "claude CLI binary not found in PATH")
-    def test_claude_code_cli_hung_hook_fails_open_e2e(self):
-        """E2E for Claude Code: `on_failure: allow` lets the tool through."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="claude-code",
-            cli_cmd=[
-                "claude",
-                "-p",
-                HUNG_HOOK_TEST_PROMPT,
-                "--allowedTools",
-                "Bash(touch:*)",
-            ],
-            hook_rel_path=".claude/settings.json",
-            dist_name="dist_claude_hung_hook_allow",
-            workspace_name="workspace_claude_hung_hook_allow",
-            log_prefix="claude_hung_hook_allow",
-            on_failure="allow",
-        )
-
-    @unittest.skipIf(not shutil.which("agy"),
-                     "agy CLI binary not found in PATH")
-    def test_antigravity_cli_hung_hook_fails_open_e2e(self):
-        """E2E for Antigravity: `on_failure: allow` lets the tool through."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="antigravity",
-            cli_cmd=[
-                "agy",
-                "-p",
-                HUNG_HOOK_TEST_PROMPT,
-                "--dangerously-skip-permissions",
-            ],
-            hook_rel_path=".agents/hooks.json",
-            dist_name="dist_ag_hung_hook_allow",
-            workspace_name="workspace_ag_hung_hook_allow",
-            log_prefix="agy_hung_hook_allow",
-            on_failure="allow",
-        )
-
-    @unittest.skipIf(not shutil.which("cursor"),
-                     "cursor CLI binary not found in PATH")
-    def test_cursor_cli_hung_hook_fails_open_e2e(self):
-        """E2E for Cursor: `on_failure: allow` lets the tool through."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="cursor",
-            cli_cmd=[
-                "cursor",
-                "-p",
-                HUNG_HOOK_TEST_PROMPT,
-            ],
-            hook_rel_path=".cursor/hooks.json",
-            dist_name="dist_cursor_hung_hook_allow",
-            workspace_name="workspace_cursor_hung_hook_allow",
-            log_prefix="cursor_hung_hook_allow",
-            on_failure="allow",
-        )
-
-    @unittest.skipIf(not shutil.which("codex"),
-                     "codex CLI binary not found in PATH")
-    def test_codex_cli_hung_hook_fails_open_e2e(self):
-        """E2E for Codex: `on_failure: allow` lets the tool through."""
-        self._run_harness_cli_hung_hook_e2e(
-            harness="codex",
-            cli_cmd=[
-                "codex",
-                "exec",
-                HUNG_HOOK_TEST_PROMPT,
-            ],
-            hook_rel_path=".codex/hooks.json",
-            dist_name="dist_codex_hung_hook_allow",
-            workspace_name="workspace_codex_hung_hook_allow",
-            log_prefix="codex_hung_hook_allow",
-            on_failure="allow",
-        )
-
-    @unittest.skipIf(not shutil.which("agy"),
-                     "agy CLI binary not found in PATH")
-    def test_antigravity_cli_start_run_e2e(self):
-        """E2E test for Antigravity: compile -> install -> agy -p -> verify session-run-init hook."""
-        self._run_harness_cli_start_run_e2e(
-            harness="antigravity",
-            cli_cmd=[
-                "agy",
-                "-p",
-                START_RUN_TEST_PROMPT,
-                "--dangerously-skip-permissions",
-            ],
-            hook_rel_path=".agents/hooks.json",
-            dist_name="dist_ag",
-            workspace_name="workspace_ag",
-            log_prefix="agy",
-        )
-
-    @unittest.skipIf(not shutil.which("agy"),
-                     "agy CLI binary not found in PATH")
-    def test_antigravity_cli_schema_verifier_e2e(self):
-        """E2E test for Antigravity: compile -> install -> delegate to subagent -> verify validate-delegate-request and validate-subagent-result hooks."""
-        self._run_harness_cli_schema_verifier_e2e(
-            harness="antigravity",
-            cli_cmd=[
-                "agy",
-                "-p",
-                SCHEMA_VERIFIER_TEST_PROMPT,
-                "--dangerously-skip-permissions",
-            ],
-            hook_rel_path=".agents/hooks.json",
-            dist_name="dist_ag_schema",
-            workspace_name="workspace_ag_schema",
-            log_prefix="agy_schema",
-        )
-
-    @unittest.skipIf(not shutil.which("cursor"),
-                     "cursor CLI binary not found in PATH")
-    def test_cursor_cli_start_run_e2e(self):
-        """E2E test for Cursor: compile -> install -> cursor -p -> verify session-run-init hook."""
-        self._run_harness_cli_start_run_e2e(
-            harness="cursor",
-            cli_cmd=[
-                "cursor",
-                "-p",
-                START_RUN_TEST_PROMPT,
-            ],
-            hook_rel_path=".cursor/hooks.json",
-            dist_name="dist_cursor",
-            workspace_name="workspace_cursor",
-            log_prefix="cursor",
-        )
-
-    @unittest.skipIf(not shutil.which("cursor"),
-                     "cursor CLI binary not found in PATH")
-    def test_cursor_cli_schema_verifier_e2e(self):
-        """E2E test for Cursor: compile -> install -> delegate to subagent -> verify validate-delegate-request and validate-subagent-result hooks."""
-        self._run_harness_cli_schema_verifier_e2e(
-            harness="cursor",
-            cli_cmd=[
-                "cursor",
-                "-p",
-                SCHEMA_VERIFIER_TEST_PROMPT,
-            ],
-            hook_rel_path=".cursor/hooks.json",
-            dist_name="dist_cursor_schema",
-            workspace_name="workspace_cursor_schema",
-            log_prefix="cursor_schema",
-        )
-
-    @unittest.skipIf(not shutil.which("codex"),
-                     "codex CLI binary not found in PATH")
-    def test_codex_cli_start_run_e2e(self):
-        """E2E test for Codex: compile -> install -> codex exec -> verify session-run-init hook."""
-        self._run_harness_cli_start_run_e2e(
-            harness="codex",
-            cli_cmd=[
-                "codex",
-                "exec",
-                START_RUN_TEST_PROMPT,
-            ],
-            hook_rel_path=".codex/hooks.json",
-            dist_name="dist_codex",
-            workspace_name="workspace_codex",
-            log_prefix="codex",
-        )
-
-    @unittest.skipIf(not shutil.which("codex"),
-                     "codex CLI binary not found in PATH")
-    def test_codex_cli_schema_verifier_e2e(self):
-        """E2E test for Codex: compile -> install -> delegate to subagent -> verify validate-delegate-request and validate-subagent-result hooks."""
-        self._run_harness_cli_schema_verifier_e2e(
-            harness="codex",
-            cli_cmd=[
-                "codex",
-                "exec",
-                SCHEMA_VERIFIER_TEST_PROMPT,
-            ],
-            hook_rel_path=".codex/hooks.json",
-            dist_name="dist_codex_schema",
-            workspace_name="workspace_codex_schema",
-            log_prefix="codex_schema",
-        )
+        self._run_harness_cli_missing_runtime_e2e("antigravity", "ag")
 
 
 if __name__ == "__main__":

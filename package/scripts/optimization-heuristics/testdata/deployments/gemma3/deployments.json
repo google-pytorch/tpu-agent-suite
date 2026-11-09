@@ -1,0 +1,17 @@
+{
+  "deployments": [
+    {
+      "model_id": "/model",
+      "engine": "vllm",
+      "port": 8000,
+      "tensor_parallel_size": 8,
+      "data_parallel_size": 1,
+      "max_model_len": 10240,
+      "max_num_seqs": 512,
+      "parallelism": {
+        "source": "recommended",
+        "reason": "test fixture"
+      }
+    }
+  ]
+}

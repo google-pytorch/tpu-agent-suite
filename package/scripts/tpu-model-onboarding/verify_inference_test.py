@@ -83,10 +83,13 @@ class EnvelopeTest(unittest.TestCase):
         plain = {"choices": [{"text": "hi"}]}
         self.assertEqual(verify.extract_completion("vllm", chat), "hi")
         self.assertEqual(verify.extract_completion("vllm", plain), "hi")
+        self.assertEqual(verify.extract_completion("sglang", chat), "hi")
+        self.assertEqual(verify.extract_completion("sglang", plain), "hi")
 
     def test_null_text_is_empty_not_a_crash(self):
         body = {"choices": [{"text": None}]}
         self.assertEqual(verify.extract_completion("vllm", body), "")
+        self.assertEqual(verify.extract_completion("sglang", body), "")
         self.assertEqual(verify.strip_prompt_echo(None, "p"), "")
 
     def test_prompt_echo_is_stripped(self):
@@ -98,8 +101,8 @@ class EnvelopeTest(unittest.TestCase):
                          "A tensor")
 
     def test_requests_are_greedy(self):
-        for engine, chat in (("vllm", True), ("vllm", False),
-                             ("custom_fastapi", False)):
+        for engine, chat in (("vllm", True), ("vllm", False), ("sglang", True),
+                             ("sglang", False), ("custom_fastapi", False)):
             _, payload = verify.build_request(engine, "m", "p", 8, chat)
             self.assertEqual(payload["temperature"], 0)
 
@@ -217,6 +220,23 @@ class EndToEndTest(unittest.TestCase):
         }))
         code, report = self.run_verifier("--engine", "vllm", "--model-id", "m")
         self.assertEqual(code, 0)
+        self.assertEqual({p
+                          for p, _ in _Handler.seen}, {"/v1/chat/completions"})
+        self.assertTrue(report["known_answer"]["passed"])
+
+    def test_sglang_chat_answer_verifies(self):
+        _Handler.reply = staticmethod(lambda p, b: (200, {
+            "choices": [{
+                "message": {
+                    "content": "Paris"
+                    if "France" in str(b) else GOOD_ANSWERS[0]
+                }
+            }]
+        }))
+        code, report = self.run_verifier("--engine", "sglang", "--model-id",
+                                         "m")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["engine"], "sglang")
         self.assertEqual({p
                           for p, _ in _Handler.seen}, {"/v1/chat/completions"})
         self.assertTrue(report["known_answer"]["passed"])

@@ -13,7 +13,7 @@
 # limitations under the License.
 """GCS file staging and V4 signed URL helper for GKE compute drivers.
 
-Workload pods running on GKE (e.g. `gke_job` and `gke_xpk`) lack embedded GCP
+Workload pods running on GKE (e.g. `gke_job`) lack embedded GCP
 credentials in user container images. This module enables file staging by:
 1. Uploading input files to GCS via the controller's ambient credentials.
 2. Generating V4 signed GET and PUT URLs with bounded expiration.
@@ -53,7 +53,6 @@ Path = pathlib.Path
 
 DEFAULT_URL_EXPIRATION_SECONDS = 3600
 STAGING_CONTENT_TYPE = "application/octet-stream"
-CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 # How long each HTTP call made while minting a pod token may take.
 MINT_TIMEOUT_SEC = 30
 # The environment.json keys that give staging a credential of its own.
@@ -213,7 +212,7 @@ def get_storage_client(project: str | None = None,
 
 
 # Signing is the one thing here that plain authentication does not cover. The
-# other drivers shell out to `gcloud`, `kubectl` and `xpk`, which carry their
+# other drivers shell out to `gcloud` and `kubectl`, which carry their
 # own auth; this module talks to GCS through the client library, and a signed
 # URL needs either a private key on this host or a service account the IAM
 # Credentials API will sign for. Which applies depends on how the credentials
@@ -278,7 +277,7 @@ def staging_credentials(service_account: str | None = None,
     if key_path is not None:
         try:
             return sa_key.Credentials.from_service_account_file(
-                str(key_path), scopes=[CLOUD_PLATFORM_SCOPE])
+                str(key_path), scopes=[base.CLOUD_PLATFORM_SCOPE])
         except (OSError, ValueError) as exc:
             raise base.ComputeConfigError(
                 f"'{KEY_FILE_PARAM}' names {key_file}, which is not a "
@@ -286,7 +285,7 @@ def staging_credentials(service_account: str | None = None,
                 error_code="INVALID_FIELD",
             ) from exc
     try:
-        source, _ = google.auth.default(scopes=[CLOUD_PLATFORM_SCOPE])
+        source, _ = google.auth.default(scopes=[base.CLOUD_PLATFORM_SCOPE])
     except Exception as exc:
         if not _is_auth_error(exc):
             raise
@@ -299,16 +298,64 @@ def staging_credentials(service_account: str | None = None,
     return impersonated_credentials.Credentials(
         source_credentials=source,
         target_principal=service_account,
-        target_scopes=[CLOUD_PLATFORM_SCOPE],
+        target_scopes=[base.CLOUD_PLATFORM_SCOPE],
     )
 
 
-def mint_bucket_token(bucket: str) -> tuple[str, float]:
-    """Mint a token that can only read, write and list objects in `bucket`.
+def _cel_string(value: str) -> str:
+    """`value` as a single-quoted CEL string literal."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
-    Uses this host's ADC, downscoped with a Credential Access Boundary.
-    Returns the token and its expiry (epoch seconds), usually an hour out.
+
+def prefix_condition(bucket: str, prefix: str) -> str:
+    """A CEL condition true only for objects under `prefix` in `bucket`, and
+    for listings whose prefix is under it.
+
+    A listing is checked against the bucket, not an object, so
+    `resource.name` alone would refuse it; its prefix is in the
+    `objectListPrefix` attribute instead (empty for other requests).
     """
+    if not prefix or not prefix.endswith("/"):
+        # Without the slash, `job-1` would also match `job-10/`.
+        raise ValueError(f"a token prefix must end in '/', got {prefix!r}")
+    objects = _cel_string(f"projects/_/buckets/{bucket}/objects/{prefix}")
+    return (f"resource.name.startsWith({objects}) || "
+            f"api.getAttribute('storage.googleapis.com/objectListPrefix', '')"
+            f".startsWith({_cel_string(prefix)})")
+
+
+def pod_token_rules(
+        bucket: str,
+        read_write_prefix: str,
+        read_only_prefixes: Sequence[str] = (),
+) -> list[tuple[str, str]]:
+    """The (role, availability condition) pairs a pod token is limited to.
+
+    Read, write, list and delete under `read_write_prefix`; read and list
+    under each of `read_only_prefixes`; nothing else in `bucket` or in any
+    other bucket.
+    """
+    rules = [("roles/storage.objectUser",
+              prefix_condition(bucket, read_write_prefix))]
+    rules += [("roles/storage.objectViewer", prefix_condition(bucket, prefix))
+              for prefix in read_only_prefixes]
+    return rules
+
+
+def mint_bucket_token(
+        bucket: str,
+        read_write_prefix: str,
+        read_only_prefixes: Sequence[str] = (),
+) -> tuple[str, float]:
+    """Mint a token limited to two kinds of folder in `bucket`.
+
+    It can read, write, list and delete objects under `read_write_prefix`,
+    and only read and list them under each of `read_only_prefixes` (see
+    `pod_token_rules`). Uses this host's ADC, downscoped with a Credential
+    Access Boundary. Returns the token and its expiry (epoch seconds),
+    usually an hour out.
+    """
+    rules = pod_token_rules(bucket, read_write_prefix, read_only_prefixes)
     try:
         import google.auth  # noqa: PLC0415 - optional dependency
         import google.auth.transport.requests  # noqa: PLC0415
@@ -324,13 +371,15 @@ def mint_bucket_token(bucket: str) -> tuple[str, float]:
         downscoped.AccessBoundaryRule(
             available_resource=(
                 f"//storage.googleapis.com/projects/_/buckets/{bucket}"),
-            available_permissions=["inRole:roles/storage.objectUser"],
-        )
+            available_permissions=[f"inRole:{role}"],
+            availability_condition=downscoped.AvailabilityCondition(
+                expression=condition),
+        ) for role, condition in rules
     ])
     request = functools.partial(google.auth.transport.requests.Request(),
                                 timeout=MINT_TIMEOUT_SEC)
     try:
-        source, _ = google.auth.default(scopes=[CLOUD_PLATFORM_SCOPE])
+        source, _ = google.auth.default(scopes=[base.CLOUD_PLATFORM_SCOPE])
         creds = downscoped.Credentials(source_credentials=source,
                                        credential_access_boundary=boundary)
         creds.refresh(request)
@@ -699,6 +748,10 @@ Identity token (HTTP 403)." >&2
 }}"""
 
 
+# True on a pod of a multi-host Job other than its leader.
+NOT_LEADER = '[ "${JOB_COMPLETION_INDEX:-0}" != 0 ]'
+
+
 def build_pod_bootstrap_command(
     script_mount: str,
     script_name: str,
@@ -721,6 +774,9 @@ def build_pod_bootstrap_command(
     files: signed URLs, or with `pod_token`, plain `object_url`s.
     `log_url` keeps a copy of the workload's output in GCS, which outlives
     the pod; a failed upload of it is reported but does not fail the job.
+    Every pod of a multi-host Job runs this; only the leader
+    (`JOB_COMPLETION_INDEX` 0, or none) returns outputs and the log, which
+    the others would write over.
     `mounted_inputs` pairs each input's path with its key in the ConfigMap
     mounted at `script_mount`; `logged_outputs` are printed to the log in
     frames, by their index in it, for `split_logged_outputs` to recover. A
@@ -790,7 +846,7 @@ def build_pod_bootstrap_command(
                          auth, "-o /dev/null " if pod_token else "")
     if live:
         lines.append(live)
-        lines.append("live_outputs &\nLIVE_PID=$!")
+        lines.append(f"{{ {NOT_LEADER} || live_outputs; }} &\nLIVE_PID=$!")
     # The trap cuts a wait short; waiting again gives the workload's own
     # exit status.
     lines.append("while kill -0 $WORKLOAD_PID 2>/dev/null; do\n"
@@ -804,6 +860,7 @@ def build_pod_bootstrap_command(
         lines.append(f"touch {LIVE_STOP}\nwait $LIVE_PID")
     if log_url:
         lines.append("wait $TEE_PID")
+    lines.append(f"! {NOT_LEADER} || exit $WORKLOAD_EXIT_CODE")
     # 3. Return outputs: framed into the log, or uploaded and framed only if
     # the upload fails. Frames also go into the log copy the pod uploads.
     if logged_outputs or output_urls:

@@ -30,7 +30,8 @@ scripts:
 You are strictly an orchestrator. You manage the workflow of kernel optimization
 by dispatching kernel-worker agents. Under no circumstances should you act as an
 engineer directly. You should never read or write any code or debug any error
-yourself.
+yourself. The one exception is Setup step 0, which copies the caller's pasted
+text to disk unchanged: transcription, not engineering.
 
 --------------------------------------------------------------------------------
 
@@ -214,7 +215,7 @@ supplied so the planner can mine them for design ideas. A reference is never
 executed, never measured, and never compared against.
 
 ```
-        kernel-request.base_kernel_path   (always present)
+        kernel-request.base_kernel_path / base_kernel_source
                             │
                   the primary input, whatever it is
                             │
@@ -259,8 +260,37 @@ Your request is a `kernel-request`, so the loop's inputs are typed fields rather
 than things to infer from prose. Read them from the request first; fall back to
 the `prompt` only for what the fields do not carry.
 
+0.  **If the request carries `base_kernel_source` instead of
+    `base_kernel_path`, put it on disk first**, then proceed as for a path.
+    This is the one write the rule at the top allows you: a copy, not code.
+    The file is named by `input_language`, which the schema requires with
+    inline source: `base_kernel.py` for `jax`, `pallas` and `pytorch`;
+    `base_kernel.md` for `specification`.
+
+    A request carrying both `base_kernel_source` and `slot` is refused:
+    pasted text arrives once, as a new kernel, and the caller continues it by
+    the `base_kernel_path` every result returns, as it would any file. Stop
+    and return `invalid_input` with an `error_message` naming that path from
+    the slot's `<kernels>` entry, if the slot has one, to delegate again with.
+
+    Otherwise write the text to
+    `<artifacts>/tpu-kernel-development/inputs/k<NN>/<file>`, `<file>` being
+    the name above. For `NN`, read `<kernels>` and count up from
+    `len(kernels) + 1`, zero-padded to two digits, to the first directory
+    that does not exist yet — a `Read` of its `<file>` misses. The number
+    only keeps pastes apart: it usually equals the slot the kernel gets, but
+    the `<kernels>` entry, not the directory name, records which path is
+    whose. That absolute path is the request's `base_kernel_path` from here
+    on.
+
+    Write the text byte-for-byte. Do not edit it on the way in — not
+    whitespace, not a missing `#`, not an import: it is the user's file and
+    the denominator of every number this run reports, and if it does not run
+    the baseline gate says so.
+
 1.  **Read the input from the request's `base_kernel_path`.** The contract
-    requires it, so there is always one to read and no default to fall back on.
+    requires it, or `base_kernel_source` which step 0 has just turned into
+    one, so there is always one to read and no default to fall back on.
     If the file does not exist or cannot be read, stop and return a
     `kernel-result` with `invalid_input` and an `error_message` naming the path
     — do not substitute a file you found nearby, and do not start the loop
@@ -283,10 +313,11 @@ the `prompt` only for what the fields do not carry.
         user to approve it** before anything is optimized. Say so when you
         report the plan: in that mode an agent writes the file the run is
         scored against, so the approval step is the only external check the
-        baseline will get. The description still arrives as a file the caller
-        named, which is what keeps this mode inside the same rule as every
-        other — and it also gives the approval gate something durable to point
-        the user back at.
+        baseline will get. The description is still a file by the time you
+        read it — the caller's, or the one Setup step 0 wrote from
+        `base_kernel_source` — which is what keeps this mode inside the same
+        rule as every other, and gives the approval gate something durable to
+        point the user back at.
 
     **CUDA is not on that list, and a CUDA `base_kernel_path` is refused.**
     Converting CUDA to JAX and then to Pallas measured worse than planning
@@ -350,7 +381,7 @@ the `prompt` only for what the fields do not carry.
     there is no time budget and no target-speedup early exit, which is why the
     request declares neither. When `library_check.result` is `"use"`, the
     budget is 1 iteration.
-3b. Take `input_language`, `reference_paths` and `reference_mode` from the
+3b. Take `input_language` and `reference_paths` from the
     request when it carries them, and
     leave them `null` otherwise. Record an `input_language` of `pallas` as
     `jax`: every downstream phase branches on `jax`, and the two take the same
@@ -359,6 +390,11 @@ the `prompt` only for what the fields do not carry.
     `classify_inputs.py` — which refuses rather than guessing when several
     files could each be the thing being converted. A wrong guess silently
     benchmarks the wrong computation for five iterations.
+
+    When step 0 wrote the input as `base_kernel.py`, leave `primary.language`
+    `null` whatever `input_language` the request carried: the label only
+    chose the extension, and Phase 0.1 classifies the content. Keep a
+    `specification` label: prose has nothing to classify.
 4.  If `<work>/state.json` does not exist yet, or the user said
     "reset"/"restart", write it with the contents under **Initial state**
     below.
@@ -407,12 +443,6 @@ the `prompt` only for what the fields do not carry.
     "port_verified": null,
     "baseline_approved": null
   },
-  "reference_mode": null,
-  "jaxpr_path": null,
-  "hlo_path": null,
-  "jaxpr_facts_path": null,
-  "jnp_reference_path": null,
-  "jaxpr_comparison_path": null,
   "references": [],
   "reference_trust": null,
   "reference_alignment_path": null,
@@ -448,17 +478,12 @@ The new fields, and who fills each one:
     input. For a `jax` primary that is the same file as `base_kernel_path`.
 -   `seed` is internal and always `1024` unless a resumed run already has one.
     It is not a request field, because the *value* is arbitrary — what matters
-    is that Phases 0.3, 0.4 and 0.8 all build the module with the same one, so
-    the oracle captured in 0.3 is comparable to the check run in 0.8. Nothing
-    upstream knows or cares what it should be.
+    is that it is fixed for the run, so Phase 0.3 builds the module the same
+    way every time it is entered. Nothing upstream knows or cares what it
+    should be.
 -   `primary.context_path`, `golden_path`, `golden_meta_path`, `port_verified`
     and `baseline_approved` all stay `null` here; the kernel-worker fills them in
     Phases 0.2, 0.3, 0.5 and 0.9 as each artifact appears on disk.
--   `reference_mode` decides how the JAX reference is obtained for a
-    `pytorch` primary. Leave it `null` unless the user chose; the kernel-worker probes
-    for torchax and defaults to `"llm_port"`, which is the path that needs no
-    extra dependency. Either way a `base.py` is produced — the loop has no
-    mode that skips it, because `base.py` is what every measurement is against.
 -   `references` is `[]` when the caller supplied no reference kernel — the
     common case, and the whole advisory spine is then skipped.
 -   `reference_trust`, `reference_alignment_path` and `ideas_ledger_path` stay
@@ -541,8 +566,8 @@ state.json.
     entry, check its last entry. The Tokamax kernel failed if it:
     -   did not both compile and pass its tests (Tokamax or the op missing, a
         compile error, or a wrong result), or
-    -   is not faster than the baseline: its `optimized_time` is not below
-        `state.baseline_time`.
+    -   is not faster than the baseline: its `speedup` is not above 1.0, or
+        its `optimized_time` is not below `state.baseline_time`.
 
     Then:
     -   set `library_check.result` to `"use_failed"`, and put the reason in
@@ -717,27 +742,19 @@ Once `state.iteration == state.max_iterations`:
 1.  Read `<work>/state.json` one last time, and run the **same-file check**
     from **One slot per kernel** before reporting anything.
 2.  **Open by saying what the baseline actually is.** Name
-    `state.primary.language` and `state.reference_mode`. For `pytorch`, say
+    `state.primary.language`. For `pytorch`, say
     explicitly that every number below is measured against the JAX reference
     at `<work>/base.py` — not against the original on its original hardware.
     Then state how much that reference can be trusted, which depends
     on how it was produced:
 
-    -   **`reference_mode: "torchax"`, `port_verified: true`** — the reference
-        was written by the agent from the jaxpr and then checked two ways in
-        Phase 0.8: by value against a mechanically-converted oracle, and
-        structurally against that oracle's jaxpr. Say that the oracle itself
-        passed step 0 against eager PyTorch, and give the number from
-        `<work>/torchax_oracle.json`. This is the strongest footing a run can
-        have.
-    -   **`reference_mode: "llm_port"`, `port_verified: true`** — the reference
+    -   **`port_verified: true`** — the reference
         was hand-written and checked **by value** against golden outputs
         captured from the user's own module (Phase 0.9). Point to
         `state.primary.context_path` for how the port was derived.
 
         Say "agrees with the source to within `atol`", not "is the same
-        computation". This gate has no structural half — that is Phase 0.8's,
-        and Phase 0.8 runs only in `torchax` mode. A semantic difference
+        computation". The gate compares values only. A semantic difference
         smaller than the tolerance, such as a dropped epsilon at 7.8e-05,
         passes it. That is a real if narrow gap in the denominator and the
         reader is entitled to know it is there.
@@ -752,11 +769,6 @@ Once `state.iteration == state.max_iterations`:
         cause). For a `jax` primary that is not a caveat at all: `base.py`
         *is* the caller's code. For a degraded capture it means the speedup
         numbers rest on an agent's reading of the source and nothing else.
-
-    If the run fell back from `torchax` to `llm_port` mid-setup — a step-0
-    failure or a torch/torchax version conflict — say that too, with the reason
-    from `<work>/tpu_kernel_debug_history.md`. It changes how much the
-    denominator is worth.
 3.  Report a short table to the user: iteration, compile_ok, test_ok,
     optimized_time, speedup, base_choice for each history entry.
 3b. **When `state.ideas_ledger_path` is set, report what the reference actually
@@ -788,17 +800,24 @@ Once `state.iteration == state.max_iterations`:
     Tokamax kernel (this run did not write it), and give its latency before
     and after tuning, from the iteration's `autotune_summary`. When it is
     `"use_failed"`, say that the Tokamax kernel was tried first and why it
-    was not kept (`library_check.summary`), then report the built kernel. When
-    `reference_mode` is
-    `"torchax"`, also point to `<work>/ref.jaxpr.txt` and `<work>/ref.hlo.txt`
-    — they are the record of what the kernel was derived from, and the HLO's
-    fusion count is what a later run would start from.
+    was not kept (`library_check.summary`), then report the built kernel.
+
+    The kernel-worker keeps a kernel in `state.best_code_path` only when its
+    paired `speedup` is above 1.0 (its Phase 5). So when `state.best_code_path`
+    is still `state.base_kernel_path` but some `state.history` entry compiled
+    and passed its tests, **no kernel this run built beat the baseline**. Say
+    that first, instead of pointing at a best file: `base.py` stays the
+    version to run. Name the fastest attempt -- the passing entry with the
+    highest `speedup` -- and its `speedup`, as an attempt, not a result.
 5.  Return a `kernel-result`, with `slot` and `same_file_slots` as **One slot
-    per kernel** describes. The table you just reported goes back as data, not
+    per kernel** describes, and `base_kernel_path` as the slot's `<kernels>`
+    entry spells it — for pasted text, the file Setup step 0 wrote, which is
+    how the caller continues that kernel. The table you just reported goes back as data, not
     only as prose — `state.history` maps entry for entry onto the result's
     `iterations` array, and `state.best_code_path` and
     `state.best_optimized_time` onto `best_kernel_artifact` and
-    `best_latency_ms`.
+    `best_latency_ms` (a `no_speedup` result reports its fastest attempt
+    there instead, as described below).
 
     Cite the path to the best kernel (relative to the run's artifacts
     directory, e.g. `artifacts/tpu-kernel-development/<slot>/iter<n>/kernel.py`) in
@@ -812,24 +831,42 @@ Once `state.iteration == state.max_iterations`:
     rather than a ratio against a number you do not have.
 
     `status` is `optimized` only when the loop ran to its budget and kept a
-    kernel that compiled and passed its tests. A run that used the Tokamax kernel
-    (`library_check.result` is `"use"`) ends the same way, `optimized` or
-    `failed`. Every other ending has a status
-    of its own, and none of them is allowed to carry measurements:
+    kernel in `state.best_code_path`: one that compiled, passed its tests and
+    beat the baseline. A run that used the Tokamax kernel
+    (`library_check.result` is `"use"`) ends the same way. Every other ending
+    has a status of its own:
+
+    -   kernels compiled and passed, but none beat the baseline (step 4) ->
+        `no_speedup`, with a `summary` that says `base.py` stays the version
+        to run. Report the fastest attempt in the measurement fields, so the
+        caller sees by how much it fell short: its `optimized_kernel` as
+        `best_kernel_artifact`, its `optimized_time` as `best_latency_ms`, and
+        `state.baseline_time` over that as `speedup_factor`, with `iterations`
+        carrying every paired `speedup`. `speedup_factor` divides times taken
+        in different sessions and can come out above 1.0 while the paired
+        `speedup` does not; if it does, say in `summary` that the paired
+        number is the one the loop judges by. `best_kernel_artifact` is not a
+        kernel to integrate. Never report such a run as `optimized`: the
+        caller integrates an `optimized` kernel, and here that would make the
+        served model slower.
+
+    None of the endings below carries `best_kernel_artifact`,
+    `best_latency_ms` or `speedup_factor`:
 
     -   no baseline to start from, or a request you cannot act on ->
         `invalid_input`, with `error_message` saying what was missing.
     -   the target needs a setting only the user can give (step 3b) ->
         `needs_input`, with the kernel-worker's question and setup command in
         `summary`.
-    -   the loop could not reach an answer — no iteration compiled, the device
-        was unreachable, the run was cut short -> `failed`, with
-        `failure_reason` and `error_message`. Report `iterations` and
-        `iterations_run` anyway: which iterations were attempted and how they
-        died is the useful part of a failure.
-    -   Do not report `optimized` with the measurement fields or `artifacts`
-        left out. The runtime rejects that, deliberately: a result claiming a
-        kernel it cannot point at reads to the caller as one ready to use.
+    -   the loop could not reach an answer — no iteration compiled or passed
+        its tests, the device was unreachable, the run was cut short ->
+        `failed`, with `failure_reason` and `error_message`. Report
+        `iterations` and `iterations_run` anyway: which iterations were
+        attempted and how they died is the useful part of a failure.
+
+    Do not report `optimized` with the measurement fields or `artifacts`
+    left out. The runtime rejects that, deliberately: a result claiming a
+    kernel it cannot point at reads to the caller as one ready to use.
 
     Also carry back what the caller cannot see from a latency alone:
     `input_language` from `state.primary.language`, `baseline_verified` from

@@ -13,30 +13,24 @@
 # limitations under the License.
 
 [judge]
-judge = "vertex_ai/gemini-3.5-flash"
+judge = "vertex_ai/gemini-3.8-flash"
 atif-trajectory = "/logs/agent/trajectory.json"
 timeout = 600
 
 [[criterion]]
-description = "Runs the compatibility check against the remote GKE TPU cluster rather than the local agent container."
+description = "Runs engine_compatibility_check.py against the remote GKE TPU cluster via compute run rather than the local agent container."
 type = "binary"
 weight = 1.0
 
 [[criterion]]
-description = "Reports the check's actual outcome, including if vLLM is unavailable on the cluster."
+description = "Sizes the cluster's TPU devices and HBM per device (from the active compute profile and tpu-knowledge-base or via compute inspect, with chips > 0; score 0 if status is 'no_accelerator' or chips is 0) and reports the check's actual outcome and TP/DP plan (or, if all TPU nodes were busy with other jobs for the full queue timeout, reports the busy/never_started status)."
 type = "binary"
 weight = 1.0
 
 [[criterion]]
-description = "Does not install dependencies or otherwise modify the environment to make the check succeed."
+description = "Does not install dependencies or otherwise modify the environment to force the check to succeed."
 type = "binary"
 weight = 1.0
-
-[[criterion]]
-description = "Routes the request from tpu-agent to tpu-model-onboarding to check engine compatibility."
-type = "binary"
-weight = 1.0
-
 
 [scoring]
 aggregation = "weighted_mean"

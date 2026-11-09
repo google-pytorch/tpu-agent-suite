@@ -4,9 +4,9 @@ type: hardware
 tags: [hardware]
 aliases: [Ironwood, TPU7x]
 created: 2026-08-22
-updated: 2026-09-04
-sources: 1
-human_reviewed: true
+updated: 2026-10-27
+sources: 2
+human_reviewed: false
 ---
 
 First release of the Ironwood (seventh) generation: dual-chiplet scale-out chip for
@@ -29,7 +29,7 @@ pods. Specs from [Cloud TPU7x docs](../sources/2026-08-cloud-tpu-7x-docs.md).
 
 ## Dual-chiplet architecture
 
-Each chiplet = 1 TensorCore + 2 SparseCores + 96 GB HBM; the two chiplets connect via
+Each chiplet = 1 TensorCore + 2 SparseCores + 96 GiB HBM; the two chiplets connect via
 a die-to-die link **6× faster than a 1D ICI link**, communicating through collectives.
 Frameworks expose each chip as **two devices** (JAX adds a 4th topology dimension) —
 a return to the pre-v4 programming model; mesh math and profiler output count
@@ -56,3 +56,4 @@ chiplets, not chips. See [Megacore](../concepts/megacore.md) for the contrast.
 ## Sources
 
 - [Google Cloud TPU7x documentation](../sources/2026-08-cloud-tpu-7x-docs.md)
+- HBM capacity unit (GiB): [tpu_info chip table](../sources/2026-10-tpu-info-chip-table.md)

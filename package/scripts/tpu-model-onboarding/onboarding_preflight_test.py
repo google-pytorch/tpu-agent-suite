@@ -53,7 +53,7 @@ class OnboardingPreflightTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.work)
         for name in ("image_probe.py", "preflight_check.py",
                      "engine_compatibility_check.py", "vllm_flags.py",
-                     "chipless_tpu.py"):
+                     "sglang_flags.py", "chipless_tpu.py"):
             with open(os.path.join(self.work, name), "w",
                       encoding="utf-8") as f:
                 f.write(STUB)
@@ -62,6 +62,11 @@ class OnboardingPreflightTest(unittest.TestCase):
                   encoding="utf-8") as f:
             f.write(f'"{sys.executable}" vllm_flags.py "$@" || exit $?\n'
                     'echo "--tensor-parallel-size" > "$1"\n')
+        with open(os.path.join(self.work, "discover_sglang_flags.sh"),
+                  "w",
+                  encoding="utf-8") as f:
+            f.write(f'"{sys.executable}" sglang_flags.py "$@" || exit $?\n'
+                    'echo "--tp-size" > "$1"\n')
 
     def _run(self, *args, chipless=None, exit_code=0, **stubs):
         env = {
@@ -132,6 +137,32 @@ class OnboardingPreflightTest(unittest.TestCase):
                 if name != "chipless"))
         # The steps' scripts are told the Python this ran on.
         self.assertEqual(calls["vllm_flags"]["python"], sys.executable)
+
+    def test_points_reach_the_engine_check(self):
+        _, calls = self._run("--model", "org/m", "--mode", "inference",
+                             "--devices", "8", "--hbm-gb-per-device", "94",
+                             "--points", "1024:1024:64,8192:1024:128")
+        argv = calls["engine_compatibility_check"]["argv"]
+        self.assertEqual(argv[-2:], ["--points", "1024:1024:64,8192:1024:128"])
+
+    def test_sglang_engine_passes_engine_and_discovers_sglang_flags(self):
+        report, calls = self._run("--model", "org/m", "--mode", "inference",
+                                  "--engine", "sglang", "--trust-remote-code",
+                                  "--devices", "8", "--hbm-gb-per-device",
+                                  "96")
+        self.assertEqual(calls["engine_compatibility_check"]["argv"], [
+            "--plan-json", "tp_plan.json", "--model", "org/m", "--devices",
+            "8", "--hbm-gb-per-device", "96", "--engine", "sglang",
+            "--trust-remote-code"
+        ])
+        self.assertIn("sglang_flags", calls)
+        self.assertNotIn("vllm_flags", calls)
+        self.assertEqual(calls["sglang_flags"]["argv"], ["sglang_flags.txt"])
+        self.assertEqual(report["discover_sglang_flags"]["exit_code"], 0)
+        self.assertNotIn("discover_vllm_flags", report)
+        with open(os.path.join(self.work, "sglang_flags.txt"),
+                  encoding="utf-8") as f:
+            self.assertIn("--tp-size", f.read())
 
     def test_a_failed_step_still_leaves_every_file(self):
         report, calls = self._run(

@@ -63,7 +63,7 @@
     "output_files": {
       "type": "object",
       "description": "Named hand-off files produced by the workflow, as fully resolved run-scoped paths.",
-      "additionalProperties": false,
+      "additionalProperties": {"type": "string"},
       "properties": {
         "benchmark_report": {
           "type": "string",
@@ -100,6 +100,10 @@
         "sweep_plan": {
           "type": "string",
           "description": "Path to the sweep_plan.json a benchmark of several shapes ran from, when it ran on several servers at once. Its merged summary.json is the measurement."
+        },
+        "candidate_report": {
+          "type": "string",
+          "description": "report.json comparing a measured serving candidate with the baseline per point (report.py)."
         }
       }
     },

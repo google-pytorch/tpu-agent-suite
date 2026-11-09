@@ -6,9 +6,11 @@ delegates:
 
 # Query understanding
 
-Follow this before delegating a new onboarding request to
-{{agent:tpu-model-onboarding}}, and only then. It produces one thing: a **plan** the
-user confirms, which the onboarding request is built from.
+Follow this before the first delegation of an ask to {{agent:tpu-model-onboarding}},
+a preflight or compatibility check included, and only then. Later delegations for the same ask
+(measuring serving candidates, relaunching a kept configuration, a follow-up benchmark) reuse the
+confirmed plan and its `accelerator_type` without planning again. It produces one thing: a **plan**
+the user confirms, which the onboarding request is built from.
 
 It exists because the expensive mistakes happen before any TPU work does. A
 router that delegates in its first turn passes on its own reading of the ask,
@@ -29,9 +31,9 @@ never move an item from one list to another without the user:
 - **Stated** -- deliverables, models, hardware and constraints the user wrote.
 - **Inferred** -- what you had to read into it, each with the reason.
 - **Pointers** -- places the user told you to look ("check your env for
-  details"). You hold no shell, so a pointer is not yours to follow: carry it
-  into the onboarding request, where preflight reads the environment and the
-  task image.
+  details"). Follow one as far as section 2b does, to identify the TPU and
+  the environment; anything deeper goes into the onboarding request, where
+  preflight checks it.
 
 Deliverables are the easiest thing to inflate. Record only the ones the user
 asked for. "Onboard" is inference on TPU; it is not a benchmark, a CPU
@@ -44,10 +46,12 @@ onboarding request. The `torch_xla` / `pytorch_xla` prohibition is a package
 rule regardless of whether the user states it; when they do, it is also
 stated.
 
-Onboarding starts from a Hugging Face model. When the user's starting point is
-their own code -- a repository link or a directory -- say that onboarding from
+Onboarding starts from a Hugging Face model or a saved checkpoint. When the user's starting point is
+their own code -- a repository link or a codebase directory -- say that onboarding from
 a codebase is not supported yet, and ask whether the model is also published
-on the Hub. Do not route a codebase to onboarding as if it were a Hub model.
+on the Hub. A local checkpoint directory (containing `config.json` and weights) or a
+`gs://` checkpoint folder is a model checkpoint, not a codebase, and routes to
+`tpu-model-onboarding`. Do not route a codebase to onboarding as if it were a Hub model.
 
 ## 2. Pin the model id
 
@@ -61,15 +65,41 @@ Onboarding needs an exact Hub repository id, `org/name`.
   resolved: it is inference until the user confirms it, and preflight checks
   that the repository exists and can be read.
 
+## 2b. Identify the TPU and the environment
+
+The onboarding request names the TPU it targets, as `accelerator_type`. Read it
+from the target, never from a profile, VM or cluster name, with one inspect
+per ask, here. It is what the shell is for:
+
+```bash
+{{runtime}} compute --package {{package_tag}} inspect --json
+```
+
+It reserves nothing: it reads the node pool, VM or host. Take the accelerator
+from `accelerator`, else `details.accelerator_type`, else
+`details.tpu_accelerator`. `unknown`, `tpu`, `none`, an empty value, or no or
+unparseable output (compute not set up) all mean not found, and then which TPU
+is a user question with no default. Do not inspect again for this ask: later
+delegations reuse the plan's `accelerator_type`.
+
+Record only the accelerator in the plan. Onboarding does not inspect: it takes
+the per-chip specs for that accelerator from the knowledge base and the chip
+count from the compute profile. Keep the output: when onboarding asks for the
+chip count (a profile with no topology), answer with its `chips`.
+
+When the plan turns on what is installed, read it the same way: `pip show`,
+or a version printed with `python3 -c`. Running the model, building or
+profiling is preflight's and the specialists' work, not this step's.
+
 ## 3. Ask what is already known
 
 Before planning, delegate one request to {{agent:tpu-knowledge-base}} with every
 fact the plan turns on, as a single multi-part question: the model's
 architecture features the runtime may not cover (mixture-of-experts routing, a
 non-standard quantization format, custom kernels), whether `torch_tpu`
-supports them, and the target accelerator's HBM when the user named one. For
-the gpt-oss-20b prompt that is MoE routing, MXFP4 support and the
-accelerator's memory in one request, not three.
+supports them on the accelerator section 2b found. For the gpt-oss-20b
+prompt that is MoE routing and MXFP4 support on that accelerator in one
+request, not two.
 
 ```json
 {"query": "<the facts, as numbered questions>"}
@@ -92,7 +122,8 @@ open question with exactly one owner:
   context length or batch that matters.
 - **Preflight** -- anything a check can settle: gated access, weight formats,
   whether a quantization format loads or an operator lowers on `torch_tpu`,
-  what the task image carries, `trust_remote_code` behaviour, capacity. These
+  what the task image carries, `trust_remote_code` behaviour, capacity,
+  parallelism (tensor and data parallel size) unless the user stated it. These
   go into the onboarding request as things to check, and are not put to the
   user.
 
@@ -112,6 +143,16 @@ only when that default would be wrong or matter:
 | Context length and batch that matter | the model's maximum context changes the memory fit or the user will measure | a short context (2048) and batch 1 |
 | Verify and tear down, or keep serving | the user said serve, deploy or endpoint, or it is unclear | verify, then tear down |
 | Engine | the user specifically requested native PyTorch or custom_fastapi | vLLM (with automatic fallback to custom_fastapi for non-LLMs/unsupported models) |
+| Tensor parallel size | a cited recipe or model card names a TP and the user stated none | let preflight's engine compatibility check choose it |
+
+Parallelism is preflight's to choose unless the user chooses it: only the
+engine compatibility check knows the head count, the HBM per device and the
+target traffic it turns on. A TP from a vendor recipe or a model card is a
+known fact, not a constraint, and it may have been sized for other hardware.
+It becomes stated only when the user writes a TP or picks the recipe's in
+answer to this question; "go" leaves the choice to preflight. A TP the user
+wrote in the request is already stated: do not raise this question for it,
+so that "go" cannot replace it with the default.
 
 ## 5. Show the plan and ask
 
@@ -120,9 +161,15 @@ Show the user the plan, and put the questions to them with
 
 - The ask in one sentence, in the user's terms.
 - What is already known, with provenance's citations, leading with anything
-  that blocks or constrains the run.
+  that blocks or constrains the run, and the TPU the probe found.
 - The steps in order, each naming the specialist that owns it and what it
   returns, starting with tpu-model-onboarding's preflight and what it will check.
+- The parallelism: the TP the user stated, or else "chosen by preflight's
+  engine compatibility check". Never a TP or TP x DP of your own, or one
+  taken from a recipe the user has not picked: the check has not run, and a
+  layout the user confirms here is one onboarding may not use. A recipe's
+  TP is listed with the known facts, cited, as not applied unless the user
+  picks it.
 - The user questions, numbered, each with its default, and a line saying that
   replying "go" accepts every default.
 
@@ -148,7 +195,7 @@ ending the turn ends the run. What happens then depends on section 4:
   `assumed`, list the assumptions in the plan, say that nobody was available
   to confirm it, and go on to section 6 in the same turn.
 - **A user question is open** (a loose model name, an unclear deliverable, a
-  codebase instead of a Hub model): show the plan with its questions and stop.
+  codebase instead of a Hub model, a TPU the probe could not find): show the plan with its questions and stop.
   A guessed answer to a choice only the user can make is the expensive mistake
   this reference exists to prevent.
 
@@ -164,8 +211,12 @@ reading of the request:
 - `prompt`: the user's request verbatim, followed by the answers, the stated
   constraints, the known facts with their citations, the pointers, and the
   checks left to preflight. Add nothing listed as inferred unless the user
-  confirmed it.
+  confirmed it. A TP the user stated goes in the stated constraints as "the
+  user stated tensor parallel size <N>", so preflight passes it as `--tp`; a
+  recipe's TP the user did not pick stays with the known facts.
 - `model.model_id`: the confirmed repository id.
+- `accelerator_type`: the TPU from section 2b, or the user's answer when the
+  probe found none. The request is rejected without it.
 - `mode`: set only when the user named a deliverable; otherwise omit it, and
   onboarding applies its own default.
 - `run_id`: the session `run_id`.

@@ -3,7 +3,7 @@ title: "Megacore"
 type: concept
 tags: [hardware]
 created: 2026-08-22
-updated: 2026-08-24
+updated: 2026-10-27
 sources: 4
 human_reviewed: false
 ---
@@ -24,7 +24,7 @@ TensorCore. Official docs win: **v6e is not megacore**. The book claim likely
 anticipated a v6p that never shipped.
 
 **TPU7x (Ironwood) replaces megacore with dual chiplets**: two chiplets with
-*separate* memory spaces (1 TensorCore + 2 SparseCores + 96 GB HBM each), joined by a
+*separate* memory spaces (1 TensorCore + 2 SparseCores + 96 GiB HBM each), joined by a
 die-to-die link 6× faster than a 1D ICI link. Frameworks expose each chip as **two
 devices** (JAX adds a 4th topology dimension) — a return to the pre-v4 programming
 model ([TPU7x docs](../sources/2026-08-cloud-tpu-7x-docs.md)).

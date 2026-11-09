@@ -36,7 +36,7 @@ _PACKAGE_ROOT = str(pathlib.Path(__file__).resolve().parents[1])
 if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
 
-from framework import utils  # noqa: E402
+from framework import harnesses, jsonio, paths, utils  # noqa: E402
 
 Path = pathlib.Path
 
@@ -48,12 +48,10 @@ SemVer = utils.SemVer
 TomlConfigManager = utils.TomlConfigManager
 compute_digest = utils.compute_digest
 digest_text = utils.digest_text
-load_json = utils.load_json
 rooted = utils.rooted
 safe_relative = utils.safe_relative
 validate_package_name = utils.validate_package_name
 version_satisfies = utils.version_satisfies
-write_json = utils.write_json
 
 # =====================================================================
 # Harness Detection & File Expansion
@@ -139,14 +137,23 @@ def expand_copies(
 # =====================================================================
 
 
-def clean_empty_directories(root: Path) -> None:
-    """Remove empty directories under root in bottom-up order."""
-    for directory in sorted((p for p in root.rglob("*") if p.is_dir()),
-                            reverse=True):
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
+def prune_empty_parents(destination: Path, owned: Sequence[str]) -> None:
+    """Remove the directories that held `owned`, where that left them empty.
+
+    Walks up from each path toward `destination`, stopping at the first
+    directory that still holds something, and never removes `destination`
+    itself. Scoped to what the package placed rather than sweeping the tree:
+    a user-scope destination is $HOME, and an empty directory elsewhere in it
+    is not the package's to delete.
+    """
+    for relative in owned:
+        parent = rooted(destination, relative, "owned path").parent
+        while destination in parent.parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
 
 def check_action_modification(destination: Path,
@@ -159,12 +166,12 @@ def check_action_modification(destination: Path,
         if path.is_file() and compute_digest(path) != action["sha256"]:
             return action["path"]
     elif kind == "json_value" and path.is_file():
-        exists, value = JsonConfigManager.get_at_path(load_json(path),
+        exists, value = JsonConfigManager.get_at_path(jsonio.load_json(path),
                                                       action["keys"])
         if exists and value != action["value"]:
             return f"{action['path']}:{'/'.join(action['keys'])}"
     elif kind == "json_container" and path.is_file():
-        exists, value = JsonConfigManager.get_at_path(load_json(path),
+        exists, value = JsonConfigManager.get_at_path(jsonio.load_json(path),
                                                       action["keys"])
         if exists and not isinstance(value, dict):
             return f"{action['path']}:{'/'.join(action['keys'])}"
@@ -206,12 +213,12 @@ def rollback_json_action(
     """Roll back an added JSON key or container from a config document."""
     if not path.is_file():
         return
-    document = load_json(path)
+    document = jsonio.load_json(path)
     if not JsonConfigManager.remove_added(document, keys, expected_val,
                                           is_container):
         return
     if document:
-        write_json(path, document)
+        jsonio.write_json(path, document)
     else:
         path.unlink(missing_ok=True)
 
@@ -339,10 +346,12 @@ def register_central_ref(central_pkg_dir: Path, workspace: Path) -> None:
     """
     central_pkg_dir.mkdir(parents=True, exist_ok=True)
     refs_path = central_pkg_dir / CENTRAL_REFS_FILE
-    refs = load_json(refs_path) if refs_path.is_file() else {"workspaces": []}
+    refs = jsonio.load_json(refs_path) if refs_path.is_file() else {
+        "workspaces": []
+    }
     workspaces = set(refs.get("workspaces", []))
     workspaces.add(str(workspace.resolve()))
-    write_json(refs_path, {"workspaces": sorted(workspaces)})
+    jsonio.write_json(refs_path, {"workspaces": sorted(workspaces)})
 
 
 def release_central_ref(package: str, version: str, workspace: Path) -> None:
@@ -361,22 +370,24 @@ def release_central_ref(package: str, version: str, workspace: Path) -> None:
     different version has moved on. An unreadable ledger keeps its ref --
     better a leaked payload than a blind GC under a live workspace.
     """
-    central_pkg_dir = utils.get_package_storage_root(package, version)
+    central_pkg_dir = paths.get_package_storage_root(package, version)
     refs_path = central_pkg_dir / CENTRAL_REFS_FILE
     if not central_pkg_dir.is_dir():
         return
 
     released = str(workspace.resolve())
-    refs = load_json(refs_path) if refs_path.is_file() else {"workspaces": []}
+    refs = jsonio.load_json(refs_path) if refs_path.is_file() else {
+        "workspaces": []
+    }
     remaining = []
     for ws in refs.get("workspaces", []):
         if ws == released:
             continue
-        ledger = utils.tpu_agent_suite_dir_for(ws) / utils.OWNERSHIP_FILE
+        ledger = paths.tpu_agent_suite_dir_for(ws) / paths.OWNERSHIP_FILE
         if not ledger.is_file():
             continue  # workspace deleted without uninstalling
         try:
-            owner = load_json(ledger)
+            owner = jsonio.load_json(ledger)
             if (owner.get("package") != package
                     or owner.get("version", "") != version):
                 continue  # workspace moved to another package or version
@@ -384,7 +395,7 @@ def release_central_ref(package: str, version: str, workspace: Path) -> None:
             pass  # unreadable ledger: keep the ref, don't GC blindly
         remaining.append(ws)
     if remaining:
-        write_json(refs_path, {"workspaces": remaining})
+        jsonio.write_json(refs_path, {"workspaces": remaining})
     else:
         shutil.rmtree(central_pkg_dir, ignore_errors=True)
         packages_root = central_pkg_dir.parent
@@ -403,7 +414,7 @@ LEDGER_SCHEMA = 1
 
 def owner_installer(ownership: dict[str, Any]) -> Path:
     """The installer.py of the package version that wrote this ledger."""
-    return utils.get_package_storage_root(
+    return paths.get_package_storage_root(
         str(ownership.get("package") or ""), str(
             ownership.get("version") or "")) / "framework" / "installer.py"
 
@@ -423,14 +434,28 @@ def check_ledger_schema(ownership: dict[str, Any], scope: str,
         f"python3 {owner_installer(ownership)} uninstall {where}")
 
 
-def remove_owned(destination: Path, ownership: dict[str, Any]) -> list[str]:
-    """Remove files and rollback config settings tracked in ownership record."""
+def owned_paths(ownership: dict[str, Any]) -> list[str]:
+    """The destination-relative paths an ownership record's actions touch."""
+    return [action["path"] for action in ownership.get("actions", [])]
+
+
+def remove_owned(destination: Path,
+                 ownership: dict[str, Any],
+                 prune: bool = True) -> list[str]:
+    """Remove files and rollback config settings tracked in ownership record.
+
+    `prune=False` leaves the emptied directories in place, for an upgrade
+    that is about to repopulate them: removing and recreating `.claude/`
+    gives it a new inode, and anything holding the old one -- a container
+    bind mount, an editor, a shell's cwd -- goes on seeing an empty directory.
+    """
     modified = detect_owned_modifications(destination, ownership)
 
     for action in reversed(ownership.get("actions", [])):
         rollback_action(destination, action)
 
-    clean_empty_directories(destination)
+    if prune:
+        prune_empty_parents(destination, owned_paths(ownership))
     return modified
 
 
@@ -459,9 +484,8 @@ def warn_if_workspace_not_discoverable(
                           for source, _ in copies)
     if not installs_agents:
         return
-    for candidate in [destination, *destination.parents]:
-        if (candidate / ".git").exists():
-            return
+    if paths.find_git_root(destination) is not None:
+        return
     print(
         f"WARNING: {destination} is not inside a git repository. Harnesses"
         " that discover workspace agents stop walking at a repository root,"
@@ -507,6 +531,19 @@ def verify_agents_reachable(
             " delegate to them: " + ", ".join(unreachable))
 
 
+def _confirmed(prompt: str) -> bool:
+    """Ask a y/N question on the terminal; only an explicit yes is a yes.
+
+    No answer at all (EOF, Ctrl-C) counts as no, so a closed stdin never
+    approves a destructive step.
+    """
+    try:
+        choice = input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return choice in ("y", "yes")
+
+
 def validate_install_preconditions(
     destination: Path,
     previous_ownership: dict[str, Any] | None,
@@ -548,12 +585,7 @@ def validate_install_preconditions(
             print("Managed files have local modifications:\n  " +
                   "\n  ".join(modified),
                   file=sys.stderr)
-            try:
-                choice = input(
-                    "Overwrite your local changes? [y/N]: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                choice = "n"
-            if choice not in ("y", "yes"):
+            if not _confirmed("Overwrite your local changes? [y/N]: "):
                 raise TpuAgentSuiteError(
                     "aborted by user: refusing to overwrite modified managed files:\n"
                     + "\n".join(modified))
@@ -598,11 +630,7 @@ def check_file_collisions(
             "Found existing unmanaged files colliding with installation:\n  " +
             "\n  ".join(collisions),
             file=sys.stderr)
-        try:
-            choice = input("Overwrite these files? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            choice = "n"
-        if choice not in ("y", "yes"):
+        if not _confirmed("Overwrite these files? [y/N]: "):
             raise TpuAgentSuiteError(
                 "aborted by user: refusing to overwrite existing files:\n" +
                 "\n".join(collisions))
@@ -647,7 +675,6 @@ def prevalidate_workspace_memory(
 def resolve_config_merge_path(
     harness: str,
     declared_path: str,
-    scope: str = "project",
 ) -> str:
     """Resolve JSON configuration merge destination path based on harness.
 
@@ -657,7 +684,7 @@ def resolve_config_merge_path(
     filename = path_obj.name
 
     if harness in ("claude-code",
-                   "cursor") or utils.is_google_harness(harness):
+                   "cursor") or harnesses.is_google_harness(harness):
         if filename in ("settings.local.json", "settings.json"):
             return str(path_obj.with_name("settings.json"))
 
@@ -667,7 +694,6 @@ def resolve_config_merge_path(
 def prevalidate_configuration_mutations(
     destination: Path,
     plan: dict[str, Any],
-    scope: str = "project",
     previous_ownership: dict[str, Any] | None = None,
 ) -> None:
     """Verify that JSON merges and TOML settings can be applied without conflict.
@@ -686,9 +712,9 @@ def prevalidate_configuration_mutations(
     # install writes between merges. Equivalent while a plan holds at most
     # one merge per resolved path, which the compiler guarantees today.
     for merge in plan.get("json_merges", []):
-        merge_path = resolve_config_merge_path(harness, merge["path"], scope)
+        merge_path = resolve_config_merge_path(harness, merge["path"])
         path = rooted(destination, merge_path, "JSON config path")
-        document = load_json(path) if path.exists() else {}
+        document = jsonio.load_json(path) if path.exists() else {}
         rollback_json_records(document, previous_ownership, merge_path)
         JsonConfigManager.merge(document, merge["value"], [], [])
 
@@ -795,6 +821,31 @@ def resolve_install_destination(
         f"unknown scope '{effective_scope}'. Must be 'project' or 'user'.")
 
 
+def resolve_user_codex_home(home: Path) -> str:
+    """Return the Codex home a user-scope install writes, relative to `home`.
+
+    Codex reads its config, agents, hooks and user memory from $CODEX_HOME,
+    ~/.codex when unset, so writing ~/.codex under a relocated home leaves all
+    of them unread. Only a home inside $HOME is honoured: the ownership ledger
+    records destination-relative paths, and `rooted` refuses any that escape.
+    One outside it is refused rather than worked around: an install into
+    ~/.codex instead would report success and be invisible to Codex. $HOME
+    itself is refused too, or the install would scatter Codex's files across
+    the top of the home directory.
+    """
+    configured = os.environ.get("CODEX_HOME")
+    if not configured:
+        return ".codex"
+    target = Path(configured).expanduser().resolve()
+    if home not in target.parents:
+        raise TpuAgentSuiteError(
+            f"CODEX_HOME={configured} is not a directory under {home}, where"
+            " a user-scope install writes, and Codex reads nothing installed"
+            " anywhere else. Unset CODEX_HOME, or point it at a directory"
+            f" under {home}, and install again.")
+    return target.relative_to(home).as_posix()
+
+
 def resolve_uninstall_destination(
     scope: str | None,
     destination: Path | None,
@@ -827,18 +878,11 @@ def resolve_uninstall_destination(
 
 def register_git_exclude(destination: Path, entry: str) -> None:
     """Register path entry in .git/info/exclude if within a git repository."""
-    git_dir = destination / ".git"
-    if not git_dir.exists():
-        cur = destination
-        while cur.parent != cur:
-            if (cur / ".git").exists():
-                git_dir = cur / ".git"
-                break
-            cur = cur.parent
-
-    if not git_dir.exists():
+    git_root = paths.find_git_root(destination)
+    if git_root is None:
         return
 
+    git_dir = git_root / ".git"
     exclude_file = git_dir / "info" / "exclude" if git_dir.is_dir() else None
     if exclude_file:
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
@@ -850,33 +894,6 @@ def register_git_exclude(destination: Path, entry: str) -> None:
                                     encoding="utf-8")
 
 
-def unregister_git_exclude(destination: Path, entry: str) -> None:
-    """Remove path entry from .git/info/exclude if present."""
-    git_dir = destination / ".git"
-    if not git_dir.exists():
-        cur = destination
-        while cur.parent != cur:
-            if (cur / ".git").exists():
-                git_dir = cur / ".git"
-                break
-            cur = cur.parent
-
-    if not git_dir.exists():
-        return
-
-    exclude_file = git_dir / "info" / "exclude" if git_dir.is_dir() else None
-    if exclude_file and exclude_file.exists():
-        existing = exclude_file.read_text(encoding="utf-8").splitlines()
-        if entry in existing:
-            existing = [line for line in existing if line != entry]
-            exclude_file.write_text("\n".join(existing) +
-                                    ("\n" if existing else ""),
-                                    encoding="utf-8")
-
-
-HARNESS_DISPLAY_NAMES = utils.HARNESS_DISPLAY_NAMES
-
-
 def summarize_installation(
     destination: Path,
     build: dict[str, Any],
@@ -886,21 +903,21 @@ def summarize_installation(
 ) -> None:
     """Report what was installed, how compute gets set up, and how to load it."""
     harness = build["harness"]
-    display = HARNESS_DISPLAY_NAMES.get(harness, harness)
+    display = harnesses.HARNESS_DISPLAY_NAMES.get(harness, harness)
 
     print(f"Installed {build['source']} {build['version']} for"
           f" {display} ({scope} scope) into {destination}.")
     for merge in memory_merges:
-        print(f"  Added a managed block to {merge['path']}.")
+        print(f"  Added a managed block to {destination / merge['path']}.")
 
     # Claude Code and Codex installs pre-authorize ~/.tpu-agent-suite through their
     # harness config; harnesses without a config writer need a one-time grant.
     # Cursor is listed for when its package target becomes buildable -- its
     # install spec writes no config either.
-    if harness == "cursor" or utils.is_google_harness(harness):
+    if harness == "cursor" or harnesses.is_google_harness(harness):
         print(
             f"\nNote: package assets and runs live in"
-            f" {utils.get_tpu_agent_suite_home()}. When {display} first asks for"
+            f" {paths.get_tpu_agent_suite_home()}. When {display} first asks for"
             " access to that directory, grant it permanently so agents can"
             " read shipped assets without per-session prompts.")
 
@@ -912,11 +929,24 @@ def summarize_installation(
               " agent asks only what your backend needs, suggests the"
               " answers, and checks that the target works.")
 
-    print(f"\nRestart {display} in {destination} to load the installed skills,"
+    # A project-scope install is read only by sessions rooted in its
+    # workspace. A user-scope install is read from the harness's user config
+    # directory by every session, and its destination is $HOME: naming it
+    # would send users to start the harness there, which is what user scope
+    # exists to avoid.
+    where = f" in {destination}" if scope == "project" else ""
+    print(f"\nRestart {display}{where} to load the installed skills,"
           " agents, and instructions.\nA session that is already running keeps"
           " the configuration it started with.")
 
 
+# Where each harness reads user-global memory, relative to $HOME, keyed by
+# the project-scope file it replaces. A user-scope install's destination is
+# $HOME, but no harness reads ~/CLAUDE.md or ~/AGENTS.md as user memory: they
+# walk project memory from the repository root down to the cwd, so a block
+# left in $HOME reaches only a session started in $HOME itself. Antigravity
+# takes ~/.gemini/AGENTS.md rather than GEMINI.md so the block never lands in
+# the file users edit by hand.
 USER_SCOPE_MEMORY_PATHS: dict[str, dict[str, str]] = {
     "claude-code": {
         "CLAUDE.md": ".claude/CLAUDE.md"
@@ -928,7 +958,7 @@ USER_SCOPE_MEMORY_PATHS: dict[str, dict[str, str]] = {
         harness: {
             "AGENTS.md": ".gemini/AGENTS.md"
         }
-        for harness in utils.GOOGLE_HARNESSES
+        for harness in harnesses.GOOGLE_HARNESSES
     },
 }
 
@@ -941,14 +971,14 @@ def check_store_not_relocated() -> None:
     unreachable from every hook. Only a caller that mounts the store back at
     ~/.tpu-agent-suite (--relocated-store) may move it.
     """
-    default_home = (Path.home() / utils.TPU_AGENT_SUITE_DIRNAME).resolve()
-    home = utils.get_tpu_agent_suite_home()
+    default_home = paths.default_tpu_agent_suite_home()
+    home = paths.get_tpu_agent_suite_home()
     if home != default_home:
         raise TpuAgentSuiteError(
             f"TPU_AGENT_SUITE_HOME={os.environ.get('TPU_AGENT_SUITE_HOME')!r}"
             f" puts the package store in {home}, but installed hooks,"
             f" permissions and instructions always use"
-            f" {utils.TPU_AGENT_SUITE_HOME_SPELLING}, so every hook would fail."
+            f" {paths.TPU_AGENT_SUITE_HOME_SPELLING}, so every hook would fail."
             " TPU_AGENT_SUITE_HOME is for tests only: unset it and install"
             " again.")
 
@@ -974,8 +1004,8 @@ def install(
     `compute setup` to fill in. `host_check` runs the software check on this
     machine.
     """
-    build = load_json(distribution / "tpu-agent-suite-build.json")
-    plan = load_json(distribution / "tpu-agent-suite-install.json")
+    build = jsonio.load_json(distribution / "tpu-agent-suite-build.json")
+    plan = jsonio.load_json(distribution / "tpu-agent-suite-install.json")
 
     if (build["harness"] != plan["harness"]
             or build["version_range"] != plan["version_range"]):
@@ -986,18 +1016,23 @@ def install(
 
     dest_path, resolved_scope = resolve_install_destination(
         distribution, scope, destination)
+    # Resolved before anything is removed, so a CODEX_HOME the install
+    # cannot serve leaves the previous install as it was.
+    codex_home = (resolve_user_codex_home(dest_path) if
+                  (resolved_scope == "user"
+                   and build["harness"] == "codex") else ".codex")
     pkg_name = build["source"]
     pkg_version = build.get("version", "")
     pkg_tag = utils.format_package_tag(pkg_name, pkg_version)
-    central_pkg_dir = utils.get_package_storage_root(pkg_name, pkg_version)
+    central_pkg_dir = paths.get_package_storage_root(pkg_name, pkg_version)
     # The ledger and environment.json go where uninstall and the runtime
     # look for them: the workspace's .tpu-agent-suite/, or the central store
     # for a user-scope install (and for a project install in $HOME).
-    tpu_agent_suite_dir = utils.tpu_agent_suite_dir_for(dest_path)
-    ownership_path = tpu_agent_suite_dir / utils.OWNERSHIP_FILE
-    environment_path = tpu_agent_suite_dir / utils.ENVIRONMENT_FILE
+    tpu_agent_suite_dir = paths.tpu_agent_suite_dir_for(dest_path)
+    ownership_path = tpu_agent_suite_dir / paths.OWNERSHIP_FILE
+    environment_path = tpu_agent_suite_dir / paths.ENVIRONMENT_FILE
 
-    previous_ownership = (load_json(ownership_path)
+    previous_ownership = (jsonio.load_json(ownership_path)
                           if ownership_path.exists() else None)
     # One package per workspace (and per user): the ledger has room for one,
     # and so does current_run_id, which two packages' sessions would fight
@@ -1014,7 +1049,7 @@ def install(
 
     if purge_data:
         if any(p.is_dir()
-               for p in (utils.get_runs_root(), utils.get_sessions_root())):
+               for p in (paths.get_runs_root(), paths.get_sessions_root())):
             if non_interactive and not force:
                 raise TpuAgentSuiteError(
                     "refusing to purge run data in non-interactive mode without --force"
@@ -1023,16 +1058,13 @@ def install(
                 print(
                     "\nWARNING: --purge-data will PERMANENTLY DESTROY all past runs, "
                     "experiment artifacts and session records in "
-                    "~/.tpu-agent-suite/runs/ and ~/.tpu-agent-suite/sessions/.\n",
+                    f"{paths.RUNS_HOME_SPELLING}/ and"
+                    f" {paths.TPU_AGENT_SUITE_HOME_SPELLING}/{paths.SESSIONS_DIRNAME}/.\n",
                     file=sys.stderr,
                 )
-                try:
-                    confirm = input(
+                if not _confirmed(
                         "Are you sure you want to permanently delete all run data? [y/N]: "
-                    ).strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    confirm = "n"
-                if confirm not in ("y", "yes"):
+                ):
                     raise TpuAgentSuiteError("purge-data cancelled by user")
 
     validate_install_preconditions(
@@ -1048,7 +1080,7 @@ def install(
 
     if purge_data:
         # Session records name runs, so they go with them.
-        for central in (utils.get_runs_root(), utils.get_sessions_root()):
+        for central in (paths.get_runs_root(), paths.get_sessions_root()):
             if central.is_dir():
                 shutil.rmtree(central, ignore_errors=True)
 
@@ -1057,8 +1089,7 @@ def install(
         # its verify results and the active run stay where they are: the
         # profiles are kept, and so are the results that go with them.
         remove_owned(dest_path, previous_ownership)
-        if ownership_path.exists():
-            ownership_path.unlink()
+        ownership_path.unlink(missing_ok=True)
         previous_ownership = None
 
     # environment.json belongs to the runtime (`compute setup`, `config`), so
@@ -1067,25 +1098,33 @@ def install(
     # removes it with the ledger.
     if not environment_path.is_file():
         environment_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(environment_path, {
+        jsonio.write_json(environment_path, {
             "revision": 1,
             "default": None,
             "profiles": {}
         })
 
     if resolved_scope == "user":
-        harness = build.get("harness")
+        harness = str(build.get("harness"))
+
+        def relocate_codex(path: str) -> str:
+            if harness == "codex" and path.split("/", 1)[0] == ".codex":
+                return codex_home + path[len(".codex"):]
+            return path
+
         for entry in plan.get("copies", []):
             if entry.get("store") == "workspace":
                 dest = entry.get("destination", "")
-                if utils.is_google_harness(
-                        str(harness)) and dest.startswith(".agents"):
-                    entry["destination"] = dest.replace(
-                        ".agents", ".gemini/config", 1)
-        memory_paths = USER_SCOPE_MEMORY_PATHS.get(str(harness), {})
+                if harnesses.is_google_harness(harness) and dest.startswith(
+                        ".agents"):
+                    dest = dest.replace(".agents", ".gemini/config", 1)
+                entry["destination"] = relocate_codex(dest)
+        for setting in plan.get("toml_sets", []):
+            setting["path"] = relocate_codex(setting["path"])
+        memory_paths = USER_SCOPE_MEMORY_PATHS.get(harness, {})
         for merge in plan.get("markdown_merges", []):
             if merge.get("path") in memory_paths:
-                merge["path"] = memory_paths[merge["path"]]
+                merge["path"] = relocate_codex(memory_paths[merge["path"]])
 
     copies = expand_copies(distribution, dest_path, plan, central_pkg_dir)
     workspace_copies = [(s_, t) for s_, t, store in copies
@@ -1096,7 +1135,11 @@ def install(
     # full copy plan; discoverability concerns only the workspace tree.
     verify_agents_reachable(distribution,
                             [(s_, t) for s_, t, _store in copies])
-    warn_if_workspace_not_discoverable(dest_path, workspace_copies)
+    # User-scope agents are discovered from the harness's user config
+    # directory, never by walking up to a repository root, so $HOME needs no
+    # repository for them to load.
+    if resolved_scope == "project":
+        warn_if_workspace_not_discoverable(dest_path, workspace_copies)
 
     check_file_collisions(
         workspace_copies,
@@ -1107,7 +1150,6 @@ def install(
     )
     prevalidate_configuration_mutations(dest_path,
                                         plan,
-                                        scope=resolved_scope,
                                         previous_ownership=previous_ownership)
 
     # Memory blocks arrive fully rendered from the compiler (the token
@@ -1122,9 +1164,10 @@ def install(
 
     # Rollback prior installation if upgrading
     if previous_ownership and not clean:
-        remove_owned(dest_path, previous_ownership)
-        if ownership_path.exists():
-            ownership_path.unlink()
+        # Pruned once the new files are in (below), so only what the new
+        # version no longer uses goes, and directories it reuses are kept.
+        remove_owned(dest_path, previous_ownership, prune=False)
+        ownership_path.unlink(missing_ok=True)
         # The old ledger is the only record of which central version this
         # workspace was using; release that claim now or the old version
         # directory stays pinned forever after the upgrade. Same-version
@@ -1160,13 +1203,12 @@ def install(
     # Apply JSON merges
     harness = plan.get("harness", "")
     for merge in plan.get("json_merges", []):
-        merge_path = resolve_config_merge_path(harness, merge["path"],
-                                               resolved_scope)
+        merge_path = resolve_config_merge_path(harness, merge["path"])
         path = rooted(dest_path, merge_path, "JSON config path")
-        document = load_json(path) if path.exists() else {}
+        document = jsonio.load_json(path) if path.exists() else {}
         records: list[dict[str, Any]] = []
         JsonConfigManager.merge(document, merge["value"], [], records)
-        write_json(path, document)
+        jsonio.write_json(path, document)
         actions.extend({**record, "path": merge_path} for record in records)
 
     # Apply workspace memory blocks
@@ -1191,7 +1233,7 @@ def install(
 
     # Record ownership
     ownership_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json(
+    jsonio.write_json(
         ownership_path,
         {
             "ledger_schema": LEDGER_SCHEMA,
@@ -1205,13 +1247,16 @@ def install(
         },
     )
 
+    if previous_ownership and not clean:
+        prune_empty_parents(dest_path, owned_paths(previous_ownership))
+
     if resolved_scope == "project":
         register_git_exclude(dest_path, ".tpu-agent-suite/")
 
     if announce:
         summarize_installation(
             dest_path, build, resolved_scope, memory_merges,
-            utils.load_json_doc(environment_path).get("default"))
+            jsonio.load_json_or_empty(environment_path).get("default"))
     return dest_path
 
 
@@ -1220,12 +1265,12 @@ def read_installed(dest_path: Path,
     """The ledger of what dest_path has installed, which must be `package` if given."""
     if package:
         validate_package_name(package)
-    ownership_path = utils.tpu_agent_suite_dir_for(
-        dest_path) / utils.OWNERSHIP_FILE
+    ownership_path = paths.tpu_agent_suite_dir_for(
+        dest_path) / paths.OWNERSHIP_FILE
     if not ownership_path.is_file():
         raise TpuAgentSuiteError(f"nothing is installed in {dest_path}: "
                                  f"{ownership_path} does not exist")
-    ownership = load_json(ownership_path)
+    ownership = jsonio.load_json(ownership_path)
     if package and ownership.get("package") != package:
         raise TpuAgentSuiteError(
             f"{dest_path} has {ownership.get('package')} installed, not "
@@ -1253,7 +1298,7 @@ def uninstall(
     # The runtime's files, not in the ledger: environment.json (`compute
     # setup`, `config`) and its verify results. Left behind, an
     # environment.json without a ledger would serve any package.
-    for runtime_file in (utils.ENVIRONMENT_FILE, utils.VERIFICATION_FILE):
+    for runtime_file in (paths.ENVIRONMENT_FILE, paths.VERIFICATION_FILE):
         ownership_path.with_name(runtime_file).unlink(missing_ok=True)
 
     # Release this workspace's claim on the shared central payload; the
@@ -1262,7 +1307,13 @@ def uninstall(
         release_central_ref(ownership["package"], ownership.get("version", ""),
                             dest_path)
 
-    clean_empty_directories(dest_path)
+    # Only the ledger's directory goes, and only once it is empty: the runs,
+    # sessions and studies under it outlive the install, so nothing there is
+    # swept, down to a run's empty artifacts/.
+    try:
+        ownership_path.parent.rmdir()
+    except OSError:
+        pass
     return modified
 
 
@@ -1322,7 +1373,7 @@ def build_installer_parser() -> argparse.ArgumentParser:
     p_install.add_argument(
         "--purge-data",
         action="store_true",
-        help="Purge centralized run history in ~/.tpu-agent-suite/runs/",
+        help=f"Purge centralized run history in {paths.RUNS_HOME_SPELLING}/",
     )
     p_install.add_argument(
         "--force",
@@ -1426,7 +1477,7 @@ def main(argv: list[str] | None = None) -> int:
             # takes whatever the ledger names. --package overrides either.
             own_build = (Path(__file__).resolve().parents[1] /
                          "tpu-agent-suite-build.json")
-            package = args.package or (load_json(own_build)["source"]
+            package = args.package or (jsonio.load_json(own_build)["source"]
                                        if own_build.is_file() else "")
             _, installed = read_installed(
                 resolve_uninstall_destination(args.scope, args.destination),

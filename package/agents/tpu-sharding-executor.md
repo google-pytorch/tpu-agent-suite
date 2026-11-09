@@ -64,7 +64,7 @@ Pass that same `run_id` verbatim when you delegate to any subagent.
 
 2.  **Execute Workload via Unified Compute**:
 
-    -   **Generate Batch Recipe**: Format the configuration payload into a launch script `<artifacts>/<N>/recipe_<N>.<ext>` defining the workload execution commands, where `<ext>` matches the language you wrote it in (`.sh` or `.py`). Backends pick the runner from that extension: `bash` for `.sh`, the configured interpreter otherwise. On a backend whose recipe creates a cluster workload itself (`gke_xpk`), use `--workload=${WORKLOAD_NAME}` (exported by `{{runtime}} compute submit` on that backend) when creating the workload so cluster workload tracking and GCS artifacts align with the runtime job.
+    -   **Generate Batch Recipe**: Format the configuration payload into a launch script `<artifacts>/<N>/recipe_<N>.<ext>` defining the workload execution commands, where `<ext>` matches the language you wrote it in (`.sh` or `.py`). Backends pick the runner from that extension: `bash` for `.sh`, the configured interpreter otherwise.
     -   **Submit Workload**:
         ```bash
         JOB_ID=$({{runtime}} compute submit --recipe <artifacts>/<N>/recipe_<N>.<ext> --run-id <run_id>)

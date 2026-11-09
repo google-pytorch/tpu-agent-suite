@@ -41,7 +41,7 @@ Because decode speed is directly limited by how fast the TPU can read the KV cac
 | **FP16 / BF16** | 2,048 Bytes | 2.14 GB | 100% (Baseline) |
 | **FP8 (E4M3)** | **1,024 Bytes** | **1.07 GB** | **50%** |
 
-On TPU v7 (Ironwood), the 192 GB of HBM per chip and an FP8 KV cache together raise how many concurrent streams fit before the cache runs out; the number depends on the model's weights, context length and batch, and this page does not measure it.
+On TPU v7 (Ironwood), the 192 GiB of HBM per chip and an FP8 KV cache together raise how many concurrent streams fit before the cache runs out; the number depends on the model's weights, context length and batch, and this page does not measure it.
 
 ---
 
@@ -60,7 +60,7 @@ When a batch of tokens arrives at an MoE layer:
 
 ### Recommended MoE Sharding Strategy
 - **Single Host (8 devices):** Use **Tensor Parallelism (TP=8)** or **Expert Parallelism (EP=8)**. A TPU v6e-8 host has 8 single-core chips; a TPU7x-8 host (`tpu7x-standard-4t`) has 4 chips with two devices each (`index.py get hw-tpu-7x`). In both cases all 8 devices share ICI links, enabling sub-millisecond all-to-all token exchanges.
-- **Multi-Host Slices and Multislice:** Hosts inside one slice are also connected by ICI (`index.py get concept-dcn`). On a 2-host TPU7x slice (2x2x2), TP all-reduce measured ~165 GiB/s ICI egress per chip, with cross-host ranks within 0.11% of same-host ranks (vLLM on TPU7x, reported in https://github.com/google-pytorch/torchtpu-agents/issues/400 on 2026-09-30; the software versions were not recorded), far above the ~100 Gbps (12.5e9 B/s) per-chip DCN egress on TPU7x. DCN only carries traffic between slices. Keep all-to-all token exchanges within a slice, and put **Pipeline Parallelism (PP)** or data parallelism across slices, where stages communicate over DCN.
+- **Multi-Host Slices and Multislice:** Hosts inside one slice are also connected by ICI (`index.py get concept-dcn`). On a 2-host TPU7x slice (2x2x2), TP all-reduce measured ~165 GiB/s ICI egress per chip, with cross-host ranks within 0.11% of same-host ranks (vLLM on TPU7x, measured on 2026-09-30; the software versions were not recorded), far above the ~100 Gbps (12.5e9 B/s) per-chip DCN egress on TPU7x. DCN only carries traffic between slices. Keep all-to-all token exchanges within a slice, and put **Pipeline Parallelism (PP)** or data parallelism across slices, where stages communicate over DCN.
 
 ---
 

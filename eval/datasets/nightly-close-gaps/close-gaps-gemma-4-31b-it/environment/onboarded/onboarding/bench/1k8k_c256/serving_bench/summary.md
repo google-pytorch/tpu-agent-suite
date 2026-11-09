@@ -1,0 +1,3 @@
+| cell | status | TTFT p50 ms | TTFT p99 ms | TPOT p50 ms | ITL p50 ms | ITL p99 ms | E2E p50 ms | out tok/s | total tok/s | tok/s/user | req/s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| isl1024_osl8192_c256 | ok | 489335.61 | 709409.07 | 28.85 | 27.97 | 65.73 | 856693.19 | 2319.02 | 2608.89 | 27.32 | 0.28 |

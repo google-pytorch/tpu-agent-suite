@@ -15,7 +15,7 @@ references:
 - references/tpu-model-onboarding/torch-tpu-inference.md
 - references/tpu-model-onboarding/torch-tpu-benchmark.md
 - references/tpu-model-onboarding/preflight-check.md
-- references/common/vllm-engine-compatibility.md
+- references/common/engine-compatibility.md
 - references/tpu-model-onboarding/remote-tpu-runner.md
 - references/tpu-model-onboarding/smart-hf-search.md
 - references/tpu-model-onboarding/torch-benchmark-coder.md
@@ -47,6 +47,12 @@ scripts:
 - scripts/tpu-model-onboarding/preflight_check.py
 - scripts/tpu-model-onboarding/image_probe.py
 - scripts/common/engine_compatibility_check.py
+- scripts/common/oss_meshes.py
+# Measuring a serving candidate: the per-point report against the baseline.
+# report.py imports evaluate_arm.py for each metric's verdict, so it ships too.
+- scripts/optimization-heuristics/report.py
+- scripts/tpu-performance-optimization/evaluate_arm.py
+- scripts/common/vllm_patches/rpa_decode_block_override.patch
 - scripts/tpu-model-onboarding/smart_hf_search.py
 - scripts/tpu-model-onboarding/capture_parity.py
 - scripts/tpu-model-onboarding/compare_parity.py
@@ -60,6 +66,7 @@ scripts:
 - scripts/tpu-model-onboarding/verify_inference.py
 - scripts/tpu-model-onboarding/tpu_lock_reset.py
 - scripts/common/discover_vllm_flags.sh
+- scripts/common/discover_sglang_flags.sh
 - scripts/common/vllm_patches/registry.json
 - scripts/common/vllm_patches/apply_vllm_patch.sh
 - scripts/common/vllm_patches/gpt_oss_mxfp4.py
@@ -90,6 +97,40 @@ step, not up front.
 
 The one step you do not run yourself is CUDA unwiring: when preflight reports
 `ONBOARDING_REQUIRED`, the workflow delegates it to {{agent:tpu-unwiring}}.
+
+The request's `accelerator_type` is the TPU this onboarding targets; your
+caller read it with `compute inspect`. Do not run `compute inspect`: size from
+the request, the knowledge base and the compute profile
+(`{{runtime}} config show --json --package {{package_tag}}`, the active
+profile's `backend` and `params`):
+
+- **HBM per chip** from the knowledge base's page for the accelerator,
+  through {{agent:tpu-knowledge-base}}. With no page for it, or a page that
+  doesn't state it, return `needs_input` naming the accelerator.
+- **Devices per chip** from this table, not the knowledge base: it is what the
+  runtime exposes, which the pages don't state (they count TensorCores and
+  chiplets).
+
+  | accelerator | devices per chip |
+  | --- | --- |
+  | v4, v5p | 1 (two TensorCores, one device: megacore) |
+  | v5e, v6e | 1 |
+  | v7x (tpu7x) | 2 (one per chiplet) |
+
+  An accelerator not in the table: return `needs_input` naming it.
+- **Chips** one deployment gets: the profile's `tpu_chips`, else the product
+  of its `tpu_topology` (`2x2x1` is 4). When it has neither (a TPU VM, local
+  host or pod), return `needs_input` asking your caller for the chip count.
+- Then, as inspect computes them: HBM per device = HBM per chip / devices per
+  chip, and devices = chips x devices per chip. A tpu7x chip is 2 devices of
+  96 GB each, so a 2x2x1 slice (4 chips) has 8 devices. These are the
+  `<JOB_DEVICES>` and `<HBM_GB_PER_DEVICE>` the steps pass on.
+
+When the profile names a `tpu_accelerator` that differs from the request's,
+return `needs_input` naming both rather than sizing for either. Compare
+generations, not spellings: `tpu7x` and `v7x`, or `tpu-v6e-slice`, `v6e-8` and
+`v6e`, are the same accelerator. With no active profile, return `needs_input`
+naming `COMPUTE_NOT_CONFIGURED`.
 
 ## Reference Kernel Extraction
 
@@ -138,7 +179,7 @@ Both workflows take a Hugging Face model and run it on TPU, so the word
 
 -   **Inference Workflow** -- the default. Read
     `{{reference:tpu-model-onboarding/torch-tpu-inference.md}}`
-    and follow it. It handles preflight/vllm-engine-compatibility checks followed by
+    and follow it. It handles preflight/engine-compatibility checks followed by
     onboarding, numerical checks and deployment.
 -   **Benchmark Workflow** -- only when the user specifically asked for it,
     by name (`torch-tpu-benchmark`) or as "the benchmarking workflow". Read
@@ -147,6 +188,10 @@ Both workflows take a Hugging Face model and run it on TPU, so the word
     not name it.
 -   **Unclear** ("run Llama 3 8B on TPU"): If it is unclear which workflow to pick,
     always default to the inference workflow.
+-   **Candidate** -- only when the request's `mode` is `candidate`, which
+    tpu-agent sets in its optimization-heuristics round. Follow
+    [Measuring a serving candidate](#measuring-a-serving-candidate); neither
+    workflow above applies.
 
 ### Decide whether an endpoint was asked for
 
@@ -174,10 +219,55 @@ mode).
 | A full onboarding request — preflight, CUDA unwiring, parity against CPU, "report the measured numbers" | Inference — verification mode | The fallback holds even though numbers were asked for, because the benchmark workflow was not named |
 | "Run benchmarking of google/gemma-4-31B-it on TPU" | Inference — verification mode, then benchmark it yourself | Naming the *activity* is not naming the workflow |
 | "...using the benchmarking workflow" or "...using torch-tpu-benchmark" | Benchmark | The workflow is named, by either its description or its name |
+| `mode: "candidate"`: serve a candidate's `deployments_json` and compare it with the baseline | Candidate | Set only by tpu-agent's optimization round; the mode decides it, not the wording |
 
 The third and fourth rows are the ones that surprise people: a request can ask
 for latency figures in so many words and still route to inference, because
 the benchmark workflow is reserved for requests that name it.
+
+## Measuring a serving candidate
+
+When the request's `mode` is `candidate`, it asks you to serve and benchmark
+a serving candidate tpu-diagnostics proposed (its `deployments_json`, the `candidates.json` it
+came from, and the baseline's benchmark summaries), serve the candidate's
+`deployments_json` -- its `env` goes into the launch recipe, everything else
+as the baseline's -- and benchmark it at the baseline's
+points with the baseline's `bench_request`, so the two runs differ only by
+the change.
+
+Each entry in the candidate's `vllm_patches` names one of the package's vLLM
+patches by file name (for example
+{{script:common/vllm_patches/rpa_decode_block_override.patch}}, which
+`TPU_RPA_DECODE_BLOCK_SIZES` needs). Apply it the way a registry patch
+is applied in `{{reference:tpu-model-onboarding/torch-inference-coder.md}}`:
+the recipe starts with `set -eo pipefail` and runs
+`bash apply_vllm_patch.sh <patch>` before `serve_vllm.sh`, so a patch that
+does not apply stops the server instead of serving without the change, and
+the `compute submit` ships the patch and
+{{script:common/vllm_patches/apply_vllm_patch.sh}} as `--input`s beside
+`serve_vllm.sh`.
+
+Then compare it with the baseline. `report.py` only reads the two sides'
+benchmark summaries and writes a JSON report, so run it locally, not as a
+compute job:
+
+```bash
+python3 {{script:optimization-heuristics/report.py}} \
+    --candidates <candidates.json> \
+    --baseline <baseline summary.json>[,<summary.json>...] \
+    --measured <cand_id>=<candidate summary.json>[,<summary.json>...] \
+    --out <artifacts>/<cand_id>/report.json
+```
+
+Pass every serving_benchmark `summary.json` each side produced (one per
+point when each point ran as its own job). At every point both measured it
+gives output tokens/s, median TTFT and median ITL, the change, the
+run-to-run noise and a verdict per metric (`win` or `loss` beyond the noise,
+else `tie`), failed requests per point, and per regime the baseline's peak
+point and the candidate there. Return it as `output_files.candidate_report`
+and give its table in the `summary`. Do not say whether to keep the
+candidate: the caller decides from the report. Tear the candidate's server
+down when the benchmark is done unless the request says to keep it.
 
 ## Reporting
 

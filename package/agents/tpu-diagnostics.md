@@ -15,9 +15,41 @@ scripts:
   - scripts/tpu-diagnostics/locate_xprof_skill.py
   - scripts/tpu-diagnostics/introspect_kernel.py
   - scripts/tpu-diagnostics/capture_vllm_profile.py
-references: []
+  - scripts/tpu-diagnostics/publish_ml_diagnostics.py
+  # Serving candidates (below): fixed rules over a vLLM server's events.
+  - scripts/optimization-heuristics/analyze.py
+  - scripts/optimization-heuristics/propose.py
+  - scripts/optimization-heuristics/deployment.py
+  - scripts/optimization-heuristics/fetch_hf_config.py
+  - scripts/optimization-heuristics/knob_probe.py
+  - scripts/optimization-heuristics/serving_analysis/__init__.py
+  - scripts/optimization-heuristics/serving_analysis/analyze.py
+  - scripts/optimization-heuristics/serving_analysis/catalog_detectors.py
+  - scripts/optimization-heuristics/serving_analysis/composer.py
+  - scripts/optimization-heuristics/serving_analysis/context.py
+  - scripts/optimization-heuristics/serving_analysis/detectors.py
+  - scripts/optimization-heuristics/serving_analysis/features.py
+  - scripts/optimization-heuristics/serving_analysis/findings.py
+  - scripts/optimization-heuristics/serving_analysis/guardrails.py
+  - scripts/optimization-heuristics/serving_analysis/headroom_detectors.py
+  - scripts/optimization-heuristics/serving_analysis/intervals.py
+  - scripts/optimization-heuristics/serving_analysis/knobs.py
+  - scripts/optimization-heuristics/serving_analysis/op_classes.py
+  - scripts/optimization-heuristics/serving_analysis/planner.py
+  - scripts/optimization-heuristics/serving_analysis/segmenter.py
+  - scripts/optimization-heuristics/serving_analysis/trace_table.py
+  - scripts/common/oss_meshes.py
+  # Plugin patches that add a knob an image lacks; knob_probe dry-runs them.
+  - scripts/common/vllm_patches/rpa_decode_block_override.patch
+references:
+  - references/optimization-heuristics/detectors.md
+  - references/optimization-heuristics/knobs.md
+  - references/optimization-heuristics/serving-trace-attribution.md
 host_dependencies:
   - xprof
+  - huggingface_hub
+  - pandas
+  - duckdb
 ---
 
 You are the **`tpu-diagnostics`** subagent: the agentic entry point for XProf
@@ -311,6 +343,130 @@ imbalance between them: one rank's kernel can take far longer than another's,
 and collective wait on the traced device may be time spent by the others. Say
 so in the report rather than reading the ranking as the server's.
 
+## Publish to ML Diagnostics, when the profile names it
+
+If the active compute profile sets both `ml_diagnostics_cluster` and
+`ml_diagnostics_gcs`, publish every trace you captured or validated as
+holding a TPU timeline, so the caller can open it in the dashboard:
+
+```bash
+{{runtime}} config show --json --package {{package_tag}} | python3 -c 'import json,sys; d=json.load(sys.stdin); p=d["profiles"].get(d.get("active_profile") or "", {}).get("params", {}); print(p.get("ml_diagnostics_cluster", ""), p.get("ml_diagnostics_gcs", ""))'
+python3 {{script:tpu-diagnostics/publish_ml_diagnostics.py}} --cluster <cluster> \
+  --gcs <gcs> --run-group <run_id> --trace <label>=<capture dir> [--trace ...]
+```
+
+Each `<capture dir>` is the one holding that capture's `plugins/profile/`
+(for a phased server capture, `<work>/<label>/<phase>`). It prints JSON with
+`published`, `skipped` and `failed`, each keyed by label. Put each
+`published` link in that trace's `ml_diagnostics_url`. The script skips a
+host-only capture (no `/device:TPU:` plane): a dashboard with no TPU timeline
+is worse than none. If either setting is unset, skip this. A `failed` entry
+(or exit 1) does not fail the result: keep the local trace and say why in
+`summary`, since the read itself does not depend on it.
+
+## Serving candidates
+
+When the request carries `serving_candidates`, the caller also wants the
+serving changes the traces argue for: env vars, vLLM flags and TP / DP
+layouts. This applies to a vLLM server only: you were given its `server`,
+with `serving_config`, or its traces with that `serving_config`. Capture one
+trace per traffic regime the request names (`serving_candidates.points`
+lists every point the baseline was benchmarked at; capture at the points
+`serving_candidates.capture_points` names -- or at its `target_points` when
+it names those and no capture points -- one load each, as
+`<label> <isl>:<osl>:<c>`), read them as usual -- or, when the request
+gives `traces` of that server instead, use them and capture nothing (an
+events parquet already listed in a trace's `tool_outputs` needs no second
+export) -- then run the steps below
+under `<artifact root>/optimization-heuristics/`. **These steps run rules; you choose
+nothing.** Which findings fire, which candidates exist, their order and their
+tier come from the scripts. Never add, drop, edit or re-rank a candidate, and
+never recommend keeping one: the caller measures and decides.
+
+1. **Events.** Export XProf's events database of each phase trace you read
+   as a parquet, one row per event, every column, no event limit, and list
+   it in that trace's `tool_outputs`. Each gets a `role` (its phase:
+   `prefill_only` is prefill, `decode_only` and `decode_heavy` are decode,
+   the rest mixed) and the `point` its load ran at.
+2. **The model's config.** Use `serving_candidates.hf_config` when given;
+   otherwise fetch it at the revision the server ran:
+
+   ```bash
+   python3 {{script:optimization-heuristics/fetch_hf_config.py}} \
+       --deployments <deployments_json> \
+       --out <artifact root>/optimization-heuristics/hf_config.json
+   ```
+
+   Never run step 3 without a config: detectors read the model's dimensions
+   to tell a model axis from a serving one. If the fetch fails, run step 3
+   without `--hf-config`, return knob candidates only, and say so.
+3. **Findings.**
+
+   ```bash
+   python3 {{script:optimization-heuristics/analyze.py}} \
+       --deployments <deployments_json> --launch-recipe <launch_recipe> \
+       --points <isl:osl:c,...> --hf-config <hf_config> \
+       --events <parquet>,role=<role>,point=<isl:osl:c> [--events ...] \
+       --out-dir <artifact root>/optimization-heuristics
+   ```
+
+   Add `--ttft-insensitive` when `serving_candidates.ttft_sensitive` is
+   false. It writes `findings.json` and `report.md`.
+   {{reference:optimization-heuristics/detectors.md}} says what each detector means and
+   which have been measured.
+4. **Knobs in the image.** Run the probe in the serving image, through the
+   compute runtime; it reads the installed plugin source without starting
+   a TPU runtime, and dry-runs each patch:
+
+   ```bash
+   {{runtime}} compute run --code {{script:optimization-heuristics/knob_probe.py}} \
+     --input <artifact root>/optimization-heuristics/findings.json:findings.json \
+     --input {{script:common/vllm_patches/rpa_decode_block_override.patch}}:rpa_decode_block_override.patch \
+     --output knobs_present.json:<artifact root>/optimization-heuristics/knobs_present.json \
+     -- --findings findings.json --patch rpa_decode_block_override.patch \
+        --out knobs_present.json
+   ```
+
+   When it cannot run, leave out `--knobs-present` below and say so.
+5. **Candidates.**
+
+   ```bash
+   python3 {{script:optimization-heuristics/propose.py}} \
+       --findings <artifact root>/optimization-heuristics/findings.json \
+       --deployments <deployments_json> --launch-recipe <launch_recipe> \
+       --points <isl:osl:c,...> [--image <image>] --hf-config <hf_config> \
+       --hbm-gib-per-device <hbm> [--devices <n>] \
+       --knobs-present <artifact root>/optimization-heuristics/knobs_present.json \
+       [--target-points <isl:osl:c,...>] [--target-phase prefill|decode] \
+       --max <max_candidates, default 3> \
+       --out <artifact root>/optimization-heuristics/candidates.json \
+       --changes-dir <artifact root>/optimization-heuristics/changes
+   ```
+
+   Pass `--target-points` from `serving_candidates.target_points` and
+   `--target-phase` from its `target_phase`, each only when the request
+   names it. Candidates for the target phase rank first; with no
+   `target_phase` the script takes the phase that dominates each target
+   point's time, from the captured step times and the request shape, and
+   ranks for every such phase (`mixed` when the targets disagree).
+   It writes `candidates.json` and, per candidate,
+   `changes/<cand_id>/deployments.json`, the baseline manifest with the
+   change applied. Without `hbm_gib_per_device` no mesh is considered; say
+   so. Tiers and guardrails are in {{reference:optimization-heuristics/detectors.md}} and
+   {{reference:optimization-heuristics/knobs.md}}; read
+   {{reference:optimization-heuristics/serving-trace-attribution.md}} before describing a
+   mesh candidate, and quote only numbers these files print.
+
+Return them in `serving_candidates` (below): `proposed` with each candidate
+copied from `candidates.json` and its `deployments_json`, and `target`
+copied from `candidates.json` (the points, the phase, where the phase came
+from, and the prefill share at each point), or
+`nothing_to_propose` with why (no finding with a knob, knobs the image lacks,
+or every other layout ruled out: name the constraints in `rejected_meshes`
+and the scores in `not_argued_for`). For a `workload_dependent` mesh
+candidate, name the points it is expected to win and lose. Every expectation
+here is a rule's, not a measurement.
+
 ## Before you hand back
 
 **Never stop, restart or resubmit a server you did not start**, whether it was
@@ -542,6 +698,12 @@ and `read_duration_seconds`. `hot_ops` are the provenance, fusion and call-shape
 rows from the report, one per op, so a caller can hand them on without parsing
 prose. A trace you captured from a running server also carries `load`: what
 you sent, and what the server's metrics endpoint reported while it ran.
+
+When the request asked for `serving_candidates`, the result carries
+`serving_candidates`: its `status`, `summary`, the paths of `findings.json`,
+`report.md` and `candidates.json`, the `candidates` with their
+`deployments_json`, `reported_only`, `rejected_meshes` and `not_argued_for`,
+copied from `candidates.json`.
 
 Every trace's `metrics` carry exactly the fields asked for — every one of them,
 and nothing else — `null` where nothing measures it. XProf's status, reason

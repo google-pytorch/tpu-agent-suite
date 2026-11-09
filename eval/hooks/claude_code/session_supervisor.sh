@@ -73,10 +73,15 @@ for arg in "$@"; do
 done
 
 # Run the session as the package persona, as the agy supervisor does, so both
-# harnesses route through the same specialists.
+# harnesses route through the same specialists. A task may override this with
+# TASK_AGENT_PERSONA on packaged arms (where AGENT_PERSONA is set).
+EFFECTIVE_PERSONA="${AGENT_PERSONA:-}"
+if [ -n "$EFFECTIVE_PERSONA" ] && [ -n "${TASK_AGENT_PERSONA:-}" ]; then
+  EFFECTIVE_PERSONA="$TASK_AGENT_PERSONA"
+fi
 CLI_ARGS=("$@")
-if [ -n "${AGENT_PERSONA:-}" ] && [[ ! " ${CLI_ARGS[*]} " =~ " --agent " ]]; then
-  CLI_ARGS+=("--agent" "$AGENT_PERSONA")
+if [ -n "$EFFECTIVE_PERSONA" ] && [[ ! " ${CLI_ARGS[*]} " =~ " --agent " ]]; then
+  CLI_ARGS+=("--agent" "$EFFECTIVE_PERSONA")
 fi
 
 if ! command -v jq &>/dev/null; then
@@ -86,36 +91,21 @@ fi
 
 # 2. Environment overrides for non-interactive TPU agent suite and Multi-agent execution
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
-export CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=20
 export IS_SANDBOX=1
 
-# 3. Set up stream capture and signal traps
+# 3. Set up stream capture, session synthesis, and signal traps
 RAW_STREAM="/tmp/claude_raw_stream_$$.txt"
 CLAUDE_EXIT_CODE=0
 STITCHED=0
-
-# shellcheck disable=SC2317
-cleanup() {
-  synthesize_session || true
-  rm -f "$RAW_STREAM" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
-# 4. Launch real Claude CLI.
-# Forward stdin, stream stdout+stderr live (so Harbor's tee receives output in real-time),
-# and duplicate into RAW_STREAM for post-run session extraction and depth attribution.
-log_supervisor "[ClaudeSupervisor] Launching native Claude Code: $REAL_CLAUDE ${CLI_ARGS[*]}"
-
-set +e
-"$REAL_CLAUDE" "${CLI_ARGS[@]}" 2>&1 | tee "$RAW_STREAM"
-CLAUDE_EXIT_CODE=${PIPESTATUS[0]}
-set -e
+CLAUDE_PID=""
 
 # ==============================================================================
-# 5. Post-Run Session Synthesis & Depth Tagging
+# Post-Run Session Synthesis & Depth Tagging
 # ==============================================================================
 synthesize_session() {
+  trap '' INT TERM
   [ "${STITCHED:-0}" -eq 1 ] && return 0
+  STITCHED=1
   [ -s "$RAW_STREAM" ] || return 0
 
   # Search all potential session directories (CLAUDE_CONFIG_DIR, /logs/agent/sessions, $HOME/.claude)
@@ -176,20 +166,24 @@ synthesize_session() {
     depth=$(jq -r '.spawnDepth // 1' "$meta" 2>/dev/null || echo 1)
     local tag="[Depth ${depth} | ${agent_type}]"
 
-    if jq -R -c --arg tag "$tag" "${tag_fn} fromjson? | select(type == \"object\") | tag_msg(\$tag)" "$agent_jsonl" > "${agent_jsonl}.tmp" 2>/dev/null; then
+    if jq -R -c --arg tag "$tag" "${tag_fn} fromjson? | select(type == \"object\") | tag_msg(\$tag)" "$agent_jsonl" > "${agent_jsonl}.tmp" 2>/dev/null && [ -s "${agent_jsonl}.tmp" ]; then
       mv "${agent_jsonl}.tmp" "$agent_jsonl"
+    else
+      rm -f "${agent_jsonl}.tmp" 2>/dev/null || true
     fi
   done < <(find "$proj_dir" -type f -name "*.meta.json" 2>/dev/null)
 
   # 2. Tag root session file in-place if written by Claude, or synthesize from stream
   local root_tag="[Depth 0]"
-  if [ -n "${AGENT_PERSONA:-}" ]; then
-    root_tag="[Depth 0 | ${AGENT_PERSONA}]"
+  if [ -n "${EFFECTIVE_PERSONA:-}" ]; then
+    root_tag="[Depth 0 | ${EFFECTIVE_PERSONA}]"
   fi
   if [ -s "$target_jsonl" ]; then
     log_supervisor "[ClaudeSupervisor] Tagging existing root session: $target_jsonl..."
-    if jq -R -c --arg tag "$root_tag" "${tag_fn} fromjson? | select(type == \"object\") | tag_msg(\$tag)" "$target_jsonl" > "${target_jsonl}.tmp" 2>/dev/null; then
+    if jq -R -c --arg tag "$root_tag" "${tag_fn} fromjson? | select(type == \"object\") | tag_msg(\$tag)" "$target_jsonl" > "${target_jsonl}.tmp" 2>/dev/null && [ -s "${target_jsonl}.tmp" ]; then
       mv "${target_jsonl}.tmp" "$target_jsonl"
+    else
+      rm -f "${target_jsonl}.tmp" 2>/dev/null || true
     fi
   else
     log_supervisor "[ClaudeSupervisor] Synthesizing root session from stream: $RAW_STREAM -> $target_jsonl..."
@@ -201,14 +195,73 @@ synthesize_session() {
            \"[Depth \" + ((.spawn_depth // 1) | tostring) + \" | \" + (.subagent_type // \"subagent\") + \"]\"
          else \$tag end) as \$t
       | tag_msg(\$t)
-    " "$RAW_STREAM" > "${target_jsonl}.tmp" 2>/dev/null; then
+    " "$RAW_STREAM" > "${target_jsonl}.tmp" 2>/dev/null && [ -s "${target_jsonl}.tmp" ]; then
       mv "${target_jsonl}.tmp" "$target_jsonl"
+    else
+      rm -f "${target_jsonl}.tmp" 2>/dev/null || true
+    fi
+  fi
+
+  # 3. Fallback when CLI exited before emitting any user/assistant message event
+  if [ ! -s "$target_jsonl" ] || ! jq -e 'select((.type == "assistant" or .type == "user") and (.message | type == "object"))' "$target_jsonl" >/dev/null 2>&1; then
+    local fallback_txt
+    fallback_txt=$(jq -R -s --arg tag "$root_tag" '
+      (split("\n") | map(select(length > 0)) | map(
+        (try fromjson catch null) as $obj
+        | if ($obj | type) == "object" then
+            ([$obj.result, $obj.error?.message, $obj.error, $obj.message]
+             | map(select(type == "string" and length > 0)) | first // empty)
+          else . end
+      ) | join("\n")) as $body
+      | if ($body | length) > 0 then ($tag + " [Early CLI Crash / Error Output]\n" + ($body | .[-4000:]))
+        else ($tag + " [Early CLI Crash: empty stream]") end
+    ' "$RAW_STREAM" 2>/dev/null || true)
+    if [ -n "$fallback_txt" ]; then
+      log_supervisor "[ClaudeSupervisor] Injecting fallback error step into $target_jsonl..."
+      jq -nc --arg sid "$session_id" --argjson txt "$fallback_txt" \
+        '{"type":"assistant","sessionId":$sid,"message":{"role":"assistant","content":[{"type":"text","text":$txt}]}}' \
+        >> "$target_jsonl" 2>/dev/null || true
     fi
   fi
 
   log_supervisor "[ClaudeSupervisor] Session synthesis complete: $(wc -l < "$target_jsonl" 2>/dev/null || echo 0) root events."
-  STITCHED=1
 }
+
+# shellcheck disable=SC2317
+cleanup() {
+  trap '' INT TERM
+  trap - EXIT
+  if [ -n "${CLAUDE_PID:-}" ] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
+    pkill -TERM -P "$CLAUDE_PID" 2>/dev/null || true
+    kill -TERM "$CLAUDE_PID" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$CLAUDE_PID" 2>/dev/null; then
+      kill -KILL "$CLAUDE_PID" 2>/dev/null || true
+    fi
+  fi
+  wait 2>/dev/null || true
+  synthesize_session || true
+  rm -f "$RAW_STREAM" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# 4. Launch real Claude CLI.
+# Forward stdin (<&0), stream stdout+stderr live (so Harbor's tee receives output in real-time),
+# and duplicate into RAW_STREAM for post-run session extraction and depth attribution.
+# Background + wait allows SIGTERM/SIGINT (e.g. Harbor AgentTimeoutError) to interrupt wait
+# immediately and run cleanup()/synthesize_session() before logs are downloaded.
+log_supervisor "[ClaudeSupervisor] Launching native Claude Code: $REAL_CLAUDE ${CLI_ARGS[*]}"
+
+set +e
+exec 3> >(tee "$RAW_STREAM")
+TEE_PID=$!
+"$REAL_CLAUDE" "${CLI_ARGS[@]}" <&0 >&3 2>&3 3>&- &
+CLAUDE_PID=$!
+exec 3>&-
+wait "$CLAUDE_PID" 2>/dev/null
+CLAUDE_EXIT_CODE=$?
+wait "$TEE_PID" 2>/dev/null || true
+set -e
 
 synthesize_session || true
 sync || true

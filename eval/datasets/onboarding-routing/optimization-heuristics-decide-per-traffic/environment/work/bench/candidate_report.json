@@ -1,0 +1,448 @@
+{
+ "metrics": {
+  "output_tokens_per_s": "maximize",
+  "ttft_p50_ms": "minimize",
+  "itl_p50_ms": "minimize"
+ },
+ "candidates": [
+  {
+   "cand_id": "m-tp4xdp2",
+   "kind": "mesh",
+   "status": "workload_dependent",
+   "measured": true,
+   "points": [
+    {
+     "point": "1024:1024:32",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 3098.05,
+      "candidate": 2884.05,
+      "delta_pct": -6.9076,
+      "noise_pct": 1.36,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "ttft_p50_ms": {
+      "baseline": 314.95,
+      "candidate": 347.05,
+      "delta_pct": -10.1921,
+      "noise_pct": 2.28,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "itl_p50_ms": {
+      "baseline": 9.32,
+      "candidate": 10.045,
+      "delta_pct": -7.779,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "loss"
+     }
+    },
+    {
+     "point": "1024:1024:128",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 6598.55,
+      "candidate": 6795.15,
+      "delta_pct": 2.9794,
+      "noise_pct": 1.23,
+      "noise_measured": true,
+      "verdict": "win"
+     },
+     "ttft_p50_ms": {
+      "baseline": 342.20000000000005,
+      "candidate": 474.1,
+      "delta_pct": -38.5447,
+      "noise_pct": 4.72,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "itl_p50_ms": {
+      "baseline": 15.370000000000001,
+      "candidate": 15.315000000000001,
+      "delta_pct": 0.3578,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "tie"
+     }
+    },
+    {
+     "point": "8192:1024:32",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 1737.1,
+      "candidate": 1897.95,
+      "delta_pct": 9.2597,
+      "noise_pct": 1.58,
+      "noise_measured": true,
+      "verdict": "win"
+     },
+     "ttft_p50_ms": {
+      "baseline": 669.45,
+      "candidate": 1255.2,
+      "delta_pct": -87.4972,
+      "noise_pct": 22.39,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "itl_p50_ms": {
+      "baseline": 10.73,
+      "candidate": 10.75,
+      "delta_pct": -0.1864,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "tie"
+     }
+    },
+    {
+     "point": "8192:1024:128",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 2443.25,
+      "candidate": 3017.9,
+      "delta_pct": 23.5199,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "win"
+     },
+     "ttft_p50_ms": {
+      "baseline": 742.35,
+      "candidate": 1234.85,
+      "delta_pct": -66.3434,
+      "noise_pct": 9.19,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "itl_p50_ms": {
+      "baseline": 21.244999999999997,
+      "candidate": 18.18,
+      "delta_pct": 14.4269,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "win"
+     }
+    }
+   ],
+   "missing_points": [],
+   "throughput_wins_at": [
+    "1024:1024:128",
+    "8192:1024:32",
+    "8192:1024:128"
+   ],
+   "throughput_losses_at": [
+    "1024:1024:32"
+   ],
+   "failed_requests": 0,
+   "regimes": {
+    "1024:1024": {
+     "points": [
+      "1024:1024:32",
+      "1024:1024:128"
+     ],
+     "throughput_wins_at": [
+      "1024:1024:128"
+     ],
+     "throughput_losses_at": [
+      "1024:1024:32"
+     ],
+     "ttft_losses_at": [
+      "1024:1024:32",
+      "1024:1024:128"
+     ],
+     "itl_losses_at": [
+      "1024:1024:32"
+     ],
+     "failed_requests": 0,
+     "mean_throughput_delta_pct": -1.96,
+     "peak_point": "1024:1024:128",
+     "at_peak": {
+      "output_tokens_per_s": {
+       "baseline": 6598.55,
+       "candidate": 6795.15,
+       "delta_pct": 2.9794,
+       "verdict": "win"
+      },
+      "ttft_p50_ms": {
+       "baseline": 342.20000000000005,
+       "candidate": 474.1,
+       "delta_pct": -38.5447,
+       "verdict": "loss"
+      },
+      "itl_p50_ms": {
+       "baseline": 15.370000000000001,
+       "candidate": 15.315000000000001,
+       "delta_pct": 0.3578,
+       "verdict": "tie"
+      },
+      "failed_requests": 0
+     }
+    },
+    "8192:1024": {
+     "points": [
+      "8192:1024:32",
+      "8192:1024:128"
+     ],
+     "throughput_wins_at": [
+      "8192:1024:32",
+      "8192:1024:128"
+     ],
+     "throughput_losses_at": [],
+     "ttft_losses_at": [
+      "8192:1024:32",
+      "8192:1024:128"
+     ],
+     "itl_losses_at": [],
+     "failed_requests": 0,
+     "mean_throughput_delta_pct": 16.39,
+     "peak_point": "8192:1024:128",
+     "at_peak": {
+      "output_tokens_per_s": {
+       "baseline": 2443.25,
+       "candidate": 3017.9,
+       "delta_pct": 23.5199,
+       "verdict": "win"
+      },
+      "ttft_p50_ms": {
+       "baseline": 742.35,
+       "candidate": 1234.85,
+       "delta_pct": -66.3434,
+       "verdict": "loss"
+      },
+      "itl_p50_ms": {
+       "baseline": 21.244999999999997,
+       "candidate": 18.18,
+       "delta_pct": 14.4269,
+       "verdict": "win"
+      },
+      "failed_requests": 0
+     }
+    }
+   }
+  },
+  {
+   "cand_id": "m-tp2xdp4",
+   "kind": "mesh",
+   "status": "workload_dependent",
+   "measured": true,
+   "points": [
+    {
+     "point": "1024:1024:32",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 3098.05,
+      "candidate": 2266.15,
+      "delta_pct": -26.8524,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "ttft_p50_ms": {
+      "baseline": 314.95,
+      "candidate": 214.64999999999998,
+      "delta_pct": 31.8463,
+      "noise_pct": 35.36,
+      "noise_measured": true,
+      "verdict": "tie"
+     },
+     "itl_p50_ms": {
+      "baseline": 9.32,
+      "candidate": 13.48,
+      "delta_pct": -44.6352,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "loss"
+     }
+    },
+    {
+     "point": "1024:1024:128",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 6598.55,
+      "candidate": 6470.7,
+      "delta_pct": -1.9375,
+      "noise_pct": 1.63,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "ttft_p50_ms": {
+      "baseline": 342.20000000000005,
+      "candidate": 464.20000000000005,
+      "delta_pct": -35.6517,
+      "noise_pct": 13.18,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "itl_p50_ms": {
+      "baseline": 15.370000000000001,
+      "candidate": 17.924999999999997,
+      "delta_pct": -16.6233,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "loss"
+     }
+    },
+    {
+     "point": "8192:1024:32",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 1737.1,
+      "candidate": 1835.25,
+      "delta_pct": 5.6502,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "win"
+     },
+     "ttft_p50_ms": {
+      "baseline": 669.45,
+      "candidate": 1017.0,
+      "delta_pct": -51.9158,
+      "noise_pct": 5.37,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "itl_p50_ms": {
+      "baseline": 10.73,
+      "candidate": 14.219999999999999,
+      "delta_pct": -32.5256,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "loss"
+     }
+    },
+    {
+     "point": "8192:1024:128",
+     "failed_baseline": 0,
+     "failed_candidate": 0,
+     "output_tokens_per_s": {
+      "baseline": 2443.25,
+      "candidate": 3841.2,
+      "delta_pct": 57.2168,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "win"
+     },
+     "ttft_p50_ms": {
+      "baseline": 742.35,
+      "candidate": 1350.15,
+      "delta_pct": -81.8751,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "loss"
+     },
+     "itl_p50_ms": {
+      "baseline": 21.244999999999997,
+      "candidate": 20.82,
+      "delta_pct": 2.0005,
+      "noise_pct": 1.0,
+      "noise_measured": true,
+      "verdict": "win"
+     }
+    }
+   ],
+   "missing_points": [],
+   "throughput_wins_at": [
+    "8192:1024:32",
+    "8192:1024:128"
+   ],
+   "throughput_losses_at": [
+    "1024:1024:32",
+    "1024:1024:128"
+   ],
+   "failed_requests": 0,
+   "regimes": {
+    "1024:1024": {
+     "points": [
+      "1024:1024:32",
+      "1024:1024:128"
+     ],
+     "throughput_wins_at": [],
+     "throughput_losses_at": [
+      "1024:1024:32",
+      "1024:1024:128"
+     ],
+     "ttft_losses_at": [
+      "1024:1024:128"
+     ],
+     "itl_losses_at": [
+      "1024:1024:32",
+      "1024:1024:128"
+     ],
+     "failed_requests": 0,
+     "mean_throughput_delta_pct": -14.39,
+     "peak_point": "1024:1024:128",
+     "at_peak": {
+      "output_tokens_per_s": {
+       "baseline": 6598.55,
+       "candidate": 6470.7,
+       "delta_pct": -1.9375,
+       "verdict": "loss"
+      },
+      "ttft_p50_ms": {
+       "baseline": 342.20000000000005,
+       "candidate": 464.20000000000005,
+       "delta_pct": -35.6517,
+       "verdict": "loss"
+      },
+      "itl_p50_ms": {
+       "baseline": 15.370000000000001,
+       "candidate": 17.924999999999997,
+       "delta_pct": -16.6233,
+       "verdict": "loss"
+      },
+      "failed_requests": 0
+     }
+    },
+    "8192:1024": {
+     "points": [
+      "8192:1024:32",
+      "8192:1024:128"
+     ],
+     "throughput_wins_at": [
+      "8192:1024:32",
+      "8192:1024:128"
+     ],
+     "throughput_losses_at": [],
+     "ttft_losses_at": [
+      "8192:1024:32",
+      "8192:1024:128"
+     ],
+     "itl_losses_at": [
+      "8192:1024:32"
+     ],
+     "failed_requests": 0,
+     "mean_throughput_delta_pct": 31.43,
+     "peak_point": "8192:1024:128",
+     "at_peak": {
+      "output_tokens_per_s": {
+       "baseline": 2443.25,
+       "candidate": 3841.2,
+       "delta_pct": 57.2168,
+       "verdict": "win"
+      },
+      "ttft_p50_ms": {
+       "baseline": 742.35,
+       "candidate": 1350.15,
+       "delta_pct": -81.8751,
+       "verdict": "loss"
+      },
+      "itl_p50_ms": {
+       "baseline": 21.244999999999997,
+       "candidate": 20.82,
+       "delta_pct": 2.0005,
+       "verdict": "win"
+      },
+      "failed_requests": 0
+     }
+    }
+   }
+  }
+ ]
+}

@@ -417,6 +417,11 @@
                 }
               }
             }
+          },
+          "ml_diagnostics_url": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The ML Diagnostics dashboard link for this trace, when the compute profile names a cluster and bucket and it was published."
           }
         }
       }
@@ -435,6 +440,157 @@
     "error_message": {
       "type": "string",
       "description": "The raw tool output or stack trace behind a status other than 'reported', naming the trace it concerns."
+    },
+    "serving_candidates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "summary"
+      ],
+      "description": "Present when the request asked for serving_candidates.",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "nothing_to_propose",
+            "needs_input",
+            "failed"
+          ],
+          "description": "'proposed': at least one candidate to measure; 'nothing_to_propose': keep the baseline (summary says why); 'needs_input' or 'failed' with failure_reason."
+        },
+        "summary": {
+          "type": "string",
+          "description": "The findings that matter and the candidates, with the points each mesh candidate is expected to win and lose."
+        },
+        "findings_path": {
+          "type": "string",
+          "description": "findings.json written by analyze.py."
+        },
+        "report_md": {
+          "type": "string",
+          "description": "report.md written by analyze.py: the findings per profile."
+        },
+        "candidates_path": {
+          "type": "string",
+          "description": "candidates.json written by propose.py."
+        },
+        "target": {
+          "type": "object",
+          "description": "What the candidates were ranked for, copied from candidates.json: the target points, the phase, whether the user named it or it dominates the target points' time, and the estimated prefill share at each point.",
+          "additionalProperties": false,
+          "required": [
+            "points",
+            "phase",
+            "phase_source"
+          ],
+          "properties": {
+            "points": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "phase": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "prefill",
+                "decode",
+                "mixed",
+                null
+              ]
+            },
+            "phase_source": {
+              "type": "string"
+            },
+            "phase_mix": {
+              "type": "object"
+            }
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Candidates to measure, best first, at most max_candidates.",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "cand_id",
+              "kind",
+              "status",
+              "serving_change",
+              "provenance"
+            ],
+            "properties": {
+              "cand_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "knob",
+                  "mesh"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "workload_dependent",
+                  "unmeasured"
+                ],
+                "description": "workload_dependent for a mesh whose benchmark points disagree, else unmeasured."
+              },
+              "serving_change": {
+                "type": "object",
+                "description": "The env, vllm_args, tp, dp, max_num_seqs and patches of the server that runs the candidate, merged with the baseline."
+              },
+              "deployments_json": {
+                "type": "string",
+                "description": "The baseline's deployments.json with the candidate's change applied; its env and vllm_patches go into the launch recipe."
+              },
+              "provenance": {
+                "type": "object",
+                "description": "Detector findings, tool and tool version the candidate came from."
+              },
+              "per_point_assessment": {
+                "type": "object",
+                "description": "For a mesh candidate: expected direction per benchmark point."
+              },
+              "rationale": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "reported_only": {
+          "type": "array",
+          "description": "Candidates not launched, each with its reason: measured before with no gain or a loss, a knob the image does not have, or beyond max_candidates.",
+          "items": {
+            "type": "object"
+          }
+        },
+        "rejected_meshes": {
+          "type": "array",
+          "description": "Layouts that cannot start, with the constraint that rules each out.",
+          "items": {
+            "type": "object"
+          }
+        },
+        "not_argued_for": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Feasible layouts the findings do not argue for, each with its score and rationale."
+        },
+        "failure_reason": {
+          "type": "string"
+        }
+      }
     }
   },
   "examples": [

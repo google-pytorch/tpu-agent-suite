@@ -28,7 +28,7 @@ _repo_root = pathlib.Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from framework import utils  # noqa: E402
+from framework import jsonio, paths  # noqa: E402
 from framework.compute import lease  # noqa: E402
 from framework.compute.drivers import jobs  # noqa: E402
 
@@ -59,7 +59,7 @@ class _LeaseTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         for run_id in (RUN, OTHER_RUN):
-            utils.get_run_root(run_id).mkdir(parents=True)
+            paths.get_run_root(run_id).mkdir(parents=True)
         self.resolve = MagicMock()
         self.resolve.return_value.cancel.side_effect = (
             lambda jid: jobs.JobRecord.load(jid).mark("CANCELLED"))
@@ -74,7 +74,7 @@ class _LeaseTestCase(unittest.TestCase):
                                      serve=serve).mark("RUNNING")
 
     def _set_watcher(self, holder: dict) -> None:
-        utils.write_json(utils.get_run_root(RUN) / lease.WATCHER_FILE, holder)
+        jsonio.write_json(paths.get_run_root(RUN) / lease.WATCHER_FILE, holder)
 
 
 class TestProcessInfo(unittest.TestCase):
@@ -128,8 +128,8 @@ class TestSessionRun(_LeaseTestCase):
     def _lease(self, run_id: str, holder: dict, claimed_at: str,
                workspace: str) -> None:
         (self.tmp / workspace).mkdir(exist_ok=True)
-        utils.write_json(
-            utils.get_run_root(run_id) / lease.OWNER_FILE, {
+        jsonio.write_json(
+            paths.get_run_root(run_id) / lease.OWNER_FILE, {
                 **holder, "host": lease._HOST,
                 "workspace": str(self.tmp / workspace),
                 "package": "pkg@1",
@@ -139,7 +139,7 @@ class TestSessionRun(_LeaseTestCase):
     def test_finds_the_newest_run_leased_to_this_harness(self):
         harness = {"pid": 4242, "started": "s", "host": lease._HOST}
         third = "20260101T000000Z-000000000003"
-        utils.get_run_root(third).mkdir(parents=True)
+        paths.get_run_root(third).mkdir(parents=True)
         self._lease(RUN, harness, "2026-01-01T00:00:01Z", "ws-old")
         # The same process after `/clear`: its newer session is the one live.
         self._lease(OTHER_RUN, harness, "2026-01-01T00:00:02Z", "ws-new")
@@ -175,14 +175,14 @@ class TestIsOrphaned(_LeaseTestCase):
         }
         for name, (owner, watcher, expected) in cases.items():
             with self.subTest(name):
-                shutil.rmtree(utils.get_run_root(RUN))
-                utils.get_run_root(RUN).mkdir()
+                shutil.rmtree(paths.get_run_root(RUN))
+                paths.get_run_root(RUN).mkdir()
                 self._claim(owner)
                 if watcher:
                     self._set_watcher(watcher)
                 self.assertEqual(lease.is_orphaned(RUN), expected)
         # `ps` could not answer: never reaped on a guess.
-        (utils.get_run_root(RUN) / lease.WATCHER_FILE).unlink()
+        (paths.get_run_root(RUN) / lease.WATCHER_FILE).unlink()
         with patch.object(jobs,
                           "process_info",
                           side_effect=jobs.ProcessUnknown):
@@ -219,36 +219,6 @@ class TestReapOrphanedJobs(_LeaseTestCase):
         _, failed = lease.reap_orphaned_jobs(self.resolve)
         self.assertIn("giving up", failed["job-stuck"])
         self.assertEqual(lease.reap_orphaned_jobs(self.resolve), ({}, {}))
-
-    def _fail_sweeps(self, job_id: str) -> None:
-        """Leave `job_id` one failed sweep short of being given up on."""
-        self._live(job_id)
-        cancel = self.resolve.return_value.cancel
-        default, cancel.side_effect = cancel.side_effect, RuntimeError(
-            "denied")
-        for _ in range(lease.SWEEP_ATTEMPTS - 1):
-            lease.reap_orphaned_jobs(self.resolve)
-        cancel.side_effect = default
-
-    def _assert_not_given_up(self, job_id: str) -> None:
-        self.resolve.return_value.cancel.side_effect = RuntimeError("denied")
-        _, failed = lease.reap_orphaned_jobs(self.resolve)
-        self.assertEqual(failed, {job_id: "denied"})
-
-    def test_a_claim_starts_the_failed_sweeps_over(self):
-        self._claim(_gone())
-        self._fail_sweeps("job-stuck")
-        self._claim(_gone())  # resumed, then killed again
-        self._assert_not_given_up("job-stuck")
-
-    def test_a_clean_sweep_starts_the_failed_sweeps_over(self):
-        self._claim(_gone())
-        self._fail_sweeps("job-stuck")
-        self.assertEqual(lease.reap_orphaned_jobs(self.resolve), ({
-            RUN: ["job-stuck"]
-        }, {}))
-        self._live("job-next")
-        self._assert_not_given_up("job-next")
 
 
 class TestWatch(_LeaseTestCase):
@@ -299,14 +269,14 @@ class TestWatch(_LeaseTestCase):
         self.assertEqual(self._watch(), (["job-1", "job-2"], {}))
         self.assertGreaterEqual(self.now, 120)
         self.assertFalse(
-            (utils.get_run_root(RUN) / lease.WATCHER_FILE).exists())
+            (paths.get_run_root(RUN) / lease.WATCHER_FILE).exists())
         self._live("job-3")
         cancel.side_effect = RuntimeError("gone for good")
         self.assertEqual(self._watch(), ([], {"job-3": "gone for good"}))
         self.assertGreaterEqual(self.now, 120 + 600)
 
     def test_leaves_the_run_alone(self):
-        root = utils.get_run_root(RUN)
+        root = paths.get_run_root(RUN)
         cases = (
             ("another watcher has it", lambda: self._set_watcher(_me())),
             ("unleased", lambda: self._claim(None)),

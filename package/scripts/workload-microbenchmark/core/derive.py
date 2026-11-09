@@ -75,19 +75,43 @@ SHARDING_KEYS = {
 }
 
 
-def env_provenance(rec: dict, env: dict, overrides: dict) -> list[dict]:
-    """Where each env key the twin gets came from: `override`, `script` (set or changed by
-    the recipe script before `vllm serve`), or `container` (the recipe's env: list). Keys that
-    select sharding communication are flagged, and marked `review` when a sharding override
-    carries the job's value unchanged. The image's own defaults are not visible here; the pod
-    records its effective env in result.json."""
+def env_provenance(rec: dict[str, Any],
+                   env: dict[str, str],
+                   overrides: dict[str, str],
+                   model_env: dict[str, str] | None = None) -> list[dict]:
+    """Find out where each environment variable in `env` came from.
+
+    Args:
+        rec: The job's recipe from `jobdata_agentx.read_recipe`. This function reads
+            three keys:
+            - "env": {variable name: value} the job ran with.
+            - "env_from_script": {variable name: value} that the recipe script set.
+            - "serve_parse": a string. "env_from_script" is only used when it is
+              "bash-eval".
+        env: {variable name: value} of the microbenchmark.
+        overrides: {key: value} from --override. A key is a deploy field such as "tp"
+            or "dcp", or "env.<variable name>".
+        model_env: {variable name: value} from the model's TWIN_ENV. None when the
+            caller does not pass it. cli.py always passes it, and passes {} when the
+            model has no TWIN_ENV.
+
+    Returns:
+        One dict per variable in `env`, sorted by name, with these keys:
+        - "name", "value": the variable.
+        - "source": "override", "model", "script", "container", or
+          "container (recipe script NOT evaluated)".
+        - "sharding": True if the variable is in SHARDING_ENV.
+        - "review": a note to check the value. Only present when --override changed
+          the sharding but not this variable.
+    """
     ov_env = {k[4:] for k in overrides if k.startswith("env.")}
     script = rec.get("env_from_script") if rec.get(
         "serve_parse") == "bash-eval" else None
     resharded = bool(set(overrides) & SHARDING_KEYS)
     out = []
     for k, v in sorted(env.items()):
-        src = ("override" if k in ov_env else
+        src = ("override" if k in ov_env else "model"
+               if k in (model_env or {}) and k not in rec.get("env", {}) else
                "script" if script and k in script else "container" if script
                is not None else "container (recipe script NOT evaluated)")
         row = {
@@ -227,7 +251,10 @@ def derive(snap: dict[str, Any],
         # state); the served page is what the prefix cache and the KV pool are built on
         source = replace(source, block_size=log["block_size_resolved"])
     d = apply_overrides(source, overrides)
+    # env the model always needs (model.py TWIN_ENV), under the job's own env and overrides: a
+    # server read from its vLLM log has no env record, and a recipe may not export them all
     env = {
+        **getattr(mod, "TWIN_ENV", {}),
         **rec["env"],
         **{
             k[4:]: v

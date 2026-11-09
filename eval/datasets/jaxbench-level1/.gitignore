@@ -1,5 +1,0 @@
-# Ephemeral task environment Dockerfile staged just-in-time by setup.sh
-*/environment/Dockerfile
-
-# Ephemeral task instruction.md staged just-in-time by setup.sh
-*/instruction.md

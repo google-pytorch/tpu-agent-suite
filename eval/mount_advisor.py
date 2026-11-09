@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from eval.utils import find_repo_root
+from eval.utils import USER_SCOPE_ANSWERS, USER_SCOPE_DIST, find_repo_root
 
 
 @dataclass(frozen=True)
@@ -60,6 +60,9 @@ class SkillMountAdvisor:
         pkg_name: str = "tpu-agent-suite",
         pkg_version: str = "0.1.0",
         is_empty: bool = False,
+        user_scope: bool = False,
+        staged_dist: Path | str | None = None,
+        answers_file: Path | str | None = None,
     ) -> None:
         self.staged_workspace = Path(
             staged_workspace) if staged_workspace else None
@@ -70,13 +73,19 @@ class SkillMountAdvisor:
         self.pkg_name = pkg_name
         self.pkg_version = pkg_version
         self.is_empty = is_empty
+        self.user_scope = user_scope
+        self.staged_dist = Path(staged_dist) if staged_dist else None
+        self.answers_file = Path(answers_file) if answers_file else None
+        # A user-scope arm runs the installer inside the trial, so it gets
+        # what the installer reads rather than what it would have written.
+        self.mounts_staged_install = not is_empty and not user_scope
 
     def get_mounts(self) -> list[dict[str, Any]]:
         """Generate list of bind mounts for the staged skills and session supervisor."""
         mounts: list[dict[str, Any]] = []
         if self.harness == "claude-code":
             # Mount package files if not an empty/vanilla arm
-            if not self.is_empty and self.staged_workspace:
+            if self.mounts_staged_install and self.staged_workspace:
                 staged_claude = self.staged_workspace / ".claude"
                 if staged_claude.is_dir():
                     mounts.append({
@@ -125,7 +134,7 @@ class SkillMountAdvisor:
 
         elif self.harness == "antigravity":
             # Mount package files if not an empty/vanilla arm
-            if not self.is_empty and self.staged_workspace:
+            if self.mounts_staged_install and self.staged_workspace:
                 staged_agents = self.staged_workspace / ".agents"
                 if staged_agents.is_dir():
                     mounts.append({
@@ -178,7 +187,7 @@ class SkillMountAdvisor:
                 })
 
         # Central package cache mount (only for packaged arms)
-        if not self.is_empty and self.central_pkg_dir and self.central_pkg_dir.is_dir(
+        if self.mounts_staged_install and self.central_pkg_dir and self.central_pkg_dir.is_dir(
         ):
             pkg_dirname = self.central_pkg_dir.name or f"{self.pkg_name}@{self.pkg_version}"
             target_path = f"/root/.tpu-agent-suite/packages/{pkg_dirname}"
@@ -198,6 +207,28 @@ class SkillMountAdvisor:
                     "target": "/root/.tpu-agent-suite/environment.json",
                     "read_only": True,
                 })
+            central_drivers = self.central_pkg_dir.parent.parent / "drivers"
+            if central_drivers.is_dir():
+                mounts.append({
+                    "type": "bind",
+                    "source": str(central_drivers),
+                    "target": "/root/.tpu-agent-suite/drivers",
+                    "read_only": True,
+                })
+
+        if self.user_scope and not self.is_empty:
+            for source, target in ((self.staged_dist, USER_SCOPE_DIST),
+                                   (self.answers_file, USER_SCOPE_ANSWERS)):
+                if source is None or not source.exists():
+                    raise FileNotFoundError(
+                        f"a user-scope arm installs from {target}, but"
+                        f" nothing was staged to mount there ({source})")
+                mounts.append({
+                    "type": "bind",
+                    "source": str(source),
+                    "target": target,
+                    "read_only": True,
+                })
 
         return mounts
 
@@ -210,8 +241,8 @@ class SkillMountAdvisor:
                 env["AGENT_PERSONA"] = "tpu-agent"
         elif self.harness == "antigravity":
             env["BASH_ENV"] = "/usr/local/bin/session_supervisor_hook.sh"
-            # The CLI is pinned (eval/adapter/sitecustomize.py); a self-update
-            # mid-trial would replace the pinned binary with the latest one.
+            # The CLI is pinned (.ci/pins.conf, installed by the eval adapter);
+            # a self-update mid-trial would replace it with the latest one.
             env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
             if not self.is_empty:
                 env["AGENT_PERSONA"] = "tpu-agent"

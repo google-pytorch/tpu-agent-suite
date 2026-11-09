@@ -134,7 +134,7 @@ class LocalDriver(base.ComputeDriver):
             for staged in outputs:
                 produced = pathlib.Path(run_dir, staged.remote)
                 if not produced.is_file():
-                    result = shell._missing_output(result, staged, "")
+                    result = shell.missing_output(result, staged, "")
                     continue
                 dest = pathlib.Path(staged.local)
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -351,13 +351,9 @@ class LocalDriver(base.ComputeDriver):
 
 def _terminal_state(job_dir: Path) -> tuple[str, int]:
     """Read the recorded exit code and map it to a terminal status."""
-    exit_code_file = job_dir / "exit_code.txt"
-    exit_code = 1
-    if exit_code_file.is_file():
-        try:
-            exit_code = int(exit_code_file.read_text().strip())
-        except (OSError, ValueError):
-            exit_code = 1
+    exit_code = jobs.read_exit_code(job_dir / "exit_code.txt")
+    if exit_code is None:
+        exit_code = 1
     return ("COMPLETED" if exit_code == 0 else "FAILED"), exit_code
 
 

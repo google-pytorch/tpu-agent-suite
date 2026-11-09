@@ -22,7 +22,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from framework import utils  # noqa: E402
+from framework import agent_contracts, jsonio, utils  # noqa: E402
 
 PACKAGE_DIR = REPO_ROOT / "package"
 RUN_ID = "20260914T120000Z-000000000000"
@@ -42,10 +42,10 @@ class TestKernelRequestInputLanguage(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.request_schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                             "kernel-request.json")
-        cls.result_schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                            "kernel-result.json")
+        cls.request_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                              "kernel-request.json")
+        cls.result_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                             "kernel-result.json")
 
     def test_accepts_pallas(self):
         """An existing Pallas kernel can be named as `pallas`."""
@@ -88,6 +88,119 @@ class TestKernelRequestInputLanguage(unittest.TestCase):
                       " ".join(text.split()))
 
 
+def _inline_request(**fields):
+    """A request whose input arrived in the conversation, not on disk."""
+    request = {
+        "prompt": "Make this top-k expert selection faster on TPU7x.",
+        "run_id": RUN_ID,
+        "base_kernel_source":
+        "import jax\n\ndef computation(x):\n    return x\n",
+        "input_language": "jax",
+    }
+    request.update(fields)
+    return request
+
+
+class TestKernelRequestInlineSource(unittest.TestCase):
+    """`base_kernel_source`: the input the caller cannot write to disk.
+
+    The router holds `read` alone, so code the user pasted into the
+    conversation reaches the loop only as text. Exactly one of the path and
+    the text is required, and the text must say what language it is, because
+    that decides the extension it is persisted under.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.request_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                              "kernel-request.json")
+
+    def _errors(self, request):
+        return utils.validate_instance(request, self.request_schema)
+
+    def test_source_with_language_validates(self):
+        for language in ("jax", "pallas", "pytorch", "specification"):
+            with self.subTest(language=language):
+                self.assertEqual(
+                    self._errors(_inline_request(input_language=language)), [])
+
+    def test_exactly_one_of_path_and_source_with_language_is_required(self):
+        refused = ("$: must match exactly one of 2 oneOf alternatives, matched"
+                   " {n} (one of: base_kernel_path | base_kernel_source,"
+                   " input_language)")
+        neither = _request()
+        del neither["base_kernel_path"]
+        self.assertEqual(self._errors(neither), [refused.format(n=0)])
+        unlabelled = _inline_request()
+        del unlabelled["input_language"]
+        self.assertEqual(self._errors(unlabelled), [refused.format(n=0)])
+        both = _inline_request(base_kernel_path="work/base.py")
+        self.assertEqual(self._errors(both), [refused.format(n=2)])
+
+    def test_orchestrator_treats_pasted_text_as_a_file_it_wrote(self):
+        """The specialist, which can write, puts the text on disk and then
+        proceeds as for a path; the result hands back that path, and the
+        content, not the request's label, decides the language."""
+        text = " ".join((PACKAGE_DIR / "agents" /
+                         "tpu-kernel-development.md").read_text().split())
+        self.assertIn("put it on disk first**, then proceed as for a path",
+                      text)
+        # The "never write code" rule names this write as its exception.
+        self.assertIn("The one exception is Setup step 0", text)
+        self.assertIn(
+            "A request carrying both `base_kernel_source` and `slot` is"
+            " refused", text)
+        self.assertIn(
+            "`base_kernel_path` as the slot's `<kernels>` entry spells it",
+            text)
+        self.assertIn(
+            "When step 0 wrote the input as `base_kernel.py`, leave"
+            " `primary.language` `null`", text)
+
+    def test_result_owes_the_path_with_the_slot(self):
+        """Follow-ups continue a pasted kernel by path, not by re-sending it,
+        so a result that resolved a slot owes the path."""
+        result = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                  "kernel-result.json")
+        base = {"status": "needs_input", "run_id": RUN_ID, "slot": "k01"}
+        self.assertEqual(utils.validate_instance(base, result), [
+            "$/base_kernel_path: required property is missing when slot is"
+            " present"
+        ])
+        self.assertEqual(
+            utils.validate_instance(
+                {
+                    **base, "base_kernel_path":
+                    "/runs/x/artifacts/tpu-kernel-development/inputs/k01/"
+                    "base_kernel.py"
+                }, result), [])
+        # Before a slot is resolved there is no path to owe; an optimized
+        # result has always resolved one (`status_requires` is the runtime's).
+        self.assertEqual(
+            utils.validate_instance(
+                {
+                    "status": "invalid_input",
+                    "run_id": RUN_ID
+                }, result), [])
+        self.assertIn("slot", result["status_requires"]["optimized"])
+
+    def test_router_passes_pasted_text_verbatim(self):
+        """tpu-agent sends the text once, untouched, and continues by path."""
+        skill = " ".join((PACKAGE_DIR / "skills" / "tpu-agent" /
+                          "SKILL.md").read_text().split())
+        self.assertIn("pass the text as `base_kernel_source`", skill)
+        self.assertIn("Copy the text exactly as the user gave it", skill)
+        self.assertIn("passes that path with the `slot`, never the text again",
+                      skill)
+        # The inline route is not a way around the CUDA refusal.
+        self.assertIn(
+            "do not write a `specification` file describing it, or"
+            " send one as `base_kernel_source`", skill)
+        # The instruction that produced the dead end must not come back.
+        self.assertNotIn("write the description to a file and name that",
+                         skill)
+
+
 def _case(**fields):
     return {
         "label": "decode",
@@ -104,12 +217,14 @@ class TestKernelRequestServingConfig(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.request_schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                             "kernel-request.json")
+        cls.request_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                              "kernel-request.json")
 
     def _errors(self, serving_config):
-        return utils.validate_instance(_request(serving_config=serving_config),
-                                       self.request_schema)
+        return utils.validate_instance(
+            _request(serving_config=serving_config,
+                     serving_round={"status": "nothing_to_propose"}),
+            self.request_schema)
 
     def test_accepts_the_onboarding_paths(self):
         self.assertEqual(
@@ -163,6 +278,63 @@ class TestKernelRequestServingConfig(unittest.TestCase):
                 self.assertIn(phrase, text)
 
 
+class TestKernelRequestServingRound(unittest.TestCase):
+    """A served kernel says what the optimization-heuristics round concluded, or why it didn't run."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.request_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                              "kernel-request.json")
+
+    def _errors(self, **fields):
+        return utils.validate_instance(_request(**fields), self.request_schema)
+
+    def test_a_served_kernel_without_the_round_is_refused(self):
+        errors = self._errors(
+            serving_config={"deployments_json": "/r/deployments.json"})
+        self.assertTrue(any("serving_round" in e for e in errors), errors)
+
+    def test_each_outcome_is_accepted(self):
+        for status in ("kept_candidate", "kept_baseline", "nothing_to_propose",
+                       "not_run"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    self._errors(
+                        serving_config={"deployments_json": "/r/d.json"},
+                        serving_round={
+                            "status": status,
+                            "reason": "the user declined the round"
+                        }), [])
+
+    def test_an_unknown_outcome_or_extra_field_is_refused(self):
+        for label, serving_round in [
+            ("unknown status", {
+                "status": "skipped"
+            }),
+            ("no status", {
+                "reason": "kernel required"
+            }),
+            ("extra field", {
+                "status": "not_run",
+                "why": "time limit"
+            }),
+        ]:
+            with self.subTest(case=label):
+                self.assertTrue(
+                    self._errors(
+                        serving_config={"deployments_json": "/r/d.json"},
+                        serving_round=serving_round))
+
+    def test_a_kernel_not_served_needs_no_round(self):
+        self.assertEqual(self._errors(), [])
+
+    def test_the_orchestrator_is_told_to_pass_it(self):
+        text = (PACKAGE_DIR / "skills" / "tpu-agent" /
+                "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("`serving_round`", text)
+        self.assertIn("is not a reason", text)
+
+
 class TestKernelRequestServedCalls(unittest.TestCase):
     """`served_calls` carries the calls the server makes, as typed data.
 
@@ -173,8 +345,8 @@ class TestKernelRequestServedCalls(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.request_schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                             "kernel-request.json")
+        cls.request_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                              "kernel-request.json")
 
     def _errors(self, served_calls):
         return utils.validate_instance(_request(served_calls=served_calls),
@@ -305,8 +477,8 @@ class TestKernelWorkerRequestWorkDir(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                     "kernel-worker-request.json")
+        cls.schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                      "kernel-worker-request.json")
 
     def _request(self, **fields):
         return {
@@ -355,13 +527,20 @@ class TestKernelSlotRoundTrip(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.request_schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                             "kernel-request.json")
-        cls.result_schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                            "kernel-result.json")
+        cls.request_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                              "kernel-request.json")
+        cls.result_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                             "kernel-result.json")
 
     def test_result_returns_a_slot(self):
-        result = {"status": "invalid_input", "run_id": RUN_ID, "slot": "k02"}
+        """With the slot comes the path it is keyed on: the caller continues
+        the kernel by both."""
+        result = {
+            "status": "invalid_input",
+            "run_id": RUN_ID,
+            "slot": "k02",
+            "base_kernel_path": "/abs/path/model.py",
+        }
         self.assertEqual(utils.validate_instance(result, self.result_schema),
                          [])
 
@@ -373,6 +552,8 @@ class TestKernelSlotRoundTrip(unittest.TestCase):
             RUN_ID,
             "slot":
             "k03",
+            "base_kernel_path":
+            "/abs/path/attention.py",
             "same_file_slots": [{
                 "slot": "k01",
                 "target_op": "ragged paged attention"
@@ -423,8 +604,8 @@ class TestKernelResultCarriesState(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.result_schema = utils.load_json(PACKAGE_DIR / "schemas" /
-                                            "kernel-result.json")
+        cls.result_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                             "kernel-result.json")
 
     def _result(self, **fields):
         return {
@@ -476,3 +657,119 @@ class TestKernelResultCarriesState(unittest.TestCase):
                        "`null` included, since it says no check was possible"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+
+
+class TestKernelResultNoSpeedup(unittest.TestCase):
+    """A kernel slower than the baseline is never kept, and a run in which no
+    kernel beat the baseline is flagged rather than reported `optimized`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result_schema = jsonio.load_json(PACKAGE_DIR / "schemas" /
+                                             "kernel-result.json")
+
+    def _errors(self, payload):
+        """Both halves the SubagentStop hook applies: shape, then status."""
+        return (
+            utils.validate_instance(payload, self.result_schema) +
+            agent_contracts.check_status_payload(self.result_schema, payload))
+
+    def _no_speedup(self, **fields):
+        return {
+            "status":
+            "no_speedup",
+            "run_id":
+            RUN_ID,
+            "slot":
+            "k01",
+            "base_kernel_path":
+            "/abs/path/decode_gqa_attention.py",
+            "best_kernel_artifact":
+            "artifacts/tpu-kernel-development/k01/iter1/optimized.py",
+            "baseline_latency_ms":
+            0.0439767,
+            "best_latency_ms":
+            0.047999,
+            "speedup_factor":
+            0.9162,
+            "iterations_run":
+            3,
+            "iterations": [{
+                "iteration": 1,
+                "compile_ok": True,
+                "test_ok": True,
+                "latency_ms": 0.047999,
+                "speedup": 0.9162
+            }, {
+                "iteration": 2,
+                "compile_ok": True,
+                "test_ok": True,
+                "latency_ms": 0.050278,
+                "speedup": 0.9289
+            }, {
+                "iteration": 3,
+                "compile_ok": True,
+                "test_ok": True,
+                "latency_ms": 0.049665,
+                "speedup": 0.9262
+            }],
+            **fields,
+        }
+
+    def test_accepts_no_speedup_with_its_measurements(self):
+        """Three passing kernels, all slower than base.py."""
+        self.assertEqual(self._errors(self._no_speedup()), [])
+
+    def test_no_speedup_owes_its_measurements(self):
+        payload = self._no_speedup()
+        for field in ("best_latency_ms", "speedup_factor", "iterations"):
+            del payload[field]
+        errors = self._errors(payload)
+        self.assertEqual(len(errors), 1)
+        for field in ("best_latency_ms", "speedup_factor", "iterations"):
+            with self.subTest(field=field):
+                self.assertIn(field, errors[0])
+
+    def test_worker_keeps_only_a_kernel_that_beat_the_baseline(self):
+        text = " ".join(
+            (PACKAGE_DIR / "agents" / "kernel-worker.md").read_text().split())
+        self.assertIn(
+            "If `compile_ok` is True, `test_ok` is True, `speedup` is above"
+            " 1.0, and `optimized_time` is better (smaller) than"
+            " `state.best_optimized_time`", text)
+
+    def test_worker_records_the_tuned_kernels_speedup(self):
+        """Phase 3 timed the untuned kernel; the gate needs the one on disk."""
+        text = " ".join(
+            (PACKAGE_DIR / "agents" / "kernel-worker.md").read_text().split())
+        self.assertIn(
+            "it is the `SPEEDUP` line in the `stdout` of the `all_results`"
+            " entry whose `config` is `best_config`", text)
+
+    def test_tuned_trials_print_a_paired_speedup(self):
+        """The line the worker reads exists in every trial's stdout."""
+        harness = (PACKAGE_DIR / "scripts" / "tpu-kernel-development" /
+                   "test_harness_template.py").read_text()
+        self.assertIn('print(f"SPEEDUP: {geo_mean_speedup:.4f}")', harness)
+        autotune = (PACKAGE_DIR / "scripts" / "tpu-kernel-development" /
+                    "run_autotune.py").read_text()
+        self.assertIn('"stdout": stdout,', autotune)
+
+    def test_orchestrator_returns_no_speedup(self):
+        text = " ".join((PACKAGE_DIR / "agents" /
+                         "tpu-kernel-development.md").read_text().split())
+        for phrase in ("**no kernel this run built beat the baseline**",
+                       "kernels compiled and passed, but none beat the"
+                       " baseline (step 4) -> `no_speedup`",
+                       "Never report such a run as `optimized`",
+                       "its `speedup` is not above 1.0, or its"
+                       " `optimized_time` is not below"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_router_integrates_only_an_optimized_kernel(self):
+        skill = " ".join((PACKAGE_DIR / "skills" / "tpu-agent" /
+                          "SKILL.md").read_text().split())
+        self.assertIn(
+            "Integrate a kernel only when tpu-kernel-development returns"
+            " `optimized`", skill)

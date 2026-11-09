@@ -21,7 +21,7 @@
 # into streaming JSON events, and detects subagent quiescence before exiting.
 set -euo pipefail
 
-REAL_AGY="/usr/local/bin/agy-real"
+REAL_AGY="${AGY_REAL_BIN:-/usr/local/bin/agy-real}"
 [ -x "$REAL_AGY" ] || REAL_AGY="/root/.local/bin/agy-real"
 export AGY_ADC_AUTH="${AGY_ADC_AUTH:-1}"
 # The eval pins the CLI's version; a background self-update would replace it.
@@ -78,23 +78,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+EFFECTIVE_PERSONA="${AGENT_PERSONA:-}"
+if [ -n "$EFFECTIVE_PERSONA" ] && [ -n "${TASK_AGENT_PERSONA:-}" ]; then
+  EFFECTIVE_PERSONA="$TASK_AGENT_PERSONA"
+fi
 CLI_ARGS+=("--input-format" "stream-json")
-if [ -n "${AGENT_PERSONA:-}" ] && [[ ! " ${CLI_ARGS[*]} " =~ " --agent " ]]; then
-  CLI_ARGS+=("--agent" "$AGENT_PERSONA")
+if [ -n "$EFFECTIVE_PERSONA" ] && [[ ! " ${CLI_ARGS[*]} " =~ " --agent " ]]; then
+  CLI_ARGS+=("--agent" "$EFFECTIVE_PERSONA")
 fi
 
 log_supervisor "[AgySupervisor] Launching native Antigravity CLI: $REAL_AGY ${CLI_ARGS[*]}"
 
-# 3. Output stream capture and FIFO to keep stdin open for multi-agent execution
+# 3. Output stream capture and FIFO state
 RAW_STREAM="/tmp/agy_raw_stream_$$.jsonl"
 FIFO="/tmp/agy_stdin_$$"
-mkfifo "$FIFO"
-exec 3<>"$FIFO"
-
-# 4. Launch agy-real with streaming I/O bound to the FIFO and capture stream output
-"$REAL_AGY" "${CLI_ARGS[@]}" <"$FIFO" 3>&- > >(tee "$RAW_STREAM") &
-AGY_PID=$!
-
+AGY_PID=""
 STITCHED=0
 
 # ==============================================================================
@@ -106,6 +104,249 @@ STITCHED=0
 # To show the complete end-to-end multi-agent execution in Harbor UI, we stitch
 # all subagent transcripts chronologically into a unified trajectory file, ensure
 # it has the newest timestamp, and sync it across transcript files.
+# shellcheck disable=SC2317
+stage_harbor_trajectory() {
+  local src="$1"
+  local logs_dir="${LOGS_AGENT_DIR:-/logs/agent}"
+  if mkdir -p "$logs_dir" 2>/dev/null; then
+    local tmp="${logs_dir}/.antigravity-cli.trajectory.jsonl.$$.tmp"
+    if cp "$src" "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "${logs_dir}/antigravity-cli.trajectory.jsonl" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
+  fi
+}
+
+# Aggregate token usage across root and all child subagent conversations.
+# Antigravity CLI stream-json output only reports usage for the Depth 0 root
+# conversation, while writing per-turn ModelUsageStats protobuf records into
+# ~/.gemini/antigravity-cli/conversations/<id>.db (table gen_metadata) for
+# both the root session and every invoked subagent.
+# shellcheck disable=SC2317
+aggregate_conversation_usage() {
+  command -v python3 &>/dev/null || return 0
+  local logs_dir="${LOGS_AGENT_DIR:-/logs/agent}"
+  local stream_target="${logs_dir}/antigravity-stream.jsonl"
+  local agg_line
+  agg_line=$(python3 - "${HOME}/.gemini/antigravity-cli/conversations" "$RAW_STREAM" "$stream_target" "${HARBOR_RUN_MARKER:-/tmp/.harbor-antigravity-run-start}" <<'PY' 2>/dev/null || true
+import glob, json, os, sqlite3, sys
+
+KEYS = ("input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens")
+FIELDS = {2: "input_tokens", 3: "output_tokens", 5: "cache_read_tokens", 9: "thinking_tokens"}
+
+def _varint(b: bytes, i: int) -> tuple[int, int]:
+    v = s = 0
+    while b[i] >= 0x80:
+        v |= (b[i] & 0x7F) << s
+        s += 7
+        i += 1
+    return v | (b[i] << s), i + 1
+
+def _fields(b: bytes):
+    i, n = 0, len(b)
+    while i < n:
+        tag, i = _varint(b, i)
+        f, w = tag >> 3, tag & 7
+        if w == 0:
+            v, i = _varint(b, i)
+        elif w == 2:
+            ln, i = _varint(b, i)
+            v, i = b[i : i + ln], i + ln
+        elif w in (1, 5):
+            step = 8 if w == 1 else 4
+            v, i = b[i : i + step], i + step
+        else:
+            break
+        yield f, w, v
+
+def _parse_blob(blob: bytes) -> dict[str, int]:
+    u = {k: 0 for k in KEYS}
+    for f, w, v in _fields(blob):
+        if f == 1 and w == 2:  # CortexStepGeneratorMetadata.chat_model
+            for cf, cw, cv in _fields(v):
+                if cf == 4 and cw == 2:  # ChatModelMetadata.usage (ModelUsageStats)
+                    for uf, uw, uv in _fields(cv):
+                        if uw == 0 and uf in FIELDS:
+                            u[FIELDS[uf]] = int(uv)
+    return u
+
+def _norm(d: dict) -> dict[str, int]:
+    return {
+        k: int(d[k]) if isinstance(d.get(k), (int, float)) and not isinstance(d.get(k), bool) else 0
+        for k in KEYS
+    }
+
+def _max(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
+    return {k: max(a[k], b[k]) for k in KEYS}
+
+conv_dir, raw_stream, stream_file, run_marker = sys.argv[1:5]
+min_mtime = (os.path.getmtime(run_marker) - 1.0) if run_marker and os.path.exists(run_marker) else None
+
+root_id, status, response, res_usage = "", "DONE", "", None
+steps: dict[int, dict[str, int]] = {}
+for path in (raw_stream, stream_file):
+    if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
+        continue
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            root_id = root_id or str(
+                ev.get("conversation_id")
+                or ev.get("session_id")
+                or (ev.get("init") or {}).get("conversation_id")
+                or (ev.get("session_start") or {}).get("conversation_id")
+                or ""
+            )
+            if ev.get("event") == "step_update":
+                su = ev.get("step_update") or {}
+                root_id = root_id or str(su.get("conversation_id") or "")
+                if isinstance(su.get("usage"), dict):
+                    idx = su.get("step_index")
+                    key = idx if isinstance(idx, int) and not isinstance(idx, bool) else len(steps) + 1_000_000
+                    steps[key] = _max(steps.get(key, {k: 0 for k in KEYS}), _norm(su["usage"]))
+            elif ev.get("event") == "result":
+                res = ev.get("result") or {}
+                root_id = root_id or str(res.get("conversation_id") or "")
+                status = str(res.get("status") or status)
+                response = str(res.get("response") or response)
+                if isinstance(res.get("usage"), dict):
+                    res_usage = _max(res_usage or {k: 0 for k in KEYS}, _norm(res["usage"]))
+    break
+
+stream_usage = res_usage or {k: sum(u[k] for u in steps.values()) for k in KEYS}
+
+db_usages: dict[str, dict[str, int]] = {}
+for db_path in sorted(glob.glob(os.path.join(conv_dir, "*.db"))):
+    if min_mtime is not None and os.path.getmtime(db_path) < min_mtime:
+        continue
+    try:
+        with sqlite3.connect(db_path, timeout=2.0) as conn:
+            rows = conn.execute("SELECT data FROM gen_metadata ORDER BY idx").fetchall()
+    except Exception:
+        continue
+    u = {k: 0 for k in KEYS}
+    for (blob,) in rows:
+        if blob:
+            try:
+                turn = _parse_blob(bytes(blob))
+                for k in KEYS:
+                    u[k] += turn[k]
+            except Exception:
+                pass
+    db_usages[os.path.splitext(os.path.basename(db_path))[0]] = u
+
+if not root_id and db_usages:
+    root_id = next(iter(db_usages))
+root_usage = _max(db_usages.pop(root_id, {k: 0 for k in KEYS}), stream_usage)
+total = {k: root_usage[k] + sum(u[k] for u in db_usages.values()) for k in KEYS}
+
+if any(total.values()):
+    total["total_tokens"] = total["input_tokens"] + total["output_tokens"]
+    print(json.dumps({
+        "event": "result",
+        "session_id": root_id,
+        "result": {"conversation_id": root_id, "status": status, "response": response, "usage": total},
+    }, separators=(",", ":")))
+PY
+  )
+  if [ -n "$agg_line" ]; then
+    printf '%s\n' "$agg_line" 2>/dev/null || true
+    if [ -d "$logs_dir" ] || mkdir -p "$logs_dir" 2>/dev/null; then
+      printf '%s\n' "$agg_line" >> "$stream_target" 2>/dev/null || true
+    fi
+  fi
+}
+
+# shellcheck disable=SC2317
+synthesize_fallback_agy_trajectory() {
+  local brain_dir="${HOME}/.gemini/antigravity-cli/brain"
+  local stream_file=""
+  for candidate in "$RAW_STREAM" "/logs/agent/antigravity-stream.jsonl"; do
+    if [ -s "$candidate" ]; then
+      stream_file="$candidate"
+      break
+    fi
+  done
+  local err_file="/logs/agent/antigravity-cli.err"
+  if [ -z "$PROMPT" ] && [ -z "$stream_file" ] && [ ! -s "$err_file" ]; then
+    return 0
+  fi
+
+  local root_tag="[Depth 0]"
+  if [ -n "${EFFECTIVE_PERSONA:-}" ]; then
+    root_tag="[Depth 0 | ${EFFECTIVE_PERSONA}]"
+  fi
+
+  local now_ts
+  now_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "1970-01-01T00:00:00Z")
+  local err_tail=""
+  if [ -s "$err_file" ]; then
+    err_tail=$(tail -c 4000 "$err_file" 2>/dev/null || true)
+  fi
+  local stream_err=""
+  if [ -n "$stream_file" ]; then
+    stream_err=$(jq -R -r '
+      fromjson? | select(type == "object")
+      | ([.result?.error, .result?.response, .error?.message, .error]
+         | map(select(type == "string" and length > 0)) | first // empty)
+    ' "$stream_file" 2>/dev/null | tail -c 4000 || true)
+  fi
+
+  local combined_err="${stream_err}"
+  if [ -n "$err_tail" ]; then
+    if [ -n "$combined_err" ]; then
+      combined_err="${combined_err}"$'\n'"${err_tail}"
+    else
+      combined_err="${err_tail}"
+    fi
+  fi
+  [ -z "$combined_err" ] && combined_err="Antigravity CLI exited before writing a native transcript."
+
+  local unified_dir="${brain_dir}/unified/.system_generated/logs"
+  mkdir -p "$unified_dir" 2>/dev/null || true
+  local unified_file="${unified_dir}/transcript_full.jsonl"
+  local prompt_text="${PROMPT:-[Early CLI invocation]}"
+
+  {
+    jq -nc \
+      --arg ts "$now_ts" \
+      --arg content "${root_tag} ${prompt_text}" \
+      '{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","created_at":$ts,"content":$content}'
+    jq -nc \
+      --arg ts "$now_ts" \
+      --arg content "${root_tag} [Early CLI Crash / Error Output]"$'\n'"${combined_err}" \
+      --arg err "$combined_err" \
+      '{"step_index":1,"type":"SYSTEM_ERROR","source":"SYSTEM","status":"ERROR","created_at":$ts,"content":$content,"error":$err}'
+  } > "${unified_file}.tmp" 2>/dev/null || true
+
+  if [ -s "${unified_file}.tmp" ]; then
+    mv "${unified_file}.tmp" "$unified_file"
+    touch "$unified_file" 2>/dev/null || true
+    if [ -d "$brain_dir" ]; then
+      local existing_f
+      while IFS= read -r existing_f; do
+        [ -f "$existing_f" ] || continue
+        cp "$unified_file" "$existing_f" 2>/dev/null || true
+        local compact="${existing_f%/transcript_full.jsonl}/transcript.jsonl"
+        if [ -f "$compact" ]; then
+          cp "$unified_file" "$compact" 2>/dev/null || true
+        fi
+      done < <(find "$brain_dir" -type f -name 'transcript_full.jsonl' ! -path '*/unified/*' 2>/dev/null)
+    fi
+    stage_harbor_trajectory "$unified_file"
+    log_supervisor "[AgySupervisor] Synthesized fallback trajectory at $unified_file from stream/error logs."
+  else
+    rm -f "${unified_file}.tmp" 2>/dev/null || true
+  fi
+}
+
+# shellcheck disable=SC2317
 stitch_trajectories() {
   if [ "$STITCHED" -eq 1 ]; then
     return 0
@@ -113,16 +354,16 @@ stitch_trajectories() {
   STITCHED=1
 
   local brain_dir="${HOME}/.gemini/antigravity-cli/brain"
-  if [ ! -d "$brain_dir" ]; then
-    return 0
+  local files=()
+  if [ -d "$brain_dir" ]; then
+    while IFS= read -r f; do
+      [ -f "$f" ] && files+=("$f")
+    done < <(find "$brain_dir" -type f -name 'transcript_full.jsonl' ! -path '*/unified/*' 2>/dev/null)
   fi
 
-  local files=()
-  while IFS= read -r f; do
-    [ -f "$f" ] && files+=("$f")
-  done < <(find "$brain_dir" -type f -name 'transcript_full.jsonl' ! -path '*/unified/*' 2>/dev/null)
-
   if [ "${#files[@]}" -eq 0 ]; then
+    synthesize_fallback_agy_trajectory || true
+    aggregate_conversation_usage || true
     return 0
   fi
 
@@ -165,7 +406,7 @@ stitch_trajectories() {
 
     if [ -f "$db_file" ]; then
       local meta
-      meta=$(sqlite3 -cmd ".timeout 2000" "$db_file" "SELECT COALESCE(NULLIF(agent_name, ''), NULLIF('${AGENT_PERSONA:-}', '')) || '|' || COALESCE(nesting_depth, 0) FROM conversation_summaries WHERE conversation_id = '$conv_id';" 2>/dev/null || true)
+      meta=$(sqlite3 -cmd ".timeout 2000" "$db_file" "SELECT COALESCE(NULLIF(agent_name, ''), NULLIF('${EFFECTIVE_PERSONA:-}', '')) || '|' || COALESCE(nesting_depth, 0) FROM conversation_summaries WHERE conversation_id = '$conv_id';" 2>/dev/null || true)
       if [ -n "$meta" ]; then
         agent_name="${meta%|*}"
         depth="${meta##*|}"
@@ -176,7 +417,7 @@ stitch_trajectories() {
       agent_name="${meta%|*}"
       depth="${meta##*|}"
     elif [ -z "$agent_name" ]; then
-      agent_name="${AGENT_PERSONA:-}"
+      agent_name="${EFFECTIVE_PERSONA:-}"
       depth=0
     fi
     [ -z "$depth" ] && depth=0
@@ -217,16 +458,19 @@ stitch_trajectories() {
   if [ "${#files[@]}" -eq 1 ]; then
     local single_file="${files[0]}"
     local tagged_single="${tagged_files[0]}"
-    if [ -s "$tagged_single" ]; then
+    if [ -s "$tagged_single" ] && jq -e 'select(.type == "USER_INPUT" or .type == "PLANNER_RESPONSE")' "$tagged_single" >/dev/null 2>&1; then
       mv "$tagged_single" "$single_file"
       local compact="${single_file%/transcript_full.jsonl}/transcript.jsonl"
       if [ -f "$compact" ]; then
         cp "$single_file" "$compact" 2>/dev/null || true
       fi
+      stage_harbor_trajectory "$single_file"
       log_supervisor "[AgySupervisor] Tagged single session trajectory with [Depth 0]."
     else
       rm -f "$tagged_single" 2>/dev/null || true
+      synthesize_fallback_agy_trajectory || true
     fi
+    aggregate_conversation_usage || true
     return 0
   fi
 
@@ -245,7 +489,7 @@ stitch_trajectories() {
 
   rm -f "${tagged_files[@]}" 2>/dev/null || true
 
-  if [ -s "$unified_file.tmp" ]; then
+  if [ -s "$unified_file.tmp" ] && jq -e 'select(.type == "USER_INPUT" or .type == "PLANNER_RESPONSE")' "$unified_file.tmp" >/dev/null 2>&1; then
     mv "$unified_file.tmp" "$unified_file"
     touch "$unified_file"
     for f in "${files[@]}"; do
@@ -255,28 +499,43 @@ stitch_trajectories() {
         cp "$unified_file" "$compact" 2>/dev/null || true
       fi
     done
+    stage_harbor_trajectory "$unified_file"
     log_supervisor "[AgySupervisor] Stitched unified trajectory generated: $(wc -l < "$unified_file") steps with agent tags."
   else
     rm -f "$unified_file.tmp"
+    synthesize_fallback_agy_trajectory || true
   fi
+  aggregate_conversation_usage || true
 }
 
 # Cleanup trap to ensure FIFO, background process, and trajectory stitching are handled
 # shellcheck disable=SC2317
 cleanup() {
+  trap '' INT TERM PIPE
+  trap - EXIT
   exec 3>&- 2>/dev/null || true
   rm -f "$FIFO" 2>/dev/null || true
   if [ -n "${AGY_PID:-}" ] && kill -0 "$AGY_PID" 2>/dev/null; then
+    pkill -TERM -P "$AGY_PID" 2>/dev/null || true
     kill -TERM "$AGY_PID" 2>/dev/null || true
     sleep 1
     if kill -0 "$AGY_PID" 2>/dev/null; then
+      pkill -KILL -P "$AGY_PID" 2>/dev/null || true
       kill -KILL "$AGY_PID" 2>/dev/null || true
     fi
   fi
+  wait 2>/dev/null || true
   stitch_trajectories || true
   rm -f "$RAW_STREAM" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup; exit 143' INT TERM
+trap cleanup EXIT
+
+# 4. Launch agy-real with streaming I/O bound to the FIFO and capture stream output
+mkfifo "$FIFO"
+exec 3<>"$FIFO"
+"$REAL_AGY" "${CLI_ARGS[@]}" <"$FIFO" 3>&- > >(tee "$RAW_STREAM") &
+AGY_PID=$!
 
 # 5. Dispatch initial prompt event over the open pipe (RFC 8259 JSON via jq)
 if [ -n "$PROMPT" ]; then
@@ -342,6 +601,7 @@ fi
 
 AGY_EXIT_CODE=0
 wait "$AGY_PID" 2>/dev/null || AGY_EXIT_CODE=$?
+wait 2>/dev/null || true
 
 stitch_trajectories || true
 

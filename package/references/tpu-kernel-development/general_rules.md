@@ -53,7 +53,7 @@ never builds inputs or sets tolerances, which is why rule 1 does not reach it.
     Use `invalid_input` when the caller did not supply something, and `failed`
     when a phase that owed the artifact did not produce it. Never substitute a
     file found nearby and never write the missing artifact yourself.
--   **Do not guess what the run is.** `input_language`, `reference_mode`, the
+-   **Do not guess what the run is.** `input_language`, the
     entry point and the slot each file fills are settled by the request, by
     `classify_inputs.py`, or by the user — never by inference. The same holds
     for the hardware: generation, topology, HBM and the hardware page come from
@@ -77,6 +77,6 @@ never builds inputs or sets tolerances, which is why rule 1 does not reach it.
     substitute a spec-sheet figure from a knowledge page for a measurement:
     a peak bandwidth is a ceiling, not what this kernel did.
 -   **The one sentinel:** `state.best_optimized_time` starts as the string
-    `"Infinity"`, meaning "no kernel kept yet", as `tpu-kernel-development`'s initial state
+    `"Infinity"`, meaning "no kernel that beat the baseline kept yet", as `tpu-kernel-development`'s initial state
     defines. Compare it as numeric infinity. Never write `"Infinity"` anywhere
     else, and never into a result.

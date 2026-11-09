@@ -1,0 +1,49 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# codex/user-scope.yaml with CODEX_HOME set under $HOME: the install runs with
+# it set, as it does for a user who moved it, and must put the memory block,
+# agents, hooks and config.toml there itself (eval/agents/user_scope.py,
+# UserScopeCodexHome). For the user-scope-install dataset. Needs
+# OPENAI_API_KEY, which CI does not hold, so this one runs from a workstation
+# only.
+
+job_name: torchtpu-codex-user-scope-codex-home
+n_attempts: 1
+n_concurrent_trials: 2
+environment:
+  mounts:
+  - type: bind
+    source: ${HOST_ADC}
+    target: /root/.config/gcloud/application_default_credentials.json
+    read_only: true
+verifier:
+  env:
+    VERTEXAI_PROJECT: ${VERTEXAI_PROJECT}
+    VERTEXAI_LOCATION: ${VERTEXAI_LOCATION:-global}
+agents:
+- import_path: eval.agents.user_scope:UserScopeCodexHome
+  model_name: openai/gpt-5.5
+  env:
+    OPENAI_API_KEY: ${OPENAI_API_KEY}
+    TPU_AGENT_SUITE_HOME: /root/.tpu-agent-suite
+    PACKAGE_MANIFEST: ${PACKAGE_MANIFEST:-package.release.json}
+    COMPUTE_BACKEND: local
+    GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
+    VERTEXAI_PROJECT: ${VERTEXAI_PROJECT}
+    VERTEXAI_LOCATION: ${VERTEXAI_LOCATION:-global}
+    # tpu-knowledge-base makes its own Claude calls on Vertex.
+    ANTHROPIC_VERTEX_PROJECT_ID: ${VERTEXAI_PROJECT}
+    CLOUD_ML_REGION: ${VERTEXAI_LOCATION:-global}
+    EVAL_GIT_COMMIT: ${EVAL_GIT_COMMIT:-}

@@ -25,7 +25,7 @@ fi
 
 mkdir -p "$DOWNLOAD_DIR" "$WORKSPACE_DIR/logs/artifacts"
 git -C "$WORKSPACE_DIR" init
-cp "$LOCAL_REPO_DIR/eval/datasets/nightly-onboard-optimize/$GOLDEN_TASK/instruction.md" "$WORKSPACE_DIR/PROMPT.md"
+cp "$LOCAL_REPO_DIR/eval/datasets/tpu-inference-vllm/$GOLDEN_TASK/instruction.md" "$WORKSPACE_DIR/PROMPT.md"
 
 gcloud storage cp --no-clobber "$GCS_ARCHIVE_DIR/$DIST_NAME.tar.gz" "$DOWNLOAD_DIR/"
 tar -xzf "$DOWNLOAD_DIR/$DIST_NAME.tar.gz" -C "$DOWNLOAD_DIR"

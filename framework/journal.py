@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from framework import utils
+from framework import jsonio, paths, utils
 
 JOURNAL_FILE = "journal.jsonl"
 RENDERED_FILE = "experiment.md"
@@ -140,7 +140,7 @@ def render(entries: list[dict[str, Any]], run_id: str) -> str:
 
 def _run_dir(run_id: str) -> Path:
     """The run's directory, which the session created; never made here."""
-    directory = utils.get_run_root(run_id)
+    directory = paths.get_run_root(run_id)
     if not directory.is_dir():
         raise Refused(f"run {run_id} has no directory at {directory}; use the "
                       "run_id your session was given")
@@ -148,7 +148,7 @@ def _run_dir(run_id: str) -> Path:
 
 
 def read(run_id: str) -> list[dict[str, Any]]:
-    return utils.read_jsonl(_run_dir(run_id) / JOURNAL_FILE)
+    return jsonio.read_jsonl(_run_dir(run_id) / JOURNAL_FILE)
 
 
 def write(run_id: str, **fields: Any) -> dict[str, Any] | None:
@@ -160,16 +160,15 @@ def write(run_id: str, **fields: Any) -> dict[str, Any] | None:
     directory = _run_dir(run_id)
     with open(directory / JOURNAL_FILE, "a", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)  # Released when the file closes.
-        entries = utils.read_jsonl(directory / JOURNAL_FILE)
+        entries = jsonio.read_jsonl(directory / JOURNAL_FILE)
         entry = build(entries, run_id, **fields) if fields else None
         if entry:
             f.write(json.dumps(entry, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
             entries.append(entry)
-        tmp = directory / f"{RENDERED_FILE}.tmp"
-        tmp.write_text(render(entries, run_id), encoding="utf-8")
-        os.replace(tmp, directory / RENDERED_FILE)
+        jsonio.write_text_atomic(directory / RENDERED_FILE,
+                                 render(entries, run_id))
     return entry
 
 
@@ -226,7 +225,7 @@ def dispatch_journal_command(args: Any) -> None:
         print(json.dumps(entry, sort_keys=True))
     elif args.journal_action == "render":
         write(args.run_id)
-        print(utils.get_run_root(args.run_id) / RENDERED_FILE)
+        print(paths.get_run_root(args.run_id) / RENDERED_FILE)
     else:
         entries = read(args.run_id)
         agent = " ".join(args.agent.split()) if args.agent else None

@@ -16,6 +16,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$SCRIPT_DIR"
 
 if [ ! -d ".venv" ]; then
@@ -27,6 +28,15 @@ fi
 
 echo "Installing/verifying dependencies..."
 uv pip install -e .
+
+ACTIVATE_SCRIPT="$SCRIPT_DIR/.venv/bin/activate"
+if [ -f "$ACTIVATE_SCRIPT" ] && ! grep -q "# TORCHTPU_EVAL_PYTHONPATH" "$ACTIVATE_SCRIPT"; then
+  cat >> "$ACTIVATE_SCRIPT" <<EOF
+
+# TORCHTPU_EVAL_PYTHONPATH
+export PYTHONPATH="${REPO_ROOT}\${PYTHONPATH:+:\$PYTHONPATH}"
+EOF
+fi
 
 echo "Checking GKE authentication plugins..."
 if command -v gcloud &>/dev/null; then

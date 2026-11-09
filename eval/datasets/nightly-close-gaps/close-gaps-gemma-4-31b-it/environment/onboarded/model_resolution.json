@@ -1,0 +1,20 @@
+{
+  "candidates": [
+    {
+      "downloads": 8894902,
+      "gated": false,
+      "official": true,
+      "params": 31273088876,
+      "pipeline_tag": "image-text-to-text",
+      "quantized": false,
+      "repo_id": "google/gemma-4-31B-it",
+      "url": "https://huggingface.co/google/gemma-4-31B-it",
+      "variant": "it"
+    }
+  ],
+  "query": "google/gemma-4-31B-it",
+  "reason": "repository exists under the id given",
+  "repo_id": "google/gemma-4-31B-it",
+  "url": "https://huggingface.co/google/gemma-4-31B-it",
+  "verdict": "exact"
+}

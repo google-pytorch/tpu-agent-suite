@@ -268,11 +268,6 @@ def read_json(path: Path) -> dict[str, Any]:
 # chip.
 
 
-@criterion(description="tpu-agent delegated the check to tpu-model-onboarding")
-def delegated_to_model_onboarding(workspace: Path) -> bool:
-    return "tpu-model-onboarding" in delegation_targets(workspace)
-
-
 @criterion(description="The model id was resolved before any check ran on it")
 def resolved_first(workspace: Path) -> bool:
     cmds = commands(workspace)

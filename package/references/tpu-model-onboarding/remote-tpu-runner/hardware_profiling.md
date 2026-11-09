@@ -1,30 +1,25 @@
-# Accelerator Hardware Profiling
+# Accelerator Hardware Sizing
 
-Verify availability of specialized accelerators (TPU, GPU, System RAM) on the
-machine.
+Size the accelerator the request targets. Do not run `compute inspect` or
+query the cluster or VM yourself.
 
 ## Instructions
 
-1. Execute accelerator inspection via `{{runtime}} compute inspect`:
+1. Take the accelerator from the request's `accelerator_type`.
 
-   ```bash
-   {{runtime}} compute inspect --json
-   ```
+2. Ask {{agent:tpu-knowledge-base}} for that accelerator's HBM per **chip**.
+   With no page for it, return `needs_input` naming the accelerator. Devices
+   per chip comes from tpu-model-onboarding's table, not the page.
 
-   This reads the target cluster's node labels or the VM itself and returns
-   chip allocations, accelerator topology, and memory capacity. Don't query
-   the cluster or VM yourself.
+3. Take the chips one deployment gets from the active compute profile
+   (`{{runtime}} config show --json --package {{package_tag}}`): `tpu_chips`,
+   else the product of `tpu_topology`. With neither, return `needs_input`
+   asking your caller for the chip count.
 
-2. Parse the JSON output payload:
-   - **TPU**: Check `chips`, `accelerator`, and `status`. `hbm_gb` is
-   memory per **chip**, not per device.
+4. Compute what inspect would report:
    - **Devices, for tensor parallelism**: TP is sized to devices, not chips,
-   and some chips are more than one device -- a tpu7x chip is two devices of
-   96 GB each, so a 2x2x1 slice is 4 chips but 8 devices. Use
-   `details.job_devices` and `details.hbm_gb_per_device` on every backend: on
-   `gke_job`, where `chips` counts the whole node pool, they are what one Job
-   gets. If they are missing, `details.hbm_gb_note` says why; do not assume
-   one device per chip. If it says a package is not installed, ask the user to
-   run the install command it gives, then run `inspect` again.
-   - **GPU**: Check device capacity if available.
-   - **System RAM**: Check for system memory baseline.
+   and some chips are more than one device. Devices = chips x devices per
+   chip, and HBM per device = HBM per chip / devices per chip: a tpu7x chip
+   is two devices of 96 GB each, so a 2x2x1 slice is 4 chips but 8 devices.
+   Do not assume one device per chip.
+   - **Memory limit** (`hbm_gb`): HBM per chip x chips.

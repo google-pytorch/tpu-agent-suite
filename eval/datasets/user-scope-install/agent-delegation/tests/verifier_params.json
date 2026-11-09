@@ -1,0 +1,5 @@
+{
+  "delegated_to_knowledge_base": {
+    "target_agent": ["tpu-knowledge-base"]
+  }
+}

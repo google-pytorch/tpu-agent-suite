@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import hashlib
 import importlib.util
 import io
 import json
@@ -38,10 +37,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from framework import journal, utils
+from framework import harnesses, journal, jsonio, utils
 
-from .resolvers import (Cut, SessionBundle, file_size, read_jsonl,
-                        resolve_session)
+from .resolvers import (Cut, SessionBundle, TranscriptRef, file_size,
+                        read_jsonl, resolve_session)
 
 Path = pathlib.Path
 TpuAgentSuiteError = utils.TpuAgentSuiteError
@@ -94,6 +93,17 @@ def slice_root_records(cut: Cut,
         record for record in records
         if int(record.get(cut.mode) or 0) >= int(cut.key)
     ]
+
+
+def _sliced_root_jsonl(cut: Cut, ref: TranscriptRef) -> str:
+    """The root transcript cut at `cut`, re-serialized as JSONL text."""
+    records = slice_root_records(cut, read_jsonl(ref.path))
+    return "".join(json.dumps(record) + "\n" for record in records)
+
+
+def _subagent_filename(ref: TranscriptRef) -> str:
+    """File name a subagent transcript ships under, ordered by launch."""
+    return f"{ref.order:04d}-{_safe_component(ref.label)}-{ref.agent_id}.jsonl"
 
 
 def collect_run_files(directory: Path,
@@ -224,17 +234,14 @@ def write_bundle(bundle: SessionBundle, run_root: Path | None,
         for ref in bundle.transcripts:
             if ref.kind == "root":
                 # Sliced in memory so the source transcript is never touched.
-                records = slice_root_records(bundle.cut, read_jsonl(ref.path))
-                payload = "".join(
-                    json.dumps(record) + "\n" for record in records).encode()
+                payload = _sliced_root_jsonl(bundle.cut, ref).encode()
                 info = tarfile.TarInfo("transcripts/root.jsonl")
                 info.size = len(payload)
                 tar.addfile(info, io.BytesIO(payload))
                 continue
             if not ref.path.is_file():
                 continue
-            name = f"transcripts/{ref.order:04d}-{_safe_component(ref.label)}-{ref.agent_id}.jsonl"
-            tar.add(ref.path, arcname=name)
+            tar.add(ref.path, arcname=f"transcripts/{_subagent_filename(ref)}")
 
         # Artifacts under the byte cap are bundled; oversized ones are dropped and reported.
         if run_root is not None:
@@ -294,15 +301,14 @@ def verify_bucket_exists(bucket: str) -> None:
         )
 
 
-def resolve_for_export(harness: str, session_id: str, workspace: Path,
-                       entrypoint: str,
+def resolve_for_export(harness: str, session_id: str, entrypoint: str,
                        include_full_session: bool) -> SessionBundle:
     """Resolve a session and apply the whole-session consent rule.
 
     Shared by both destinations so the `--all` refusal cannot apply to one
     and not the other.
     """
-    bundle = resolve_session(harness, session_id, workspace, entrypoint)
+    bundle = resolve_session(harness, session_id, entrypoint)
     # An undetected cut means the bundle would be the whole session, which is
     # the user's call to make, not ours. Refuse with the exact re-invocation.
     if not bundle.cut.detected:
@@ -321,7 +327,6 @@ def export_trajectory(
     *,
     harness: str,
     session_id: str,
-    workspace: Path,
     run_root: Path | None,
     run_id: str,
     entrypoint: str,
@@ -349,7 +354,7 @@ def export_trajectory(
             "`config set trajectory_enabled=true trajectory_sink=gcs "
             "trajectory_bucket=gs://... --user-confirmed` (or "
             "trajectory_sink=harbor).")
-    bundle = resolve_for_export(harness, session_id, workspace, entrypoint,
+    bundle = resolve_for_export(harness, session_id, entrypoint,
                                 include_full_session)
 
     uploaded_at = uploaded_at or utils.utc_now_iso()
@@ -371,8 +376,7 @@ def export_trajectory(
                                   dropped=dropped,
                                   artifact_count=artifact_count,
                                   bytes_total=bytes_total)
-        manifest_path.write_text(json.dumps(manifest, indent=2),
-                                 encoding="utf-8")
+        jsonio.write_json(manifest_path, manifest)
 
         objects = [
             {
@@ -385,7 +389,7 @@ def export_trajectory(
             },
         ]
         summary = {
-            "uri": f"gs://{bucket}/{prefix}" if bucket else "",
+            "uri": f"gs://{bucket}/{prefix}",
             "objects": objects,
             "cut": manifest["cut"],
             "transcripts": len(bundle.transcripts),
@@ -454,18 +458,15 @@ def stage_session_dir(bundle: SessionBundle, staging: Path) -> Path:
     session_dir.mkdir(parents=True, exist_ok=True)
     for ref in bundle.transcripts:
         if ref.kind == "root":
-            records = slice_root_records(bundle.cut, read_jsonl(ref.path))
-            payload = "".join(json.dumps(record) + "\n" for record in records)
             (session_dir / f"{bundle.session_id}.jsonl").write_text(
-                payload, encoding="utf-8")
+                _sliced_root_jsonl(bundle.cut, ref), encoding="utf-8")
             continue
         if not ref.path.is_file():
             continue
         subagents = session_dir / "subagents"
         subagents.mkdir(exist_ok=True)
-        name = (f"{ref.order:04d}-{_safe_component(ref.label)}"
-                f"-{ref.agent_id}.jsonl")
-        (subagents / name).write_bytes(ref.path.read_bytes())
+        (subagents / _subagent_filename(ref)).write_bytes(
+            ref.path.read_bytes())
     return session_dir
 
 
@@ -476,10 +477,9 @@ def _build_trajectory(harness: str, session_dir: Path, logs_dir: Path):
     # harbor exposes no directory-shaped entry point for them. They share one
     # transcript format, so all of them go through harbor's Antigravity
     # converter.
-    if utils.is_google_harness(harness):
+    if harnesses.is_google_harness(harness):
         from harbor.agents.installed.antigravity_cli import AntigravityCli
         agent = AntigravityCli(logs_dir=logs_dir)
-        records = None
         # Top-level only: the staged directory holds this session's root
         # transcript and nothing else, so there is no neighbour to match.
         # Subagents are read too: their transcripts are part of the session,
@@ -538,7 +538,7 @@ def write_job_dir(
     # The checksum identifies the task content a trial ran against. Nothing
     # here was scored against a task, so it covers the trajectory instead:
     # stable for one session, distinct across sessions.
-    checksum = hashlib.sha256(trajectory_path.read_bytes()).hexdigest()
+    checksum = utils.compute_digest(trajectory_path)
 
     agent = getattr(trajectory, "agent", None)
     model_name = getattr(agent, "model_name", "") or ""
@@ -663,8 +663,7 @@ def export_to_harbor(
                               dropped=dropped,
                               artifact_count=artifact_count,
                               bytes_total=bytes_total)
-    (trial_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2),
-                                           encoding="utf-8")
+    jsonio.write_json(trial_dir / MANIFEST_NAME, manifest)
 
     summary: dict[str, Any] = {
         "session_id": bundle.session_id,

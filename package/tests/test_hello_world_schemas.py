@@ -22,7 +22,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from framework import compiler, utils  # noqa: E402
+from framework import jsonio, utils  # noqa: E402
+from framework.builder import package_discovery, package_loader  # noqa: E402
 
 Path = pathlib.Path
 PACKAGE_DIR = REPO_ROOT / "package"
@@ -33,13 +34,13 @@ class TestHelloWorldSchemas(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.package_manifest = utils.load_json(PACKAGE_DIR /
-                                               "package.release.json")
+        cls.package_manifest = jsonio.load_json(PACKAGE_DIR /
+                                                "package.release.json")
         cls.request_schema_path = PACKAGE_DIR / "schemas" / "hello-world-request.json"
         cls.result_schema_path = PACKAGE_DIR / "schemas" / "hello-world-result.json"
 
-        cls.request_schema = utils.load_json(cls.request_schema_path)
-        cls.result_schema = utils.load_json(cls.result_schema_path)
+        cls.request_schema = jsonio.load_json(cls.request_schema_path)
+        cls.result_schema = jsonio.load_json(cls.result_schema_path)
 
     def test_schemas_exist_and_are_registered_in_package_json(self):
         """Schemas exist on disk and are registered in package.release.json schemas list."""
@@ -52,7 +53,7 @@ class TestHelloWorldSchemas(unittest.TestCase):
 
         # Every schemas/*.json is registered by the compiler; the manifest
         # lists none itself.
-        manifest = compiler.resolve_manifest_composition(
+        manifest = package_loader.resolve_manifest_composition(
             PACKAGE_DIR, self.package_manifest)
         declared_schemas = set(manifest.get("schemas", []))
         self.assertIn("schemas/hello-world-request.json", declared_schemas)
@@ -75,7 +76,7 @@ class TestHelloWorldSchemas(unittest.TestCase):
         agent_path = PACKAGE_DIR / "agents" / "tpu-hello-world.md"
         self.assertTrue(agent_path.is_file())
 
-        agent = compiler.load_agent_document(agent_path, PACKAGE_DIR)
+        agent = package_discovery.load_agent_document(agent_path, PACKAGE_DIR)
         self.assertEqual(agent.get("name"), "tpu-hello-world")
         self.assertEqual(agent.get("accepts"),
                          "schemas/hello-world-request.json")

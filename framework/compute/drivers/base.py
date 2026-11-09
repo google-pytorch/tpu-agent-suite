@@ -27,7 +27,9 @@ import socket
 import subprocess
 import time
 import urllib.request
-from typing import Any
+from typing import Any, NamedTuple
+
+from framework import paths
 
 from . import jobs, probe
 # Driver modules import this module as `base` and reach the contracts and the
@@ -165,6 +167,15 @@ class ComputeDriver(abc.ABC):
     # driver whose `run` schedules a job tags that job as `submit` would,
     # and the run-end reaper finds it if the run is interrupted.
     run_id: str | None = None
+    # The Python a recipe runs under on the target when the command names
+    # none. Drivers that run recipes through `_runner_for` set it.
+    python_interpreter: str | None = None
+
+    @classmethod
+    def suggest_backend(cls, found: dict[str, dict[str, Any]]) -> str | None:
+        """Return a probe-source string when `found` points to this backend."""
+        del found
+        return None
 
     def not_configured(self, field: str, detail: str = "") -> NotConfigured:
         """The error for a setting that's asked only when needed, and is unset.
@@ -187,6 +198,18 @@ class ComputeDriver(abc.ABC):
         """Create a job record that names this driver's compute profile."""
         return jobs.JobRecord.create(compute_profile=self.compute_profile,
                                      **fields)
+
+    def _runner_for(self, path: Path, python_interpreter: str | None) -> str:
+        """Pick the program that executes a recipe, by file extension.
+
+        A shell recipe gets the configured Python as `TPU_AGENT_SUITE_PYTHON`, which
+        is how it finds tools installed beside it (e.g. a venv's `vllm`).
+        Unquoted, like the Python runner, so `~` expands on the target.
+        """
+        python = python_interpreter or self.python_interpreter or "python3"
+        if path.suffix == ".sh":
+            return f"TPU_AGENT_SUITE_PYTHON={python} bash"
+        return python
 
     @classmethod
     @abc.abstractmethod
@@ -222,9 +245,10 @@ class ComputeDriver(abc.ABC):
     def add_cli_arg(cls, parser: Any, *args: Any, **kwargs: Any) -> None:
         """Safely add a CLI flag if not already registered, and record its attribute name.
 
-        Deduplicates shared flags across drivers (such as `--zone` or `--project` used by
-        both GCE TPU VMs and GKE XPK) and records the destination parameter into
-        `REGISTERED_DRIVER_CLI_FLAGS` for whitelist parameter extraction.
+        Deduplicates shared flags across drivers (such as `--namespace` or
+        `--kube-context` used by both GKE pods and GKE Jobs) and records the
+        destination parameter into `REGISTERED_DRIVER_CLI_FLAGS` for whitelist
+        parameter extraction.
 
         Flags are always registered with `default=argparse.SUPPRESS`, and any `default`
         a caller supplies is ignored. An argparse default would land in the namespace on
@@ -397,7 +421,7 @@ def spawn_port_forward(cmd: list[str],
                        local_port: int,
                        ready_timeout_sec: float = READY_TIMEOUT_SEC) -> int:
     """Start `cmd` detached and return its pid once the forward is serving."""
-    log_dir = jobs.jobs_dir().parent / "port-forward"
+    log_dir = paths.get_runs_root() / "port-forward"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{label}.log"
     with open(log_path, "wb") as handle:
@@ -525,6 +549,38 @@ def probe_error(proc: subprocess.CompletedProcess[str]) -> str:
 # need it.
 GKE_TOOLS = ("kubectl", "gke-gcloud-auth-plugin")
 
+# Node labels GKE puts on TPU nodes, and the resource chips are requested as.
+ACCELERATOR_LABEL = "cloud.google.com/gke-tpu-accelerator"
+TOPOLOGY_LABEL = "cloud.google.com/gke-tpu-topology"
+TPU_RESOURCE = "google.com/tpu"
+
+
+class TpuNodes(NamedTuple):
+    """What a list of GKE TPU nodes adds up to."""
+    accelerator: str | None
+    topology: str | None
+    chips: int
+    names: list[str]
+
+
+def tpu_nodes(items: list[dict[str, Any]]) -> TpuNodes:
+    """Sum up the `items` of `kubectl get nodes -o json`.
+
+    Labels come from the first node that has them, or None if none do.
+    Chips are the nodes' allocatable `TPU_RESOURCE`, added up.
+    """
+    accelerator = topology = None
+    chips = 0
+    names = []
+    for node in items:
+        labels = node.get("metadata", {}).get("labels", {})
+        accelerator = accelerator or labels.get(ACCELERATOR_LABEL)
+        topology = topology or labels.get(TOPOLOGY_LABEL)
+        names.append(node.get("metadata", {}).get("name", ""))
+        allocatable = node.get("status", {}).get("allocatable", {})
+        chips += int(allocatable.get(TPU_RESOURCE, 0) or 0)
+    return TpuNodes(accelerator, topology, chips, names)
+
 
 def gke_tools(kubectl: list[str]) -> tuple[str, ...]:
     """GKE_TOOLS, without the plugin when the kubeconfig's user does not call it."""
@@ -570,6 +626,23 @@ def vm_account_scopes(account: str) -> list[str] | None:
         return None
 
 
+def _probe_active_gcloud_account(
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """The `gcloud auth list` probe for the active account, and that
+    account; "" when there is none or the probe failed."""
+    proc = probe_run([
+        "gcloud", "auth", "list", "--filter=status:ACTIVE",
+        "--format=value(account)"
+    ])
+    lines = proc.stdout.strip().splitlines() if proc.returncode == 0 else []
+    return proc, lines[0].strip() if lines else ""
+
+
+def active_gcloud_account() -> str:
+    """The active gcloud account, or "" if there is none."""
+    return _probe_active_gcloud_account()[1]
+
+
 def gcloud_account_check(
         other_credential: str | None = None) -> PreflightCheck:
     """Whether gcloud has an active account to act as, with cloud-platform
@@ -587,12 +660,7 @@ def gcloud_account_check(
                 f"{detail}; not blocking: {other_credential}", fix)
         return PreflightCheck("gcloud:account", "fail", detail, fix)
 
-    proc = probe_run([
-        "gcloud", "auth", "list", "--filter=status:ACTIVE",
-        "--format=value(account)"
-    ])
-    lines = proc.stdout.strip().splitlines()
-    account = lines[0].strip() if lines else ""
+    proc, account = _probe_active_gcloud_account()
     if proc.returncode != 0 or not account:
         return problem(
             "gcloud has no active account"

@@ -20,20 +20,15 @@ scripts:
 - scripts/tpu-kernel-development/kernel_exec_common.py
 - scripts/tpu-kernel-development/run_autotune.py
 - scripts/tpu-kernel-development/capture_torch_golden.py
-- scripts/tpu-kernel-development/torchax_oracle.py
-- scripts/tpu-kernel-development/jaxpr_export.py
-- scripts/tpu-kernel-development/jaxpr_compare.py
 - scripts/tpu-kernel-development/cuda_static_facts.py
 - scripts/tpu-kernel-development/verify_port.py
 - scripts/tpu-kernel-development/ledger.py
 - scripts/tpu-kernel-development/apply_best_config.py
 references:
 - references/tpu-kernel-development/general_rules.md
-- references/tpu-kernel-development/torchax-oracle-pipeline.md
 - references/tpu-kernel-development/kernel-worker/synthesize-baseline.md
 - references/tpu-kernel-development/kernel-worker/analyze-torch-source.md
 - references/tpu-kernel-development/kernel-worker/reconcile-reference.md
-- references/tpu-kernel-development/kernel-worker/write-jnp-reference.md
 - references/tpu-kernel-development/kernel-worker/fix-port.md
 - references/tpu-kernel-development/kernel-worker/generate-test-file.md
 - references/tpu-kernel-development/kernel-worker/fix-test-script.md
@@ -93,12 +88,8 @@ in the second costs only the benefit of the reference.
 │   # --- semantics spine: load-bearing ---
 ├── source.py / source.cu        # the user's untouched primary input
 ├── baseline_rationale.md        # Phase 0.2, specification input only
-├── torch_golden.npz / .json     # Phase 0.3, pytorch primary, llm_port mode
-├── torchax_oracle.npz / .json   # Phase 0.3, pytorch primary, torchax mode
-├── ref.jaxpr.txt / ref.hlo.txt  # Phase 0.4, torchax mode
-├── ref.facts.json               # Phase 0.4, torchax mode
+├── torch_golden.npz / .json     # Phase 0.3, pytorch primary
 ├── torch_context.md             # Phase 0.5, pytorch primary
-├── jaxpr_comparison.json        # Phase 0.8 gate verdict
 ├── port_verification.json       # Phase 0.9 gate verdict
 ├── base.py                      # the JAX baseline — see Phase 0.10 step 2
 ├── get_inputs.py                # shared, Phase 0.10
@@ -305,14 +296,6 @@ more specific, the phase wins. If the file cannot be read, stop and return
         empty list (or a missing key) means the advisory spine is skipped
         entirely: Phases 0.6 and 0.7 do not run, and the planner gets no
         ledger. **The primary path must work standalone.**
-    -   `reference_mode` = `state.reference_mode` — `"torchax"` or
-        `"llm_port"`. This decides which tool builds the oracle in Phase 0.3,
-        whether Phase 0.4 runs at all, and whether the JAX reference comes
-        from Phase 0.5 (hand-written) or Phase 0.8 (written from the jaxpr).
-        **If the key is absent, default to `"llm_port"`** — that is the path
-        that needs no extra dependency, and torchax is deliberately not
-        installed in this package's TPU requirements. Note the defaulting in
-        `<work>/tpu_kernel_debug_history.md`.
     -   `previous_kernel_plan` — the path to the previous iteration's kernel plan, which is the `kernel_plan` of the last entry in `state.history`, or `none` if `state.history` is empty.
     -   `previous_optimized_kernel` — the path to the previous iteration's optimized kernel code, which is the `optimized_kernel` of the last entry in `state.history`, or `none` if `state.history` is empty.
     -   `previous_compilation_status` — the path to the previous iteration's compilation status, which is the `compile_ok` of the last entry in `state.history`, or `none` if `state.history` is empty.
@@ -409,12 +392,10 @@ names that file; what changed is what it is allowed to contain.
 | 0.1 | Settle what the inputs are | the request did not state the input language |
 | 0.2 | Synthesize a baseline from a specification | `primary.language == "specification"` |
 | 0.3 | Capture golden values | `primary.language == "pytorch"` |
-| 0.4 | Export the planner's reference material | `reference_mode == "torchax"` |
-| 0.5 | Understand the primary source | `primary.language == "pytorch"`, `llm_port` |
+| 0.5 | Understand the primary source | `primary.language == "pytorch"` |
 | 0.6 | Understand each reference | `references` non-empty |
 | 0.7 | Reconcile the reference | `references` non-empty |
-| 0.8 | Write and validate the jnp reference — **gate** | `reference_mode == "torchax"` |
-| 0.9 | Verify the port against golden — **gate** | `pytorch` + `llm_port` |
+| 0.9 | Verify the port against golden — **gate** | `pytorch` with golden values captured |
 | 0.10 | Prepare the shared base kernel and test harness | always |
 | 0.11 | Adjudicate last iteration's ledger adoptions | a ledger exists and `history` is non-empty |
 
@@ -429,8 +410,7 @@ state.primary.language
                    entirely. This is the path the loop has always taken.
   specification -> 0.2 synthesizes source.py, then STOPS for user approval,
                    after which the run continues as the synthesized kind
-  pytorch       -> 0.3 oracle -> (0.4 IRs) -> 0.5 port or 0.8 jnp reference
-                   -> 0.9 gate (llm_port) or 0.8's own gate (torchax)
+  pytorch       -> 0.3 oracle -> 0.5 port -> 0.9 gate
   cuda          -> refused. CUDA is a reference, never a primary; see
                    Phase 0.1 step 2.
 
@@ -537,29 +517,8 @@ disk to decide what the run *is* lives here rather than there.
     to say so, or the speedup reads as "faster than the CUDA kernel on a GPU".
     It is not; it is faster than idiomatic JAX on this TPU.
 
-3.  **Choose the reference mode, when the request did not.** For a `pytorch`
-    primary the loop needs a JAX reference, and there are two ways to get one:
-
-    | `reference_mode` | How the JAX reference is obtained | Trade-off |
-    | --- | --- | --- |
-    | `"torchax"` | `torchax.extract_jax` converts the module **mechanically** | No mistranslation risk at all. Costs a torch/torchax version pin this package's TPU requirements do not carry. |
-    | `"llm_port"` *(the default here)* | Phase 0.5 hand-writes `base.py`, following {{reference:tpu-kernel-development/kernel-worker/analyze-torch-source.md}} | No extra dependency. The port is an LLM artifact and must be gated by Phase 0.9. |
-
-    Probe once before choosing. `compute run` takes a file, so write one
-    first — the probe has to run on the target, not on your host, because the
-    target is where the oracle would be built:
-    ```bash
-    printf 'import torchax\nprint("torchax ok")\n' > <work>/probe_torchax.py
-    {{runtime}} compute run --code <work>/probe_torchax.py --timeout 120
-    ```
-    Success → `"torchax"` is available. Failure → `"llm_port"`, and note the
-    reason in `<work>/tpu_kernel_debug_history.md`. A torch/torchax version
-    conflict surfaces as an `AttributeError` naming an aten operator, which
-    reads like a missing package but is not — see
-    `{{reference:tpu-kernel-development/torchax-oracle-pipeline.md}}`.
-
-4.  **Write what you settled into `<work>/state.json`** — `primary`,
-    `references`, `reference_mode`, `seed` —
+3.  **Write what you settled into `<work>/state.json`** — `primary`,
+    `references`, `seed` —
     using fully resolved paths, then continue.
     These are written once and never revised mid-run; every downstream phase
     branches on them.
@@ -632,7 +591,7 @@ asking the user.
 
 **What this gate does and does not buy.** An approved baseline is one a human
 read and accepted; it is not a verified one. What it buys afterwards is the
-whole PyTorch chain: the conversion to JAX is mechanical or gated, so the
+whole PyTorch chain: the conversion to JAX is gated, so the
 *translation* is checked even though the *intent* rests on one human reading.
 The final report must still say the denominator was synthesized.
 
@@ -646,49 +605,17 @@ binds `base.py` as both sides of its own comparison, so it can never detect a
 mistranslated port. PyTorch, unlike CUDA, **runs on a CPU** — so run the user's
 actual module and keep the answers.
 
-Which tool produces the oracle depends on `reference_mode`:
+`{{script:tpu-kernel-development/capture_torch_golden.py}}` produces the oracle:
+eager PyTorch on CPU. The JAX reference is hand-written later, in Phase 0.5,
+and checked against it in Phase 0.9.
 
-*   **`"torchax"`** — `{{script:tpu-kernel-development/torchax_oracle.py}}`.
-    `torchax.extract_jax` converts the module to JAX mechanically, so the
-    reference carries no mistranslation risk. The tool additionally runs
-    **step 0**: it compares the converted function against eager PyTorch
-    before letting it become the oracle, because torchax is itself a
-    translation. On a plain RMSNorm the two differ by ~1.9e-06 in fp32 —
-    small, real, and not zero.
-*   **`"llm_port"`** — `{{script:tpu-kernel-development/capture_torch_golden.py}}`. The oracle
-    is eager PyTorch on CPU and the JAX reference is hand-written later. This
-    is the default in this package, because torchax is not installed alongside
-    the pinned torch (see `{{reference:tpu-kernel-development/torchax-oracle-pipeline.md}}`).
+1.  **Check if already done**: if `<work>/torch_golden.npz` and
+    `<work>/torch_golden.json` already exist, skip to Phase 0.5.
 
-1.  **Check if already done**: if the oracle files for this mode already exist
-    (`<work>/torchax_oracle.npz` + `.json`, or `<work>/torch_golden.npz` +
-    `.json`), skip to Phase 0.4.
+2.  **Run the capture.** It needs torch, so it runs on the compute target like
+    every other execution in this package; it pins the CPU device itself, so
+    it never touches a chip.
 
-2.  **Run the capture for this mode.** Both tools need torch, so they run on
-    the compute target like every other execution in this package; each one
-    pins the CPU device itself, so neither touches a chip.
-
-    `reference_mode == "torchax"`:
-    ```bash
-    {{runtime}} compute run --code {{script:tpu-kernel-development/torchax_oracle.py}} --timeout 900 \
-      --input <state.primary.source_path>:source.py \
-      --output torchax_oracle.npz:<work>/torchax_oracle.npz \
-      --output torchax_oracle.json:<work>/torchax_oracle.json \
-      -- source.py --out torchax_oracle.npz --meta torchax_oracle.json \
-         --seed <state.seed or 1024>
-    ```
-    Extra exit code for this tool: **4 = STEP 0 FAILED** — torchax does not
-    reproduce eager PyTorch within tolerance. Do NOT degrade past this. The
-    oracle would be a computation that is not the user's, so every later check
-    would be meaningless. Record the report, fall back to
-    `reference_mode: "llm_port"` for the rest of the run, and note the switch in
-    `<work>/tpu_kernel_debug_history.md`. (The tool's default tolerance follows
-    the backend it ran on: 1e-4 on CPU, 1e-3 on an accelerator, because XLA's
-    default matmul precision on TPU is bf16 and any matmul-bearing module
-    diverges from eager fp32 by roughly bf16 epsilon however faithful the
-    conversion is.)
-
-    `reference_mode == "llm_port"`:
     ```bash
     {{runtime}} compute run --code {{script:tpu-kernel-development/capture_torch_golden.py}} --timeout 900 \
       --input <state.primary.source_path>:source.py \
@@ -705,7 +632,7 @@ Which tool produces the oracle depends on `reference_mode`:
     | 0 | golden captured | set `state.primary.golden_path` and `golden_meta_path`; continue |
     | 2 | torch missing, or the module will not run on CPU | **DEGRADE, do not abort.** Record `"golden_degraded": "<stderr reason>"` in state, leave the golden paths `null`, and continue. The run proceeds with harness self-comparison alone and the final report must say the port was never verified. |
     | 3 | no discoverable entry point | STOP. Return `invalid_input` saying the user must identify the entry point. Do not guess. |
-    | 4 | `forward()` is non-deterministic | **DEGRADE**, exactly as for exit 2, recording the non-determinism as the reason. There is no golden value to capture; dropout or live RNG means no single correct answer exists. (For `torchax_oracle.py`, exit 4 means the step-0 failure above instead — see step 2.) |
+    | 4 | `forward()` is non-deterministic | **DEGRADE**, exactly as for exit 2, recording the non-determinism as the reason. There is no golden value to capture; dropout or live RNG means no single correct answer exists. |
     | 5 | capture exceeds `--max-bytes` | retry once with `--num-configs 1`; if it still exceeds, DEGRADE as for exit 2. |
 
     A degraded capture is a real loss of assurance, not a formality. Append the
@@ -714,66 +641,18 @@ Which tool produces the oracle depends on `reference_mode`:
 
 4.  **Record it in state**: re-read `<work>/state.json`, set
     `primary.golden_path` and `primary.golden_meta_path` to the fully resolved
-    paths of whichever oracle you produced (or leave them `null` on a degrade),
-    and write the file back. Downstream phases read those two keys and do not
-    care which tool filled them.
+    paths of the oracle you produced (or leave them `null` on a degrade),
+    and write the file back. Downstream phases read those two keys.
 
-    ⚠️ **The two oracles use OPPOSITE argument orders.** `torchax_oracle.json`
-    records states (parameters and buffers) FIRST, then forward inputs — that is
-    how `extract_jax` flattens. `torch_golden.json` records forward inputs
-    first, then parameters. Both manifests state their order explicitly:
-    `torchax_oracle.json` under `calling_convention.flat_signature` (and
-    `golden_compatible_order` for the other convention), `torch_golden.json`
-    under each argument's `argnum`. **Read the field. Never assume the order.**
-
-### Phase 0.4: Export the Planner's Reference Material (ONCE — idempotent)
-
-**Run only when `reference_mode == "torchax"`.** In `llm_port` mode the planner
-reads `base.py` and the context brief instead.
-
-In torchax mode there is no hand-written JAX file for the planner to study. The
-jaxpr replaces it, and is better source material: it is what JAX will actually
-compile rather than someone's description of it.
-
-1.  **Check if already done**: if `<work>/ref.jaxpr.txt` and
-    `<work>/ref.facts.json` both exist, skip to Phase 0.5.
-2.  **Export both IRs:**
-    ```bash
-    {{runtime}} compute run --code {{script:tpu-kernel-development/jaxpr_export.py}} --timeout 900 \
-      --input <state.primary.source_path>:source.py \
-      --output ref.jaxpr.txt:<work>/ref.jaxpr.txt \
-      --output ref.hlo.txt:<work>/ref.hlo.txt \
-      --output ref.facts.json:<work>/ref.facts.json \
-      -- source.py --jaxpr ref.jaxpr.txt --hlo ref.hlo.txt \
-         --json ref.facts.json --seed <state.seed or 1024>
-    ```
-3.  **Both files matter, and they answer different questions.** The jaxpr is
-    pre-optimization: it says what was asked for — the operations, dtypes,
-    reduction axes, broadcast structure. The optimized HLO is post-XLA: it says
-    what XLA *did*, and therefore where the HBM round trips it could not remove
-    still are. A planner given only the jaxpr proposes fusing things XLA already
-    fused.
-4.  **Check the warnings.** The tool warns when the jaxpr is whole-model sized
-    rather than kernel sized (`--max-eqns`, default 400) and when constvars are
-    inlined, which can print weight tensors in full. If either fires, append it
-    to `<work>/tpu_kernel_debug_history.md`; a 50,000-token jaxpr is not
-    planning material.
-5.  **Record it in state**: set `jaxpr_path`, `hlo_path` and `jaxpr_facts_path`
-    to fully resolved paths.
-6.  **Exit 2 (torchax unavailable)** → fall back to `reference_mode:
-    "llm_port"` for the rest of the run and note it. Do not stop.
+    ⚠️ **Read the argument order; never assume it.** `torch_golden.json`
+    records forward inputs first, then parameters, and states each argument's
+    position under its `argnum`.
 
 ### Phase 0.5: Understand the Primary Source (ONCE — idempotent)
 
 **Skip this entire phase when `state.primary.language == "jax"`.** A JAX input
 already has its `<work>/base.py`, copied from the caller's file, and there is
 nothing to port or explain.
-
-**Also skip when `reference_mode == "torchax"`.** There is no hand-written port
-in that mode — the JAX reference was obtained mechanically in Phase 0.3, and
-Phase 0.8 produces the readable `base.py` from it. Running the analysis here
-as well would reintroduce exactly the LLM transcription that torchax mode
-exists to avoid.
 
 Otherwise the caller handed the loop PyTorch as the *primary*. It cannot be
 bound as `base_computation` — the harness `jax.jit`s it — so before anything
@@ -824,7 +703,7 @@ For each entry in `state.references`:
 3.  **Invoke** {{agent:analyze-cuda-reference}} subagent. It runs in a fresh
     context of its own, so its brief is written without the primary in view,
     and the raw CUDA source never enters the context that later writes and
-    repairs `base.py` (Phases 0.8 and 0.9). Record `base.py`'s hash first.
+    repairs `base.py` (Phases 0.5 and 0.9). Record `base.py`'s hash first.
     -   Prompt: "Analyze the reference kernel at `<source_path>` for `<work>`
         (state file: `<work>/state.json`)."
 4.  **Verify on disk — and verify the prohibition held.**
@@ -844,8 +723,7 @@ brief.**
 
 1.  **Check if already done**: if `<work>/ideas_ledger.json` exists and
     `python3 {{script:tpu-kernel-development/ledger.py}} validate <work>/ideas_ledger.json`
-    exits 0, skip the rest of this phase. Whether Phase 0.8 or Phase 0.9
-    comes next is decided by `reference_mode`, not here; each guards itself.
+    exits 0, skip the rest of this phase.
 2.  **Read and follow** {{reference:tpu-kernel-development/kernel-worker/reconcile-reference.md}}.
 3.  **Verify on disk**: `<work>/reference_alignment.md` and
     `<work>/ideas_ledger.json` must both exist and be non-empty, and the ledger
@@ -871,77 +749,11 @@ brief.**
     reference that computes something else is the one most likely to mislead
     an agent that opens it.
 
-### Phase 0.8: Write and Validate the jnp Reference (ONCE — torchax mode)
-
-**Run only when `reference_mode == "torchax"`.**
-
-You write a readable `jnp` reference and it becomes `<work>/base.py`.
-It is checked twice, and neither check alone is enough.
-
-There is no way to skip this and still have a run: `base.py` is what
-`{{script:tpu-kernel-development/assemble_test_harness.py}}` binds as `base_computation`, so
-without it nothing can be measured at all.
-
-1.  **Check if already done**: if `<work>/base.py` exists and
-    `<work>/jaxpr_comparison.json` reports a passing verdict, skip to Phase 0.10.
-2.  **Read and follow** {{reference:tpu-kernel-development/kernel-worker/write-jnp-reference.md}}.
-3.  **Run both checks with one command:**
-    ```bash
-    {{runtime}} compute run --code {{script:tpu-kernel-development/jaxpr_compare.py}} --timeout 900 \
-      --input <state.primary.source_path>:source.py \
-      --input <work>/base.py:base.py \
-      --output jaxpr_comparison.json:<work>/jaxpr_comparison.json \
-      -- source.py base.py --entry computation --seed <state.seed or 1024> \
-         --atol <atol> --rtol <rtol> --strict --out jaxpr_comparison.json
-    ```
-    `--strict` is required here, and the reason is measured. A reference that
-    silently drops the epsilon from a normalization differs from the oracle by
-    **7.8e-05** — it *passes* a 1e-2 value gate and is caught only structurally,
-    as `ref-only={'ADD': 1}`. Conversely a reference that reduces over the wrong
-    axis has a census *identical* to the oracle and is caught only by the
-    reduction signature. Both halves of this tool are load-bearing.
-4.  **Branch on the exit code:**
-    -   **0** — both gates passed. Record `jnp_reference_path` and
-        `jaxpr_comparison_path` in state, set `primary.port_verified = true`,
-        and continue.
-    -   **1** — read `jaxpr_comparison.json` to see which gate failed.
-        `value_ok: false` means the reference is numerically wrong; a
-        `divergent` verdict with `value_ok: true` means it computes something
-        structurally different that happens to agree on the sampled inputs.
-        Follow {{reference:tpu-kernel-development/kernel-worker/write-jnp-reference.md}} again with the
-        report in hand, up to **3 attempts**.
-    -   **3** — bad invocation or the candidate has no `computation`. Fix the
-        call; do not burn an attempt.
-5.  **After 3 failed attempts, STOP THE RUN**, exactly as Phase 0.9 does. A run
-    whose reference is wrong should not spend five iterations optimizing
-    against it.
-
-**A `divergent` verdict is not automatically fatal** — a legitimate
-reformulation such as `x / sqrt(v)` in place of `x * rsqrt(v)` reports
-`divergent` with a one-line diff. Read the surviving difference before
-trying again. What is never acceptable is a difference in the reduction
-signature, or a missing operation.
-
-**Never run this tool against a Pallas kernel.** A good kernel deliberately
-changes the structure — online softmax, unnormalized accumulators, a fused
-epilogue — so structural divergence there is the goal. Mechanically it would
-not work either: `make_jaxpr` on a `pallas_call` yields one opaque primitive
-with the body nested inside. The Pallas kernel is checked against the oracle by
-value, and by nothing else.
-
 ### Phase 0.9: Verify the Port Against Golden — THE GATE (ONCE)
 
 **Skip when `state.primary.golden_path` is `null`** (a `jax` primary or a
 degraded Phase 0.3). Record `"port_verified": null` with the reason and
 continue.
-
-**Also skip when `reference_mode == "torchax"`.** That mode's equivalent gate is
-Phase 0.8, which checks the same `base.py` against the same oracle and
-additionally compares its structure against the torchax jaxpr. Running both
-would double-check the value side and leave the structural side unowned.
-`verify_port.py` reads the `torch_golden.json` schema; the torchax oracle uses a
-different one with the opposite argument order, so pointing it at
-`torchax_oracle.json` would not work anyway.
 
 Otherwise this is a hard gate. A run whose baseline is wrong should not spend
 five iterations optimizing against it — that is worse than no run, because it
@@ -999,14 +811,13 @@ ends in a confident, wrong speedup.
     What it cannot catch is a semantic difference smaller than `atol`. The
     measured case is a dropped epsilon in a normalization: it shifts the result
     by **7.8e-05**, so at the default `atol` of `1e-2` the port passes while
-    computing something the source does not. Phase 0.8 catches exactly this,
-    structurally — but Phase 0.8 only runs in `torchax` mode, and this phase
-    only runs when it did not.
+    computing something the source does not. No gate in this loop catches
+    that.
 
     So `port_verified: true` from this phase means *"agrees with the source to
     within the run's tolerance"*, not *"is the same computation"*. Do not
-    restate it as the latter, and when the final report describes the baseline,
-    say which of the two gates produced the verdict. A later correctness
+    restate it as the latter when the final report describes the baseline.
+    A later correctness
     mystery — a kernel that matches `base.py` perfectly and the user's module
     not quite — is read against this paragraph.
 
@@ -1036,12 +847,10 @@ collision. See `{{script:tpu-kernel-development/assemble_test_harness.py}}`'s mo
         its own package load the image's installed modules on the target, not
         the copied neighbours: only `base.py`'s own edits take effect, so never
         plan a change to a neighbouring file;
-    -   `reference_mode: "llm_port"` on a `pytorch` primary — hand-written in
-        Phase 0.5 and gated in Phase 0.9;
-    -   `reference_mode: "torchax"` — written from the jaxpr in Phase 0.8 and
-        gated there by `jaxpr_compare.py`.
+    -   a `pytorch` primary — hand-written in Phase 0.5 and gated in
+        Phase 0.9.
 
-    In the last two cases, if `base.py` is missing, STOP and report that; do
+    In the second case, if `base.py` is missing, STOP and report that; do
     not write a baseline yourself. Every route above produces one, so a missing
     `base.py` means the phase that owed it failed silently — a bug to report,
     not a state to work around.
@@ -1126,8 +935,8 @@ collision. See `{{script:tpu-kernel-development/assemble_test_harness.py}}`'s mo
 
     What covers that gap depends on how the run got here:
 
-    -   **`state.primary.port_verified == true`** — Phase 0.9 (or Phase 0.8 in
-        torchax mode) already checked `base.py` against values captured from
+    -   **`state.primary.port_verified == true`** — Phase 0.9 already checked
+        `base.py` against values captured from
         the user's own module. The port is evidence-backed and this phase is
         purely a harness smoke test.
     -   **`state.primary.port_verified` is `null` or `false`** — a `jax`
@@ -1281,7 +1090,9 @@ assembles this iteration's runnable script and executes it.
     mean of the harness's paired base-vs-optimized measurements, taken in one
     process, and it is written to `state.history` in Phase 5 — which is where
     the next iteration's planner reads it to decide whether to build on this
-    kernel or restart from `base.py`. Parse it as a float. Never compute a
+    kernel or restart from `base.py` — unless the Phase 4 sweep replaces this
+    kernel with a tuned configuration, whose own `SPEEDUP` Phase 5 records
+    instead. Parse it as a float. Never compute a
     speedup yourself, and never derive one from wall-clock duration: that
     includes queue wait and JIT compilation. If `CORRECTNESS: False`, the
     harness exits before printing any timing line — record `speedup` as `null`
@@ -1359,8 +1170,8 @@ config" agrees with what the real test run would measure.
         identically is the signature of that collision (or of a broken
         environment), not evidence that every configuration is bad -- say so
         in the summary rather than blaming the search space.
-    -   Keep each step one `compute run`. On a queued backend (`gke_job`) every
-        run is a new Job that waits for admission and a node, often longer
+    -   Keep each step one `compute run`. On a queued backend (e.g. `gke_job`)
+        every run is a new Job that waits for admission and a node, often longer
         than it then runs. The harness already measures every input case in
         one process and `run_autotune.py` runs every trial of the payload in
         one: never split cases or trials across several runs. To try more
@@ -1446,6 +1257,15 @@ to `{optimized_kernel_path}` in Phase 4 step 3); otherwise it is Phase 3's
 `RESULT_TIME` per the **Fallback latency** rule. The Phase 4.5 trace is for
 bottleneck *analysis* and produces no timing number to report here.
 
+**`speedup` measures the same kernel.** When the sweep succeeded, it is the
+`SPEEDUP` line in the `stdout` of the `all_results` entry whose `config` is
+`best_config` -- the trial `best_time_ms` came from. Every trial runs the full
+harness, so that line is the paired base-vs-optimized measurement of the
+configuration Phase 4 step 3 wrote to `{optimized_kernel_path}`. Phase 3's
+`SPEEDUP` measured the untuned kernel, which no longer exists on disk once a
+configuration is applied. When the sweep did not succeed, the kernel is still
+the one Phase 3 tested, and `speedup` is Phase 3's.
+
 `profile_summary` stays `null`: the analyst writes that report after you
 return, and the loop fills the field in. What you record is where you left the
 trace, so the loop knows there is one to hand over.
@@ -1454,9 +1274,16 @@ trace, so the loop knows there is one to hand over.
     on, do not skip it: read the file again (don't assume it's unchanged since
     step 1):
     -   Set `iteration` to `n`.
-    -   **Compare and Update Best Kernel**: Compare `optimized_time` of the current kernel against `state.best_optimized_time` (treating `"Infinity"` as numeric infinity). If `compile_ok` is True, `test_ok` is True, and `optimized_time` is better (smaller) than `state.best_optimized_time`:
+    -   **Compare and Update Best Kernel**: Compare `optimized_time` of the current kernel against `state.best_optimized_time` (treating `"Infinity"` as numeric infinity). If `compile_ok` is True, `test_ok` is True, `speedup` is above 1.0, and `optimized_time` is better (smaller) than `state.best_optimized_time`:
         -   Replace `state.best_optimized_time` with the current `optimized_time`.
         -   Replace `state.best_code_path` with current `{optimized_kernel_path}`.
+
+        The `speedup` condition is what keeps a kernel slower than `base.py`
+        out. `state.best_optimized_time` starts at `"Infinity"`, so without it
+        the first kernel that passes is kept however slow it is, and a run in
+        which no kernel beat the baseline would hand back the slowest-but-one
+        as its result. A kernel that is not kept is still recorded in
+        `state.history` below.
     -   Append the iteration record to `state.history`:
 
         ```json
@@ -1475,8 +1302,9 @@ trace, so the loop knows there is one to hand over.
            }
         ```
 
-        -   `speedup` is the float you captured from Phase 3's `SPEEDUP` line,
-            as a JSON number. Write `null` when correctness failed and no
+        -   `speedup` is the float described above -- the best trial's
+            `SPEEDUP` line when the sweep succeeded, Phase 3's otherwise -- as
+            a JSON number. Write `null` when correctness failed and no
             timing line was printed. **This field is not decoration**: the next
             iteration's planner applies a literal `> 1.0` rule to it to decide
             whether to build on this kernel or restart from `base.py`, so a

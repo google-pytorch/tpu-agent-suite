@@ -33,6 +33,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import yaml
 
+from eval.mount_advisor import MountUpdates
 from eval.staging import StagingResult
 
 # Dynamically import eval/run.py
@@ -121,6 +122,20 @@ class TestResolveTemplate(unittest.TestCase):
     def test_env_var_with_empty_default(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(resolve_template("${NONEXISTENT_VAR:-}"), "")
+
+
+class TestExportHarnessPins(unittest.TestCase):
+    """run.py exports .ci/pins.conf so the configs can install the pinned CLI."""
+
+    def test_exports_the_claude_code_pin_without_overriding(self) -> None:
+        pinned = _RUN_MOD.read_harness_pins(
+            _RUN_MOD.HARNESS_PINS_FILE)["CLAUDE_CODE_VERSION"]
+        with patch.dict(os.environ, {}, clear=True):
+            _RUN_MOD.export_harness_pins()
+            self.assertEqual(os.environ["CLAUDE_CODE_VERSION"], pinned)
+        with patch.dict(os.environ, {"CLAUDE_CODE_VERSION": "0.0.1"}):
+            _RUN_MOD.export_harness_pins()
+            self.assertEqual(os.environ["CLAUDE_CODE_VERSION"], "0.0.1")
 
 
 class TestResolveConfigFile(unittest.TestCase):
@@ -1406,6 +1421,29 @@ class TestMultipleConfigs(unittest.TestCase):
         job_dir.mkdir()
         self.assertIsNone(get_harbor_hub_url(job_dir))
 
+    def test_get_harbor_hub_url_custom_env(self) -> None:
+        job_dir = self.temp_dir / "custom_job"
+        job_dir.mkdir()
+        (job_dir / "result.json").write_text('{"id": "job-789"}',
+                                             encoding="utf-8")
+        custom_base = "https://harbor-eval-viewer-internal.a.run.app/jobs"
+        with patch.dict(os.environ, {"HARBOR_VIEWER_JOBS_URL": custom_base}):
+            url = get_harbor_hub_url(job_dir)
+            self.assertEqual(url, f"{custom_base}/job-789")
+
+    def test_get_harbor_hub_url_custom_viewer_url_env(self) -> None:
+        job_dir = self.temp_dir / "custom_job_2"
+        job_dir.mkdir()
+        (job_dir / "result.json").write_text('{"id": "job-456"}',
+                                             encoding="utf-8")
+        custom_base = "https://harboreval-viewer-g3-6zn3wa2dfa-uc.a.run.app/jobs/"
+        with patch.dict(os.environ, {"HARBOR_VIEWER_URL": custom_base}):
+            url = get_harbor_hub_url(job_dir)
+            self.assertEqual(
+                url,
+                "https://harboreval-viewer-g3-6zn3wa2dfa-uc.a.run.app/jobs/job-456",
+            )
+
 
 class TestRenderConfigCarriesDataset(unittest.TestCase):
     """The dataset must survive into the file Harbor actually reads.
@@ -1698,8 +1736,11 @@ class TestDatasetSetupHook(unittest.TestCase):
     gitignored. See the TODO on run_dataset_setup_if_present.
     """
 
-    def _ran(self, config):
-        with patch.object(_RUN_MOD.subprocess, "run") as mock_run:
+    def _ran(self, config, has_setup_sh: bool = True):
+        with (
+                patch.object(_RUN_MOD.subprocess, "run") as mock_run,
+                patch.object(Path, "is_file", return_value=has_setup_sh),
+        ):
             run_dataset_setup_if_present(config)
             return [c[0][0] for c in mock_run.call_args_list]
 
@@ -1726,12 +1767,15 @@ class TestDatasetSetupHook(unittest.TestCase):
         self.assertEqual(
             self._ran({"datasets": [{
                 "path": "eval/datasets/smoke-check"
-            }]}), [])
+            }]},
+                      has_setup_sh=False), [])
 
     def test_path_outside_datasets_is_ignored(self) -> None:
-        self.assertEqual(self._ran({"tasks": [{
-            "path": "/tmp/elsewhere"
-        }]}), [])
+        self.assertEqual(
+            self._ran({"tasks": [{
+                "path": "/tmp/elsewhere"
+            }]},
+                      has_setup_sh=False), [])
 
 
 class TestPinnedImageHasDockerfile(unittest.TestCase):
@@ -1830,25 +1874,25 @@ class TestRenderConfigPathNormalization(unittest.TestCase):
         raw_config = {
             "job_name": "test",
             "datasets": [{
-                "path": "datasets/jaxbench-level1"
+                "path": "datasets/smoke-check"
             }],
         }
         rendered_path = render_config(raw_config, self.cfg_path, self.temp_dir)
         rendered = yaml.safe_load(rendered_path.read_text(encoding="utf-8"))
         self.assertEqual(rendered["datasets"][0]["path"],
-                         "eval/datasets/jaxbench-level1")
+                         "eval/datasets/smoke-check")
 
     def test_task_relative_path_normalized(self) -> None:
         raw_config = {
             "job_name": "test",
             "tasks": [{
-                "path": "datasets/jaxbench-level1/8p-gemm"
+                "path": "datasets/smoke-check/preflight-check"
             }],
         }
         rendered_path = render_config(raw_config, self.cfg_path, self.temp_dir)
         rendered = yaml.safe_load(rendered_path.read_text(encoding="utf-8"))
         self.assertEqual(rendered["tasks"][0]["path"],
-                         "eval/datasets/jaxbench-level1/8p-gemm")
+                         "eval/datasets/smoke-check/preflight-check")
 
     def test_already_normalized_path_preserved(self) -> None:
         raw_config = {
@@ -2267,6 +2311,36 @@ class TestWholePackage(unittest.TestCase):
                                  skills=["tpu-agent"])
         self.assertIn("_cc-agent-suite-subset-agent-v6e_", name)
 
+    def test_another_package_is_named_in_the_job(self) -> None:
+        # PACKAGE_MANIFEST=package.experimental.json is another system under
+        # test, so its runs must not join the release runs on a dashboard.
+        path = CONFIGS_DIR / "claude-code" / "agent-suite.yaml"
+        args = build_parser().parse_args(["-c", "claude-code/agent-suite"])
+        with patch.dict(os.environ,
+                        {"PACKAGE_MANIFEST": "package.experimental.json"}):
+            name = generate_job_name(load_config(path),
+                                     path,
+                                     args,
+                                     timestamp="t")
+        self.assertIn("_cc-agent-suite-experimental-v6e_", name)
+        with patch.dict(os.environ, {"PACKAGE_MANIFEST": ""}):
+            self.assertIn(
+                "_cc-agent-suite-v6e_",
+                generate_job_name(load_config(path), path, args,
+                                  timestamp="t"))
+
+    def test_a_control_arm_is_not_named_for_a_package(self) -> None:
+        # It installs nothing, whatever PACKAGE_MANIFEST says.
+        path = CONFIGS_DIR / "claude-code" / "baseline.yaml"
+        args = build_parser().parse_args(["-c", "claude-code/baseline"])
+        with patch.dict(os.environ,
+                        {"PACKAGE_MANIFEST": "package.experimental.json"}):
+            name = generate_job_name(load_config(path),
+                                     path,
+                                     args,
+                                     timestamp="t")
+        self.assertNotIn("experimental", name)
+
     def _main(self, *argv: str, **env: str) -> str:
         task = Path(tempfile.mkdtemp()) / "task1"
         task.mkdir()
@@ -2303,6 +2377,17 @@ class TestWholePackage(unittest.TestCase):
             "tpu-nope",
             self._main("-c", "claude-code/agent-suite", "--skills",
                        "tpu-nope"))
+
+    def test_an_experimental_skill_needs_the_experimental_package(
+            self) -> None:
+        # close-gaps ships in package.experimental.json only, so the release
+        # package refuses it; PACKAGE_MANIFEST=package.experimental.json's
+        # check is the same call against its own manifest (TestPackageManifest
+        # in test_utils.py).
+        self.assertIn(
+            "close-gaps",
+            self._main("-c", "claude-code/agent-suite", "--skills",
+                       "close-gaps"))
 
     def test_render_config_filters_custom_eval_keys(self) -> None:
         cfg = {
@@ -2366,10 +2451,80 @@ class TestWholePackage(unittest.TestCase):
                 skills=None,
                 compute_answers=ANY,
                 repo_root=ANY,
-                pkg_name="tpu-agent-suite",
-                pkg_version=_RUN_MOD._STAGED_PKG_VERSION,
+                manifest="package.release.json",
             )
             self.assertTrue(len(cfg["environment"]["mounts"]) > 0)
+
+    def test_stage_package_if_needed_experimental_stages_its_manifest(
+            self) -> None:
+        cfg = {
+            "agents": [{
+                "name": "claude-code",
+                "env": {
+                    "PACKAGE_MANIFEST":
+                    "${PACKAGE_MANIFEST:-package.release.json}"
+                },
+            }],
+            "environment": {
+                "mounts": []
+            }
+        }
+        with patch.object(_RUN_MOD, "stage_composite_package") as mock_stage:
+            mock_stage.return_value = StagingResult(
+                staged_root=Path("/tmp/staged_root"),
+                staged_workspace=Path("/tmp/staged_root/workspace"),
+                staged_dist=Path("/tmp/staged_root/claude-code/pkg"),
+                central_pkg_dir=Path("/tmp/central"),
+                is_empty=False,
+            )
+            with patch.dict(os.environ,
+                            {"PACKAGE_MANIFEST": "package.experimental.json"}):
+                stage_package_if_needed(cfg, Path("/tmp/agent-suite.yaml"))
+            mock_stage.assert_called_once_with(
+                "claude-code",
+                control_arm=False,
+                skills=None,
+                compute_answers=ANY,
+                repo_root=ANY,
+                manifest="package.experimental.json",
+            )
+
+    def test_stage_package_if_needed_refuses_an_unknown_manifest(self) -> None:
+        # A typo must not quietly run the release package.
+        cfg = {
+            "agents": [{
+                "name": "claude-code",
+                "env": {
+                    "PACKAGE_MANIFEST": "experimentl"
+                },
+            }],
+        }
+        with patch.object(_RUN_MOD, "stage_composite_package") as mock_stage:
+            with self.assertRaisesRegex(RuntimeError, "experimentl"):
+                stage_package_if_needed(cfg, Path("/tmp/agent-suite.yaml"))
+            mock_stage.assert_not_called()
+
+    def test_stage_package_if_needed_control_arm_ignores_the_manifest(
+            self) -> None:
+        # A control arm installs nothing, so a bad value must not stop it.
+        cfg = {
+            "agents": [{
+                "name": "claude-code",
+                "env": {
+                    "PACKAGE_MANIFEST": "experimentl"
+                },
+            }],
+        }
+        with patch.object(_RUN_MOD, "stage_composite_package") as mock_stage:
+            mock_stage.return_value = StagingResult(
+                staged_root=Path("/tmp/staged_root"),
+                staged_workspace=Path("/tmp/staged_root/workspace"),
+                staged_dist=Path("/tmp/staged_root/claude-code/pkg"),
+                central_pkg_dir=Path("/tmp/central"),
+                is_empty=True,
+            )
+            stage_package_if_needed(cfg, Path("/tmp/baseline.yaml"))
+            self.assertTrue(mock_stage.call_args.kwargs["control_arm"])
 
     def test_stage_package_if_needed_baseline_mounts_supervisor_by_default(
             self) -> None:
@@ -2398,8 +2553,7 @@ class TestWholePackage(unittest.TestCase):
                 skills=None,
                 compute_answers=ANY,
                 repo_root=ANY,
-                pkg_name="tpu-agent-suite",
-                pkg_version=_RUN_MOD._STAGED_PKG_VERSION,
+                manifest="package.release.json",
             )
             targets = {m["target"] for m in cfg["environment"]["mounts"]}
             self.assertIn("/usr/local/bin/claude_session_supervisor_hook.sh",
@@ -2942,6 +3096,44 @@ class TestRunSuiteOption(unittest.TestCase):
             self.assertEqual(len(harbor_calls), 1)
             called_env = harbor_calls[0].kwargs.get("env", {})
             self.assertEqual(called_env.get("AGY_ADC_AUTH"), "true")
+
+    def test_main_stages_each_config_with_its_own_subset(self) -> None:
+        # Each config's --skills is checked against its own package; the
+        # second staging pass must use that config's subset, not the one
+        # the last config left behind.
+        configs = []
+        for name in ("arm_a", "arm_b"):
+            cfg_file = self.temp_dir / f"{name}.yaml"
+            cfg_file.write_text("agents:\n  - name: claude-code\n",
+                                encoding="utf-8")
+            configs.append(str(cfg_file))
+        task_dir = self.temp_dir / "task1"
+        task_dir.mkdir()
+        (task_dir / "task.toml").write_text("", encoding="utf-8")
+
+        env = {k: v for k, v in os.environ.items() if k != "GITHUB_RUN_ID"}
+        with patch("sys.argv", [
+            "run.py", "-c", *configs, "-t", str(task_dir), "--skills",
+            "tpu-agent", "--no-upload", "--no-report"
+        ]), patch.dict(os.environ, env, clear=True), \
+           patch.object(_RUN_MOD, "check_dependencies"), \
+           patch.object(_RUN_MOD, "setup_host_auth"), \
+           patch.object(_RUN_MOD, "skill_subset",
+                        side_effect=[["skill-a"], ["skill-b"]]), \
+           patch.object(_RUN_MOD, "stage_package_if_needed",
+                        return_value=MountUpdates(mounts=[], env={})) as stage, \
+           patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            try:
+                _RUN_MOD.main()
+            except SystemExit as e:
+                self.assertEqual(e.code, 0)
+
+        staged = [(Path(c.args[1]).stem, c.args[2])
+                  for c in stage.call_args_list]
+        self.assertEqual([("arm_a", ["skill-a"]), ("arm_b", ["skill-b"]),
+                          ("arm_a", ["skill-a"]), ("arm_b", ["skill-b"])],
+                         staged)
 
     def test_main_passes_streaming_upload_flags_to_harbor_run(self) -> None:
         cfg_file = self.temp_dir / "upload_cfg.yaml"

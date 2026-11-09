@@ -1,0 +1,61 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Explanation of failures: a debugging aid, not a grade. The report is this
+# criterion's `reasoning`, which eval/run.py copies into the GitHub step
+# summary for trials that fail. It must stay out of the score: the parent
+# reward.toml sets `weights = { failure_report = 0.0 }`, because a directory's
+# weight in its parent is set there, not by [judge].weight.
+#
+# Identical in every task; keep the copies in sync.
+
+[judge]
+judge = "vertex_ai/gemini-3.8-flash"
+atif-trajectory = "/logs/agent/trajectory.json"
+timeout = 600
+
+[[criterion]]
+name = "failure_report"
+type = "binary"
+description = """
+Score 1 if the run had no failures, else 0. The score is ignored; the \
+reasoning is the deliverable. Write the reasoning as a GitHub-flavored \
+Markdown failure report that lets a human debug the run WITHOUT reading the \
+trajectory.
+
+Report EVERY failure, not only the one that decided the outcome: failed or \
+erroring tool calls and commands, wrong assumptions, ignored instructions, \
+skipped or mis-routed delegation, loops and retries, timeouts, \
+infrastructure or environment problems, hallucinated results, and places \
+where the final answer contradicts what the trajectory shows. For each, cite \
+the trajectory step number(s) ("Step N" or "Steps N-M"), quote short evidence \
+(an error line, a command) verbatim, tag it [agent], [tool], [infra] or \
+[instructions], and say how it affected the result.
+
+Use exactly this structure:
+
+**Verdict:** one sentence on the outcome and its primary cause.
+
+#### Failures
+1. **Step N** [category]: what went wrong. Evidence: `quoted`. Impact: ...
+
+#### Suggested next steps
+- where to look or what to change
+
+If there were no failures, write "**Verdict:** No failures found." and omit \
+the other sections. No preamble.
+"""
+
+[scoring]
+aggregation = "weighted_mean"

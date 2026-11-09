@@ -96,8 +96,7 @@ EXIT_REFUSED = 3
 # Backends with room to book: a TPU VM is one server, a gke_job cluster as
 # many as its free chips hold. `local` is this host, which compute's own lock
 # already serializes; a `gke_pod` is one pod, already running, that no other
-# agent starts servers on; `gke_xpk` cannot serve. A slot on any of them would
-# book nothing.
+# agent starts servers on. A slot on either of them would book nothing.
 SLOT_BACKENDS = ("gce_tpu_vm", "gke_job")
 CLAIM_FIELDS = ("job", "job_id", "run_id", "since")
 

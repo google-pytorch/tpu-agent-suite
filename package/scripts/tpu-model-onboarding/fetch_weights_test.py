@@ -834,6 +834,18 @@ class FetchGcsTest(unittest.TestCase):
         copy.assert_called_once_with(URL, interval=fw.DEFAULT_INTERVAL_SEC)
         self.assertIn("--revision main ignored", out)
 
+    def test_fetch_in_hf_hub_offline_mode_resolves_cached_snapshot(self):
+        fake_hf = types.ModuleType("huggingface_hub")
+        fake_hf.constants = types.SimpleNamespace()
+        fake_hf.snapshot_download = mock.Mock(return_value="/cache/snap/abc")
+        with mock.patch.dict(os.environ, {"HF_HUB_OFFLINE": "1"}), \
+                mock.patch.dict(sys.modules, {"huggingface_hub": fake_hf}):
+            path, out = run(fw.fetch, "org/model", revision="main")
+        self.assertEqual(path, "/cache/snap/abc")
+        fake_hf.snapshot_download.assert_called_once_with(
+            "org/model", revision="main", local_files_only=True)
+        self.assertIn("cached snapshot, nothing to download", out)
+
     def test_main_writes_the_local_path(self):
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(fw, "fetch_gcs", return_value="/c/m"):

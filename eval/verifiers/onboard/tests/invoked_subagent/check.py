@@ -27,7 +27,8 @@ It reads Harbor's ATIF trajectory, which holds each delegation and its result:
   (`tpu-agent-suite:tpu-model-onboarding`). A failed result has
   `extra.tool_result_is_error`.
 - Antigravity: an `invoke_subagent` call naming each agent in
-  `Subagents[].TypeName`. A failed result has `extra.status` ERROR.
+  `Subagents[].TypeName`, or in a top-level `TypeName` from agy 1.4.7, which
+  sends the arguments flat. A failed result has `extra.status` ERROR.
 
 A `Role` is free text, not an agent type, so it never counts. A delegation
 with no recorded result (the run ended while the subagent worked) counts,
@@ -72,6 +73,8 @@ def agent_types(tool: str, args: dict[str, Any]) -> list[str]:
         named = [args.get("subagent_type")]
     elif tool == "invoke_subagent":
         named = [sub.get("TypeName") for sub in args.get("Subagents") or []]
+        if not named:
+            named = [args.get("TypeName")]
     else:
         return []
     return [n for n in named if isinstance(n, str) and n]

@@ -1,0 +1,504 @@
+{
+ "baseline": {
+  "tp": 4,
+  "dp": 2,
+  "devices": 8,
+  "image": "sha256:8e22f91d",
+  "points": [
+   "1k1k c32",
+   "8k1k c128"
+  ]
+ },
+ "candidates": [
+  {
+   "cand_id": "m-tp2xdp4",
+   "rank": 1,
+   "argv_set": {
+    "--tensor-parallel-size": "2",
+    "--data-parallel-size": "4"
+   },
+   "argv_add_flags": [],
+   "argv_remove_flags": [
+    "--enable-expert-parallel"
+   ],
+   "env_set": {},
+   "check_env_knobs": [],
+   "check_cli_flags": [
+    "--data-parallel-size",
+    "--tensor-parallel-size"
+   ],
+   "rationale": "D7: prefill is collective-bound; lower TP shortens the all-reduce group and more DP replicas add prefill capacity",
+   "evidence": [],
+   "expected_mechanism": "Re-profile and re-run the serving analyzer: kernel-shape findings D7_collective_bound must be re-measured on the new mesh.",
+   "target_points": [
+    "1k1k c32",
+    "8k1k c128"
+   ],
+   "risks": "decode-regressing: per-device weight bytes x2 on an HBM-bound decode step; low-concurrency and decode-heavy points may slow down; DP=4 engines hang on first requests (seen on other images; verify on this one); reduction order changes (TP4xDP2 -> TP2xDP4): greedy outputs may differ from the baseline; check greedy parity before comparing quality (Gemma-4 TP4xDP2 -> TP2xDP4 changed 3/8 greedy prompts); workload-dependent: expected negative at 1k1k c32, positive at 8k1k c128; measure every point before adopting the mesh",
+   "remeasure": [
+    "D7_collective_bound"
+   ],
+   "profiles": [],
+   "target_regime": "balanced",
+   "additional_config_set": {},
+   "per_point_assessment": {
+    "1k1k c32": {
+     "isl": 1024,
+     "osl": 1024,
+     "c": 32,
+     "regime": "balanced",
+     "score": -1.75,
+     "expected_direction": "negative",
+     "rationale": "D7 not credited: a balanced point spends most step time in decode; no collective-bound prefill; mesh change is exploratory; per-device weight bytes x2 slow the HBM-bound decode step (8 sequences per replica)",
+     "feasible": true,
+     "warnings": [
+      "DP=4 engines hang on first requests (seen on other images; verify on this one)"
+     ]
+    },
+    "8k1k c128": {
+     "isl": 8192,
+     "osl": 1024,
+     "c": 128,
+     "regime": "prefill_heavy",
+     "score": 0.75,
+     "expected_direction": "positive",
+     "rationale": "D7: prefill is collective-bound; lower TP shortens the all-reduce group and more DP replicas add prefill capacity",
+     "feasible": true,
+     "warnings": [
+      "DP=4 engines hang on first requests (seen on other images; verify on this one)"
+     ]
+    }
+   },
+   "workload_dependent": true,
+   "provenance": {
+    "skill": "sharding",
+    "findings": [
+     "D7_collective_bound"
+    ],
+    "tool": "oss_meshes.enumerate_oss_meshes",
+    "tool_version": "compose_plan/1"
+   },
+   "status": "workload_dependent",
+   "kind": "mesh",
+   "serving_change": {
+    "env": {
+     "VLLM_SERVER_DEV_MODE": "1"
+    },
+    "vllm_args": [
+     "--no-enable-prefix-caching",
+     "--attention-backend",
+     "CUSTOM",
+     "--trust-remote-code",
+     "--dtype",
+     "bfloat16"
+    ],
+    "patches": [],
+    "tp": 2,
+    "dp": 4,
+    "max_model_len": 10240
+   },
+   "deployments_json": "/workspace/optimization-heuristics/changes/m-tp2xdp4/deployments.json"
+  }
+ ],
+ "reported_only": [],
+ "rejected_meshes": [
+  {
+   "label": "TP1xDP8",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP1xPCP2xDP4",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    },
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs; PCP does not support DP",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP1xPCP4xDP2",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    },
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs; PCP does not support DP",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP1xPCP8xDP1",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    },
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP1xPP2xDP4",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP1xPCP2xPP2xDP2",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    },
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs; PCP does not support PP; PCP does not support DP",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP1xPCP4xPP2xDP1",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    },
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs; PCP does not support PP",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP1xPP4xDP2",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP1xPCP2xPP4xDP1",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    },
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs; PCP does not support PP",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP1xPP8xDP1",
+   "rejected_by": [
+    {
+     "id": "torchtpu_tp1_no_layout",
+     "reason": "torch_tpu has no device layout for TP1",
+     "failure_signature": "No TPU topology found for count: 1",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP2xDP4+DCP2",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=2 > num_key_value_heads=16"
+    }
+   ]
+  },
+  {
+   "label": "TP2xPCP2xDP2",
+   "rejected_by": [
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs; PCP does not support DP",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP2xPCP4xDP1",
+   "rejected_by": [
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP2xPP2xDP2",
+   "rejected_by": [
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP2xPP2xDP2+DCP2",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=2 > num_key_value_heads=16"
+    },
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP2xPCP2xPP2xDP1",
+   "rejected_by": [
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    },
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs; PCP does not support PP",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP2xPP4xDP1",
+   "rejected_by": [
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP2xPP4xDP1+DCP2",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=2 > num_key_value_heads=16"
+    },
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP4xDP2+DCP2",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=4 > num_key_value_heads=16"
+    }
+   ]
+  },
+  {
+   "label": "TP4xDP2+DCP4",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=4 > num_key_value_heads=16"
+    },
+    {
+     "id": "head_divisibility",
+     "reason": "query heads per KV head (2) % dcp=4 != 0"
+    }
+   ]
+  },
+  {
+   "label": "TP4xPCP2xDP1",
+   "rejected_by": [
+    {
+     "id": "vllm_pcp_limits",
+     "reason": "PCP supports MLA models only; PCP does not support multimodal inputs",
+     "failure_signature": "NotImplementedError: MRV2 PCP currently supports MLA models only.",
+     "observed_on": []
+    }
+   ]
+  },
+  {
+   "label": "TP4xPP2xDP1",
+   "rejected_by": [
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP4xPP2xDP1+DCP2",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=4 > num_key_value_heads=16"
+    },
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP4xPP2xDP1+DCP4",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=4 > num_key_value_heads=16"
+    },
+    {
+     "id": "head_divisibility",
+     "reason": "query heads per KV head (2) % dcp=4 != 0"
+    },
+    {
+     "id": "torchtpu_pp_with_tp_unsupported",
+     "reason": "Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "failure_signature": "NotImplementedError: Pipeline parallelism on TPU does not support tensor parallelism inside a stage yet",
+     "observed_on": [
+      "sha256:107753fc"
+     ]
+    }
+   ]
+  },
+  {
+   "label": "TP8xDP1+DCP2",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=8 > num_key_value_heads=16"
+    }
+   ]
+  },
+  {
+   "label": "TP8xDP1+DCP4",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=8 > num_key_value_heads=16"
+    },
+    {
+     "id": "head_divisibility",
+     "reason": "query heads per KV head (2) % dcp=4 != 0"
+    }
+   ]
+  },
+  {
+   "label": "TP8xDP1+DCP8",
+   "rejected_by": [
+    {
+     "id": "head_divisibility",
+     "reason": "DCP for GQA needs tp=8 > num_key_value_heads=16"
+    },
+    {
+     "id": "head_divisibility",
+     "reason": "query heads per KV head (2) % dcp=8 != 0"
+    }
+   ]
+  }
+ ],
+ "rejected": [],
+ "notes": [],
+ "prefill_collective_bound": true
+}

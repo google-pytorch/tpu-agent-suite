@@ -1,0 +1,53 @@
+{
+ "status": "reported",
+ "summary": "Re-profile of the kept TP 2 x DP 4 server at 8k/1k with 128 users: decode attention (the batched RPA kernel) is 52% of the decode step; the TP all-reduce fell to 6% of the prefill step.",
+ "run_id": "seeded",
+ "traces": [
+  {
+   "path": "/workspace/profile/kept-m-tp2xdp4/8k1k-c128",
+   "label": "kept m-tp2xdp4 8k1k c128",
+   "captured": true,
+   "levers": [
+    {
+     "kind": "kernel-block",
+     "summary": "Batched ragged paged attention decode kernel",
+     "share_pct": 52.0,
+     "source_tool": "xprof op_profile",
+     "phase": "decode",
+     "trace_name": "RPAd-snh-p128-b16-q1-k1280",
+     "source_file": "/workspace/kernel/batched_rpa_decode.py",
+     "next_step": "Write a faster decode attention kernel for these call shapes."
+    },
+    {
+     "kind": "exposed-collective",
+     "summary": "Tensor-parallel all-reduces in prefill",
+     "share_pct": 6.0,
+     "source_tool": "xprof op_profile",
+     "phase": "prefill",
+     "next_step": "None needed."
+    }
+   ],
+   "hot_ops": [
+    {
+     "hlo_op": "RPAd-snh-p128-b16-q1-k1280",
+     "trace_name": "RPAd-snh-p128-b16-q1-k1280",
+     "source_file": "/workspace/kernel/batched_rpa_decode.py",
+     "fusion": null,
+     "fused_with": [],
+     "per_call_us": 512.0,
+     "call_shapes": {
+      "operands": [
+       "bf16[32,16,128]",
+       "bf16[2048,128,16,128]",
+       "s32[32,64]",
+       "s32[32]"
+      ],
+      "outputs": [
+       "bf16[32,16,128]"
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,269 @@
+{
+ "status": "ok",
+ "error": null,
+ "created_at": "2026-10-21T06:01:46.224033+00:00",
+ "base_url": "http://localhost:8000",
+ "model": {
+  "id": "google/gemma-4-31B-it",
+  "root": "/opt/onboarding-host/hf/models--google--gemma-4-31B-it/snapshots/842da3794eaa0b77d5f08bae87a17459d91ff475",
+  "max_model_len": 10240
+ },
+ "client": "vllm bench serve",
+ "settings": {
+  "engine": "vllm",
+  "task": null,
+  "num_prompts": 2048,
+  "endpoint": "completions",
+  "replicates": 1,
+  "range_ratio": 0.0,
+  "request_rate": "inf",
+  "temperature": 0.0,
+  "ignore_eos": true,
+  "seed": 42,
+  "prefix_cache": "reset per run"
+ },
+ "cells": [
+  {
+   "cell": "isl1024_osl1024_c512",
+   "isl": 1024,
+   "osl": 1024,
+   "concurrency": 512,
+   "status": "ok",
+   "replicates": [
+    {
+     "output_tokens_per_s": 2806.764750157722,
+     "total_tokens_per_s": 5613.529500315444,
+     "requests_per_s": 2.7409812013259005,
+     "duration_s": 747.1776891462505,
+     "completed": 2048,
+     "failed": 0,
+     "total_input_tokens": 2097152,
+     "total_output_tokens": 2097152,
+     "ttft_mean_ms": 129309.34024457815,
+     "ttft_p50_ms": 148217.3483890947,
+     "ttft_p90_ms": 148679.52559697442,
+     "ttft_p99_ms": 153496.30897910334,
+     "tpot_mean_ms": 36.32422972387453,
+     "tpot_p50_ms": 35.19865353559877,
+     "tpot_p90_ms": 35.659719946478305,
+     "tpot_p99_ms": 61.98423829366647,
+     "itl_mean_ms": 36.32422972387453,
+     "itl_p50_ms": 30.38199618458748,
+     "itl_p90_ms": 31.77025760523975,
+     "itl_p99_ms": 119.11390074994414,
+     "e2el_mean_ms": 166469.0272521018,
+     "e2el_p50_ms": 184141.20748150162,
+     "e2el_p90_ms": 185074.14828082547,
+     "e2el_p99_ms": 194746.26030263025,
+     "output_tokens_per_s_per_user": 27.529833601474504
+    }
+   ],
+   "seeds": [
+    42
+   ],
+   "command": "/opt/onboarding-host/venvs/vllm-torchtpu/bin/python3 /opt/onboarding-host/tpu-agent-suite-state/jobs/job-20261021054837-82d4ad/serving_benchmark.py --as-vllm-cli bench serve --backend vllm --base-url http://localhost:8000 --endpoint /v1/completions --model google/gemma-4-31B-it --tokenizer /opt/onboarding-host/hf/models--google--gemma-4-31B-it/snapshots/842da3794eaa0b77d5f08bae87a17459d91ff475 --dataset-name random --random-input-len 1024 --random-output-len 1024 --random-range-ratio 0.0 --num-prompts 2048 --max-concurrency 512 --request-rate inf --num-warmups 64 --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90,99 --seed 42 --save-result --result-dir serving_bench/raw --result-filename isl1024_osl1024_c512_r1.json --ignore-eos --temperature 0.0 --dataset-name custom --dataset-path sharegpt_isl1024_c512.jsonl --custom-output-len 1024 --skip-chat-template --no-oversample --save-detailed",
+   "metrics": {
+    "completed": {
+     "mean": 2048.0,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      2048
+     ]
+    },
+    "duration_s": {
+     "mean": 747.1776891462505,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      747.1776891462505
+     ]
+    },
+    "e2el_mean_ms": {
+     "mean": 166469.0272521018,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      166469.0272521018
+     ]
+    },
+    "e2el_p50_ms": {
+     "mean": 184141.20748150162,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      184141.20748150162
+     ]
+    },
+    "e2el_p90_ms": {
+     "mean": 185074.14828082547,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      185074.14828082547
+     ]
+    },
+    "e2el_p99_ms": {
+     "mean": 194746.26030263025,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      194746.26030263025
+     ]
+    },
+    "failed": {
+     "mean": 0.0,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      0
+     ]
+    },
+    "itl_mean_ms": {
+     "mean": 36.32422972387453,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      36.32422972387453
+     ]
+    },
+    "itl_p50_ms": {
+     "mean": 30.38199618458748,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      30.38199618458748
+     ]
+    },
+    "itl_p90_ms": {
+     "mean": 31.77025760523975,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      31.77025760523975
+     ]
+    },
+    "itl_p99_ms": {
+     "mean": 119.11390074994414,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      119.11390074994414
+     ]
+    },
+    "output_tokens_per_s": {
+     "mean": 2806.764750157722,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      2806.764750157722
+     ]
+    },
+    "output_tokens_per_s_per_user": {
+     "mean": 27.529833601474504,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      27.529833601474504
+     ]
+    },
+    "requests_per_s": {
+     "mean": 2.7409812013259005,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      2.7409812013259005
+     ]
+    },
+    "total_input_tokens": {
+     "mean": 2097152.0,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      2097152
+     ]
+    },
+    "total_output_tokens": {
+     "mean": 2097152.0,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      2097152
+     ]
+    },
+    "total_tokens_per_s": {
+     "mean": 5613.529500315444,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      5613.529500315444
+     ]
+    },
+    "tpot_mean_ms": {
+     "mean": 36.32422972387453,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      36.32422972387453
+     ]
+    },
+    "tpot_p50_ms": {
+     "mean": 35.19865353559877,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      35.19865353559877
+     ]
+    },
+    "tpot_p90_ms": {
+     "mean": 35.659719946478305,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      35.659719946478305
+     ]
+    },
+    "tpot_p99_ms": {
+     "mean": 61.98423829366647,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      61.98423829366647
+     ]
+    },
+    "ttft_mean_ms": {
+     "mean": 129309.34024457815,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      129309.34024457815
+     ]
+    },
+    "ttft_p50_ms": {
+     "mean": 148217.3483890947,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      148217.3483890947
+     ]
+    },
+    "ttft_p90_ms": {
+     "mean": 148679.52559697442,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      148679.52559697442
+     ]
+    },
+    "ttft_p99_ms": {
+     "mean": 153496.30897910334,
+     "stdev": 0.0,
+     "cv_pct": 0.0,
+     "values": [
+      153496.30897910334
+     ]
+    }
+   }
+  }
+ ]
+}

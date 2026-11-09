@@ -1,0 +1,16 @@
+{
+  "devices": 2,
+  "hbm_gib_per_device": 96.0,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 16,
+  "use_mla": false,
+  "linear_attention_heads": null,
+  "weights_gib": 58.25,
+  "recommended_engine": "vllm",
+  "smallest_fitting_tp": 2,
+  "source": "recommended",
+  "ok": true,
+  "tensor_parallel_size": 2,
+  "data_parallel_size": 1,
+  "reason": "largest TP that divides 32 heads and whose weight shard (29.1 GiB) fits 80% of 96 GiB, leaving the most HBM for the KV cache and compiling one engine; torch_tpu has no device layout for TP 1 (No TPU topology found for count: 1)"
+}

@@ -138,7 +138,7 @@ Cloud TPU memory architecture is an explicitly addressed, non-coherent scratchpa
 +-------------------+--------------------+---------------------------+
 | Memory Tier       | Capacity           | Bandwidth & Latency       |
 +-------------------+--------------------+---------------------------+
-| HBM (High BW Mem) | 16GB - 192GiB/chip | ~0.8 - 7.4 TB/s (~100-300 |
+| HBM (High BW Mem) | 16 GiB - 192 GiB/chip | ~0.8 - 7.4 TB/s (~100-300 |
 |                   | (Global Storage)   | cycles latency)           |
 +-------------------+--------------------+---------------------------+
 | VMEM (Vector Mem) | 64-128MiB / core   | >25 TB/s on-chip SRAM     |
@@ -167,8 +167,8 @@ Unlike GPUs that rely on hardware-managed L1/L2 caches with dynamic cache lines 
 | TPU v6e (Trillium) | 128 MiB | same |
 | TPU7x (Ironwood) | 64 MiB | same |
 
-- **Physical capacity** is a hard limit. A kernel over it fails to compile, e.g. on TPU7x with libtpu 0.0.44, `Used 64.01M of 63.94M vmem. Exceeded vmem capacity by 72.0K.` (https://github.com/google-pytorch/torchtpu-agents/issues/400#issuecomment-5927027288).
-- **Scoped VMEM limit** is a compiler default, not a hardware wall. Each Pallas kernel is held to its own `vmem_limit_bytes` (Mosaic compiler params) if it passes one; otherwise to the libtpu flag `--xla_tpu_scoped_vmem_limit_kib`; otherwise to a default of 32 MiB. The kernel value wins over the flag, even when it is lower. A value above physical capacity raises no error and is clamped to the usable capacity (63.94 MiB on TPU7x). This is what we measured on TPU7x (tpu7x-8) with libtpu 0.0.44 and 0.0.44.1 (https://github.com/google-pytorch/torchtpu-agents/issues/400#issuecomment-5927027288); the JAX `jax/_src/pallas/mosaic/core.py` docstring (https://github.com/jax-ml/jax/blob/be2c88887fb7/jax/_src/pallas/mosaic/core.py) says `vmem_limit_bytes` must be paired with a larger `--xla_tpu_scoped_vmem_limit_kib`, but these builds did not need the flag. Check your own build before relying on a number. A kernel over the scoped limit fails with E1001 scoped VMEM out of memory (e.g. `Scoped allocation with size 32.00M and limit 32.00M exceeded scoped vmem limit by 4.0K`; `index.py get e1001`).
+- **Physical capacity** is a hard limit. A kernel over it fails to compile, e.g. on TPU7x with libtpu 0.0.44, `Used 64.01M of 63.94M vmem. Exceeded vmem capacity by 72.0K.`.
+- **Scoped VMEM limit** is a compiler default, not a hardware wall. Each Pallas kernel is held to its own `vmem_limit_bytes` (Mosaic compiler params) if it passes one; otherwise to the libtpu flag `--xla_tpu_scoped_vmem_limit_kib`; otherwise to a default of 32 MiB. The kernel value wins over the flag, even when it is lower. A value above physical capacity raises no error and is clamped to the usable capacity (63.94 MiB on TPU7x). This is what we measured on TPU7x (tpu7x-8) with libtpu 0.0.44 and 0.0.44.1; the JAX `jax/_src/pallas/mosaic/core.py` docstring (https://github.com/jax-ml/jax/blob/be2c88887fb7/jax/_src/pallas/mosaic/core.py) says `vmem_limit_bytes` must be paired with a larger `--xla_tpu_scoped_vmem_limit_kib`, but these builds did not need the flag. Check your own build before relying on a number. A kernel over the scoped limit fails with E1001 scoped VMEM out of memory (e.g. `Scoped allocation with size 32.00M and limit 32.00M exceeded scoped vmem limit by 4.0K`; `index.py get e1001`).
 - Memory allocations in VMEM are verified at compile-time by the Mosaic compiler, and an over-budget kernel aborts with:
   ```
   RESOURCE_EXHAUSTED: Ran out of memory in memory space vmem while allocating on stack...

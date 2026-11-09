@@ -29,12 +29,10 @@ Coverage:
 
 from __future__ import annotations
 
-import argparse
 import base64
 import contextlib
 import datetime
 import hashlib
-import http.server
 import io
 import json
 import os
@@ -57,12 +55,16 @@ if str(_framework_dir) not in sys.path:
 
 try:
     from framework.compute import ComputeConfigError
-    from framework.compute.drivers import base, gcs_staging, gke_job, jobs
+    from framework.compute.drivers import (auth_utils, base, gcs_staging,
+                                           gke_job, jobs)
 except ImportError:
     from compute import ComputeConfigError
-    from compute.drivers import base, gcs_staging, gke_job, jobs
+    from compute.drivers import auth_utils, base, gcs_staging, gke_job, jobs
 
 Path = pathlib.Path
+
+# Taken before setUpModule stubs it out, for the test of the token's rules.
+_REAL_MINT_BUCKET_TOKEN = gcs_staging.mint_bucket_token
 
 try:
     from google.auth import exceptions as _google_auth_errors
@@ -117,6 +119,23 @@ def workload_command(container: dict[str, Any]) -> list[str]:
     return command
 
 
+def env_behind(prologue: list[str], image_env: dict[str, str],
+               names: Any) -> dict[str, str]:
+    """Which of `names` a workload behind the cache `prologue` sees set,
+    and to what, in a container whose image sets `image_env`."""
+    printer = ("import json, os, sys; print(json.dumps({n: os.environ[n] "
+               "for n in sys.argv[1:] if n in os.environ}))")
+    proc = subprocess.run(prologue + [sys.executable, "-c", printer, *names],
+                          env={
+                              "PATH": os.environ["PATH"],
+                              **image_env
+                          },
+                          capture_output=True,
+                          text=True,
+                          check=True)
+    return json.loads(proc.stdout)
+
+
 class FakeKubectl:
     """Scripted stand-in for kubectl that records what it was asked to do.
 
@@ -154,6 +173,14 @@ class FakeKubectl:
                 return json.loads(stdin)
         raise AssertionError("no manifest was applied")
 
+    def applied_pod_spec(self) -> dict[str, Any]:
+        """The pod spec of the Job sent to `kubectl apply -f -`."""
+        return self.applied_manifest()["spec"]["template"]["spec"]
+
+    def applied_container(self) -> dict[str, Any]:
+        """The first container of the applied Job's pod."""
+        return self.applied_pod_spec()["containers"][0]
+
 
 def make_driver(**overrides: Any) -> gke_job.GkeJobDriver:
     params: dict[str, Any] = {
@@ -166,222 +193,66 @@ def make_driver(**overrides: Any) -> gke_job.GkeJobDriver:
     return gke_job.GkeJobDriver.from_params(params)
 
 
+def hello_script(test: unittest.TestCase) -> Path:
+    """A `hello_tpu.py` in a temporary directory removed when `test` ends."""
+    tmp = Path(test.enterContext(tempfile.TemporaryDirectory()))
+    script = tmp / "hello_tpu.py"
+    script.write_text("print('hi')\n", encoding="utf-8")
+    return script
+
+
 class TestGkeJobParams(unittest.TestCase):
 
-    def test_defaults_applied_in_from_params(self):
-        driver = gke_job.GkeJobDriver.from_params({})
-        self.assertEqual(driver.namespace, gke_job.DEFAULT_NAMESPACE)
-        self.assertEqual(driver.tpu_chips, gke_job.DEFAULT_CHIPS)
-        self.assertEqual(driver.python_interpreter, "python3")
-        self.assertIsNone(driver.queue)
-
-    def test_empty_strings_are_treated_as_unset(self):
-        # environment.json answers default to "" rather than being absent, so
-        # a blank must not become a namespace named "" or an image named "".
-        driver = gke_job.GkeJobDriver.from_params({
-            "namespace": "",
-            "image": "",
-            "queue": "",
-        })
-        self.assertEqual(driver.namespace, gke_job.DEFAULT_NAMESPACE)
-        self.assertIsNone(driver.image)
-        self.assertIsNone(driver.queue)
-
-    def test_inspect_does_not_require_dispatch_fields(self):
-        # Rejecting these up front would make `inspect` unusable on a cluster
-        # whose node pool has not been chosen yet.
-        driver = gke_job.GkeJobDriver.from_params({"namespace": "ns"})
-        self.assertIsNone(driver.image)
-        self.assertIsNone(driver.tpu_accelerator)
-
-    def test_non_integer_chips_rejected(self):
-        with self.assertRaises(ComputeConfigError) as ctx:
-            gke_job.GkeJobDriver.from_params({"tpu_chips": "four"})
-        self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_zero_chips_rejected(self):
-        # A pod that requests no chips is scheduled without a device and
-        # silently computes on the CPU, which is the one outcome this whole
-        # path exists to detect.
-        with self.assertRaises(ComputeConfigError) as ctx:
-            gke_job.GkeJobDriver.from_params({"tpu_chips": 0})
-        self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_string_chips_from_json_are_coerced(self):
-        driver = gke_job.GkeJobDriver.from_params({"tpu_chips": "8"})
-        self.assertEqual(driver.tpu_chips, 8)
-
-    def test_priority_validation(self):
-        for valid in ("medium", "low", "very-low"):
-            driver = gke_job.GkeJobDriver.from_params({"priority": valid})
-            self.assertEqual(driver.priority, valid)
-
-        with self.assertRaises(ComputeConfigError) as ctx:
-            gke_job.GkeJobDriver.from_params({"priority": "high"})
-        self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_declared_duration_minutes_validation(self):
-        driver = gke_job.GkeJobDriver.from_params(
-            {"declared_duration_minutes": "15"})
-        self.assertEqual(driver.declared_duration_minutes, 15)
-
-        with self.assertRaises(ComputeConfigError) as ctx:
-            gke_job.GkeJobDriver.from_params(
-                {"declared_duration_minutes": "invalid"})
-        self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-        driver = gke_job.GkeJobDriver.from_params(
-            {"declared_duration_minutes": 0})
-        self.assertIsNone(driver.declared_duration_minutes)
-
-        with self.assertRaises(ComputeConfigError) as ctx:
-            gke_job.GkeJobDriver.from_params({"declared_duration_minutes": -1})
-        self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_shm_size_gb_validation(self):
-        # Absent and blank (an unanswered environment.json value) both take
-        # the default rather than leaving the pod on the runtime's 64 MB.
-        for unset in ({}, {"shm_size_gb": ""}):
-            driver = gke_job.GkeJobDriver.from_params(unset)
-            self.assertEqual(driver.shm_size_gb, gke_job.DEFAULT_SHM_SIZE_GB)
-
-        driver = gke_job.GkeJobDriver.from_params({"shm_size_gb": "128"})
-        self.assertEqual(driver.shm_size_gb, 128)
-
-        for invalid in ("lots", 0, -1):
-            with self.assertRaises(ComputeConfigError) as ctx:
-                gke_job.GkeJobDriver.from_params({"shm_size_gb": invalid})
-            self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_hf_cache_pvc_validation(self):
-        # Absent and blank (an unanswered install question) mean no cache.
-        for unset in ({}, {"hf_cache_pvc": ""}, {"hf_cache_pvc": "  "}):
-            driver = gke_job.GkeJobDriver.from_params(unset)
-            self.assertIsNone(driver.hf_cache_pvc)
-
-        driver = gke_job.GkeJobDriver.from_params(
-            {"hf_cache_pvc": " hf-cache.shared "})
-        self.assertEqual(driver.hf_cache_pvc, "hf-cache.shared")
-
-        for invalid in ("HF_Cache", "-cache", "cache/", "a" * 254):
-            with self.assertRaises(ComputeConfigError) as ctx:
-                gke_job.GkeJobDriver.from_params({"hf_cache_pvc": invalid})
-            self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_compile_cache_max_age_days_validation(self):
-        self.assertEqual(
-            gke_job.GkeJobDriver.from_params({}).compile_cache_max_age_days,
-            gke_job.COMPILE_CACHE_MAX_AGE_DAYS)
-        self.assertEqual(
-            gke_job.GkeJobDriver.from_params({
-                "compile_cache_max_age_days": 0
-            }).compile_cache_max_age_days, 0)
-        for invalid in ("soon", -1):
-            with self.assertRaises(ComputeConfigError) as ctx:
-                gke_job.GkeJobDriver.from_params(
-                    {"compile_cache_max_age_days": invalid})
-            self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_namespace_is_never_derived_from_the_queue(self):
-        """Kueue co-locates a LocalQueue with its Jobs; it does not co-name.
-
-        XPK's `multislice-queue` and Kueue's quickstart `user-queue` both live
-        in `default`, so a namespace named after the queue would not exist.
-        """
-        driver = gke_job.GkeJobDriver.from_params({"queue": "priority-dev"})
-        self.assertEqual(driver.namespace, gke_job.DEFAULT_NAMESPACE)
-
-        # Explicit non-default namespace is preserved
-        driver = gke_job.GkeJobDriver.from_params({
-            "queue": "priority-dev",
-            "namespace": "custom-ns"
-        })
-        self.assertEqual(driver.namespace, "custom-ns")
-
-        # An explicit "default" is kept, queue or no queue.
-        driver = gke_job.GkeJobDriver.from_params({
-            "queue": "priority-dev",
-            "namespace": "default"
-        })
-        self.assertEqual(driver.namespace, "default")
-        driver = gke_job.GkeJobDriver(queue="priority-dev",
-                                      namespace="default")
-        self.assertEqual(driver.namespace, "default")
-
-        # Blank is unset, as the installer's empty answers are.
-        driver = gke_job.GkeJobDriver.from_params({
-            "queue": "priority-dev",
-            "namespace": " "
-        })
-        self.assertEqual(driver.namespace, gke_job.DEFAULT_NAMESPACE)
-
-    def test_cli_flags_registered_and_not_reserved(self):
-        parser = argparse.ArgumentParser(add_help=False)
-        gke_job.GkeJobDriver.register_cli_args(parser)
-        args = parser.parse_args([
-            "--tpu-accelerator", "tpu7x", "--queue", "q",
-            "--declared-duration-minutes", "30", "--job-name-prefix", "agent"
-        ])
-        self.assertEqual(args.tpu_accelerator, "tpu7x")
-        self.assertEqual(args.queue, "q")
-        self.assertEqual(args.declared_duration_minutes, 30)
-        self.assertEqual(args.job_name_prefix, "agent")
-        self.assertFalse(hasattr(args, "cpu_requests"))
-        self.assertEqual(
-            parser.parse_args(["--cpu-requests",
-                               "cpu=2,memory=8Gi"]).cpu_requests,
-            "cpu=2,memory=8Gi")
-        # Unspecified flags must be absent, not None: the CLI forwards every
-        # registered flag it finds into param_overrides, which outrank
-        # environment.json.
-        self.assertFalse(hasattr(args, "image"))
-
-    def test_kube_context_from_params(self):
-        for raw, want in ((None, None), ("  ", None), (" ctx-a ", "ctx-a")):
-            self.assertEqual(
-                gke_job.GkeJobDriver.from_params({
-                    "kube_context": raw
-                }).kube_context, want)
-        self.assertEqual(
-            make_driver(kube_context="ctx-a",
-                        kubeconfig="/k")._kubectl_cmd(["get", "pods"]), [
-                            "kubectl", "--kubeconfig", "/k", "--context",
-                            "ctx-a", "get", "pods"
-                        ])
-
-    def test_preflight_with_bad_context_still_checks_the_profile(self):
-        driver = make_driver(kube_context="nope")
-        check = gke_job.base.PreflightCheck
-        with patch.object(gke_job.base, "kube_context_check",
-                          return_value=check("kube_context", "fail", "x")), \
-             patch.object(gke_job.base, "gke_credential_checks",
-                          return_value=[check("gcloud:account", "ok", "me")]), \
-             patch.object(gke_job, "_image_check",
-                          return_value=check("image", "ok", "i")), \
-             patch.object(gke_job.auth_utils, "_cluster") as cluster, \
-             patch.object(driver, "_preflight_cluster") as nodes:
-            checks: list = []
-            self.assertFalse(driver._preflight_target(checks))
-        cluster.assert_not_called()
-        nodes.assert_not_called()
-        self.assertEqual([c.name for c in checks],
-                         ["kube_context", "gcloud:account", "image"])
-
-    def test_job_name_prefix_validation(self):
-        for raw, want in ((None, None), (" ", None), ("Agent_Evals",
-                                                      "agent-evals")):
-            driver = gke_job.GkeJobDriver.from_params({"job_name_prefix": raw})
-            self.assertEqual(driver.job_name_prefix, want)
-        for invalid in ("___", "a" * (gke_job.MAX_JOB_NAME_PREFIX_LEN + 1)):
-            with self.assertRaises(ComputeConfigError) as ctx:
-                gke_job.GkeJobDriver.from_params({"job_name_prefix": invalid})
+    def test_field_validation(self):
+        shm = gke_job.gke_common.DEFAULT_SHM_SIZE_GB
+        # (field, value, what the config attribute becomes). environment.json
+        # answers default to "": a blank is unset, and JSON answers are
+        # strings. A blank shm_size_gb takes the default rather than leaving
+        # the pod on the runtime's 64 MB.
+        accepted = [
+            ("namespace", "", gke_job.gke_common.DEFAULT_NAMESPACE),
+            ("image", "", None),
+            ("tpu_chips", "8", 8),
+            ("declared_duration_minutes", "15", 15),
+            ("declared_duration_minutes", 0, None),
+            ("shm_size_gb", "", shm),
+            ("shm_size_gb", "128", 128),
+            ("hf_cache_pvc", "  ", None),
+            ("hf_cache_pvc", " hf-cache.shared ", "hf-cache.shared"),
+            ("compile_cache_max_age_days", 0, 0),
+            ("kube_context", " ctx-a ", "ctx-a"),
+            ("job_name_prefix", " ", None),
+            ("job_name_prefix", "Agent_Evals", "agent-evals"),
+        ]
+        for field, value, want in accepted:
+            with self.subTest(field=field, value=value):
+                driver = gke_job.GkeJobDriver.from_params({field: value})
+                self.assertEqual(getattr(driver.config, field), want)
+        rejected = [
+            ("tpu_chips", "four"),
+            # A pod that requests no chips silently computes on the CPU.
+            ("tpu_chips", 0),
+            ("priority", "high"),
+            ("declared_duration_minutes", -1),
+            ("shm_size_gb", 0),
+            ("hf_cache_pvc", "HF_Cache"),
+            ("hf_cache_pvc", "a" * 254),
+            ("compile_cache_max_age_days", -1),
+            ("job_name_prefix", "___"),
+            ("job_name_prefix",
+             "a" * (gke_job.profile_settings.MAX_JOB_NAME_PREFIX_LEN + 1)),
+        ]
+        for field, value in rejected:
+            with self.subTest(field=field, value=value), \
+                    self.assertRaises(ComputeConfigError) as ctx:
+                gke_job.GkeJobDriver.from_params({field: value})
             self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
 
 
 class TestGkeJobName(unittest.TestCase):
     """How `_job_name` turns a requested name into a Job name."""
 
-    @patch.object(gke_job.jobs, "new_job_id", return_value="job-1")
+    @patch.object(jobs, "new_job_id", return_value="job-1")
     def test_names_are_cleaned_and_prefixed_once(self, _):
         plain, agent = make_driver(), make_driver(job_name_prefix="agent")
         for driver, requested, unique, want in (
@@ -396,51 +267,25 @@ class TestGkeJobName(unittest.TestCase):
         with self.assertRaises(ComputeConfigError) as ctx:
             plain._job_name("___", unique=False)
         self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
-
-    def test_unique_suffix_survives_trimming_and_renaming(self):
-        driver = make_driver(job_name_prefix="agent")
-        name = driver._job_name("Bench_" + "x" * 100, unique=True)
-        self.assertEqual(len(name), gke_job.MAX_JOB_NAME_LEN)
+        # A unique suffix survives trimming, and naming the result again
+        # (as `submit` does with the name `run` picked) leaves it alone.
+        name = agent._job_name("Bench_" + "x" * 100, unique=True)
+        self.assertEqual(len(name), gke_job.profile_settings.MAX_JOB_NAME_LEN)
         self.assertRegex(name, r"^agent-bench-x+-[0-9a-f]{6}$")
-        self.assertNotEqual(driver._job_name("b", unique=True),
-                            driver._job_name("b", unique=True))
-        # `run` passes the name it picked to `submit`, which names it again.
-        self.assertEqual(driver._job_name(name, unique=False), name)
+        self.assertEqual(agent._job_name(name, unique=False), name)
 
 
 class TestGkeJobSubmit(unittest.TestCase):
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.script = Path(self.tmp.name) / "hello_tpu.py"
-        self.script.write_text("print('hi')\n", encoding="utf-8")
-        self.addCleanup(self.tmp.cleanup)
+        self.script = hello_script(self)
+        self.tmp = self.script.parent
         self.enterContext(_job_store())
 
     def submit(self, fake: FakeKubectl, **overrides: Any) -> str:
         driver = make_driver(**overrides)
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             return driver.submit(str(self.script), job_name="run-1")
-
-    def test_configmap_created_before_job(self):
-        fake = FakeKubectl()
-        self.submit(fake)
-        # After the lookup that checks the name is free.
-        verbs = [" ".join(c) for c in fake.calls]
-        self.assertIn("get configmap,job run-1", verbs[0])
-        self.assertIn("create configmap run-1", verbs[1])
-        self.assertIn(f"--from-file=hello_tpu.py={self.script}", verbs[1])
-        self.assertIn("apply", verbs[2])
-
-    def test_job_id_is_the_job_name(self):
-        self.assertEqual(self.submit(FakeKubectl()), "run-1")
-
-    def test_submit_adds_the_prefix_but_no_suffix(self):
-        fake = FakeKubectl()
-        self.assertEqual(self.submit(fake, job_name_prefix="agent"),
-                         "agent-run-1")
-        self.assertEqual(fake.applied_manifest()["metadata"]["name"],
-                         "agent-run-1")
 
     def test_a_name_held_outside_the_run_gets_a_suffix(self):
         # Refusing with "cancel it if it is yours" led an agent to cancel
@@ -461,7 +306,7 @@ class TestGkeJobSubmit(unittest.TestCase):
                               run_id="run-a")
         fake = FakeKubectl({"get configmap,job": (0, "job.batch/x\n", "")})
         driver = make_driver(job_name_prefix="agent")
-        with patch.object(gke_job.subprocess, "run", fake), \
+        with patch.object(subprocess, "run", fake), \
                 self.assertRaises(ComputeConfigError) as ctx:
             driver.submit(str(self.script), job_name="run-1", run_id="run-a")
         self.assertEqual(ctx.exception.error_code, "NAME_TAKEN")
@@ -477,79 +322,25 @@ class TestGkeJobSubmit(unittest.TestCase):
                       ctx.exception.message)
         self.assertNotIn("job cancel", ctx.exception.message)
         # The name, then each suffixed candidate; nothing created.
-        self.assertEqual(len(fake.calls), 1 + gke_job.NAME_SUFFIX_ATTEMPTS)
+        self.assertEqual(len(fake.calls),
+                         1 + gke_job.driver.NAME_SUFFIX_ATTEMPTS)
         self.assertIsNone(fake.find("create"))
-
-    def test_a_failed_lookup_leaves_the_check_to_the_create(self):
-        # e.g. an account allowed to create ConfigMaps but not to read them.
-        fake = FakeKubectl(
-            {"get configmap,job": (1, "", "Forbidden: cannot get")})
-        self.assertEqual(self.submit(fake), "run-1")
-        self.assertIsNotNone(fake.find("apply"))
-
-    def test_manifest_carries_the_load_bearing_fields(self):
-        fake = FakeKubectl()
-        self.submit(fake)
-        manifest = fake.applied_manifest()
-        pod_spec = manifest["spec"]["template"]["spec"]
-        container = pod_spec["containers"][0]
-
-        self.assertEqual(manifest["spec"]["backoffLimit"], 0)
-        self.assertEqual(
-            pod_spec["nodeSelector"],
-            {
-                gke_job.ACCELERATOR_LABEL: "tpu7x",
-                gke_job.TOPOLOGY_LABEL: "2x2x1",
-            },
-        )
-        self.assertNotIn("serviceAccountName", pod_spec)
-        self.assertEqual(pod_spec["tolerations"][0]["key"],
-                         gke_job.TPU_RESOURCE)
-        self.assertEqual(
-            container["resources"]["limits"][gke_job.TPU_RESOURCE],
-            gke_job.DEFAULT_CHIPS,
-        )
-        # /workspace is taken inside the torch_tpu images; mounting over it
-        # fails container creation.
-        self.assertEqual(container["volumeMounts"][0]["mountPath"], "/app")
-        self.assertEqual(workload_command(container),
-                         ["python3", "/app/hello_tpu.py"])
-        self.assertEqual(pod_spec["volumes"][0]["configMap"]["name"], "run-1")
-
-    def test_manifest_mounts_a_memory_backed_dev_shm(self):
-        # The runtime's 64 MB default breaks vLLM past TP=4 and torch_tpu's
-        # compilation cache, and the container cannot remount it.
-        fake = FakeKubectl()
-        self.submit(fake, shm_size_gb=16)
-        pod_spec = fake.applied_manifest()["spec"]["template"]["spec"]
-        mounts = {
-            m["name"]: m["mountPath"]
-            for m in pod_spec["containers"][0]["volumeMounts"]
-        }
-        volumes = {v["name"]: v for v in pod_spec["volumes"]}
-        self.assertEqual(mounts["dshm"], "/dev/shm")
-        self.assertEqual(volumes["dshm"]["emptyDir"], {
-            "medium": "Memory",
-            "sizeLimit": "16Gi"
-        })
-        # Its cap, for fetch_weights to size a download against: statvfs in
-        # the pod can report the node's whole memory instead.
-        env = {e["name"]: e["value"] for e in pod_spec["containers"][0]["env"]}
-        self.assertEqual(env["TPU_AGENT_SUITE_SHM_LIMIT_BYTES"],
-                         str(16 * 2**30))
 
     def test_manifest_mounts_the_hf_cache_pvc(self):
         # Without it each pod starts with an empty filesystem and downloads
         # the model again: a 65 GB Qwen took ~50 minutes per pod.
         fake = FakeKubectl()
         self.submit(fake, hf_cache_pvc="hf-cache")
-        pod_spec = fake.applied_manifest()["spec"]["template"]["spec"]
+        pod_spec = fake.applied_pod_spec()
         container = pod_spec["containers"][0]
         mounts = {m["name"]: m["mountPath"] for m in container["volumeMounts"]}
         volumes = {v["name"]: v for v in pod_spec["volumes"]}
         self.assertEqual(mounts["hf-cache"], "/hf-cache")
         self.assertEqual(volumes["hf-cache"]["persistentVolumeClaim"],
                          {"claimName": "hf-cache"})
+        # Service links put a shared namespace's Services in the pod's env
+        # (VLLM_..._PORT=tcp://...), which vLLM misreads as its settings.
+        self.assertIs(pod_spec["enableServiceLinks"], False)
         # The hub cache only: HF_HOME would also put the token on it.
         env = {e["name"]: e["value"] for e in container["env"]}
         env.pop("TPU_AGENT_SUITE_SHM_LIMIT_BYTES")
@@ -581,26 +372,12 @@ class TestGkeJobSubmit(unittest.TestCase):
         ]
         for image_env, seen in cases:
             with self.subTest(image_env=image_env):
-                proc = subprocess.run(prologue + [
-                    sys.executable, "-c",
-                    "import json, os, sys; print(json.dumps({n: "
-                    "os.environ[n] for n in sys.argv[1:] "
-                    "if n in os.environ}))", *names
-                ],
-                                      env={
-                                          "PATH": os.environ["PATH"],
-                                          **image_env
-                                      },
-                                      capture_output=True,
-                                      text=True,
-                                      check=True)
-                self.assertEqual(json.loads(proc.stdout), seen)
-        self.assertRegex(gke_job.compile_cache_key("gcr.io/p/img:v1"),
+                self.assertEqual(env_behind(prologue, image_env, names), seen)
+        self.assertRegex(gke_job.manifest.compile_cache_key("gcr.io/p/img:v1"),
                          r"^img-v1-[0-9a-f]{12}$")
-        self.assertEqual(mounts["dshm"], "/dev/shm")
 
     def test_compile_cache_prune_removes_only_stale_folders(self):
-        mount = Path(self.tmp.name) / "vol"
+        mount = self.tmp / "vol"
         shape = mount / "compile-cache" / "tpu7x-2x2x1"
         # (folder, age in days of its file, of its stamp or None, kept)
         folders = [("old", 30, 30, False), ("old-unstamped", 30, None, False),
@@ -618,12 +395,12 @@ class TestGkeJobSubmit(unittest.TestCase):
                                check=True)
         # Over 90% full: the caches stay in the pod, so `current` is not
         # restamped, and it is still never removed.
-        bin_dir = Path(self.tmp.name) / "bin"
+        bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
         (bin_dir /
          "df").write_text("#!/bin/sh\necho head\necho fs 100 95 5 95% /vol\n")
         (bin_dir / "df").chmod(0o755)
-        command = gke_job._compile_cache_command([
+        command = gke_job.manifest._compile_cache_command([
             sys.executable, "-c", "import os; print(os.environ['"
             "VLLM_CACHE_ROOT'])"
         ], str(shape / "current"), 14, str(mount))
@@ -634,186 +411,41 @@ class TestGkeJobSubmit(unittest.TestCase):
                               text=True,
                               check=True)
         self.assertEqual(proc.stdout.strip(),
-                         gke_job.POD_CACHE_ENV["VLLM_CACHE_ROOT"][0])
+                         gke_job.manifest.POD_CACHE_ENV["VLLM_CACHE_ROOT"][0])
         self.assertIn("95% full", proc.stderr)
         for name, _, _, kept in folders:
             self.assertEqual((shape / name).is_dir(), kept, name)
 
-    def test_manifest_without_hf_cache_pvc_caches_on_dev_shm(self):
-        # The node's overlay can hold less than one model's weights; a pod
-        # that downloads onto it is evicted with exit 137 part-way.
-        fake = FakeKubectl()
-        self.submit(fake)
-        pod_spec = fake.applied_manifest()["spec"]["template"]["spec"]
-        container = pod_spec["containers"][0]
-        # Set in the container, not the pod spec, which would override the
-        # image's own ENV.
-        self.assertEqual([e["name"] for e in container["env"]],
-                         ["TPU_AGENT_SUITE_SHM_LIMIT_BYTES"])
-        prologue = container["command"][:4]
-        defaults = {
-            "HF_HUB_CACHE": "/dev/shm/cache/huggingface/hub",
-            "TPU_AGENT_SUITE_POD_HF_CACHE": "/dev/shm/cache/huggingface/hub",
-            "VLLM_CACHE_ROOT": "/dev/shm/cache/vllm",
-            "XDG_CACHE_HOME": "/dev/shm/cache",
-            "TORCHINDUCTOR_CACHE_DIR": "/dev/shm/cache/torchinductor",
-            "TMPDIR": "/dev/shm",
-        }
-        cases = [
-            # (the image's ENV, what the workload sees)
-            ({}, defaults),
-            # An image that moves its caches keeps them: HF_HOME moves the
-            # hub cache and XDG_CACHE_HOME vLLM's, so neither is set, and
-            # the hub cache is not named as the pod's to prune.
-            ({
-                "HF_HOME": "/opt/hf",
-                "XDG_CACHE_HOME": "/opt/cache",
-                "TMPDIR": "/scratch",
-            }, {
-                "HF_HOME": "/opt/hf",
-                "XDG_CACHE_HOME": "/opt/cache",
-                "TMPDIR": "/scratch",
-                "TORCHINDUCTOR_CACHE_DIR": "/dev/shm/cache/torchinductor",
-            }),
-        ]
-        names = sorted({*defaults, "HF_HOME"})
-        for image_env, seen in cases:
-            with self.subTest(image_env=image_env):
-                proc = subprocess.run(prologue + [
-                    sys.executable, "-c",
-                    "import json, os, sys; print(json.dumps({n: "
-                    "os.environ[n] for n in sys.argv[1:] "
-                    "if n in os.environ}))", *names
-                ],
-                                      env={
-                                          "PATH": os.environ["PATH"],
-                                          **image_env
-                                      },
-                                      capture_output=True,
-                                      text=True,
-                                      check=True)
-                self.assertEqual(json.loads(proc.stdout), seen)
-        # No volume of its own: it shares /dev/shm's shm_size_gb cap.
-        self.assertEqual({v["name"]
-                          for v in pod_spec["volumes"]}, {"script", "dshm"})
-
-    def test_manifest_disables_service_links(self):
-        # Service links put every Service in a shared namespace into the
-        # pod's environment, e.g. VLLM_..._PORT=tcp://..., which vLLM
-        # misreads as its own settings.
-        fake = FakeKubectl()
-        self.submit(fake)
-        pod_spec = fake.applied_manifest()["spec"]["template"]["spec"]
-        self.assertIs(pod_spec["enableServiceLinks"], False)
-
-    def test_script_args_reach_the_container_command(self):
-        fake = FakeKubectl()
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.submit(str(self.script),
-                          job_name="run-1",
-                          args=["--dim", "8"])
-        container = fake.applied_manifest(
-        )["spec"]["template"]["spec"]["containers"][0]
-        command = workload_command(container)
-        self.assertEqual(command[-2:], ["--dim", "8"])
-
-    def test_no_kueue_labels_on_a_direct_cluster(self):
-        fake = FakeKubectl()
-        self.submit(fake)
-        self.assertNotIn("labels", fake.applied_manifest()["metadata"])
-        self.assertNotIn("metadata",
-                         fake.applied_manifest()["spec"]["template"])
-
     def test_kueue_labels_applied_when_queue_configured(self):
         fake = FakeKubectl()
-        self.submit(fake, queue="default", priority="low")
+        self.submit(fake,
+                    queue="default",
+                    priority="low",
+                    declared_duration_minutes=15,
+                    kubeconfig="/k",
+                    kube_context="ctx-a")
+        # Every call names the cluster: without --context, the wrong one.
+        for cmd in fake.calls:
+            self.assertEqual(cmd[1:5],
+                             ["--kubeconfig", "/k", "--context", "ctx-a"])
         manifest = fake.applied_manifest()
         labels = manifest["metadata"]["labels"]
-        self.assertEqual(labels[gke_job.QUEUE_LABEL], "default")
-        self.assertEqual(labels[gke_job.PRIORITY_LABEL], "low")
+        self.assertEqual(labels[gke_job.gke_common.QUEUE_LABEL], "default")
+        self.assertEqual(labels[gke_job.gke_common.PRIORITY_LABEL], "low")
 
         pod_labels = manifest["spec"]["template"]["metadata"]["labels"]
         self.assertEqual(pod_labels["namespace"], "default")
         self.assertEqual(pod_labels["priority"], "low")
-
-    def test_queue_without_priority_omits_priority_label(self):
-        """A cluster with no WorkloadPriorityClass admits unlabelled Jobs only.
-
-        Kueue refuses a Job naming a priority class that does not exist, so
-        a default nobody chose would make every Job inadmissible there.
-        """
-        for priority in (None, ""):
-            with self.subTest(priority=priority):
-                fake = FakeKubectl()
-                self.submit(fake, queue="default", priority=priority)
-                manifest = fake.applied_manifest()
-                labels = manifest["metadata"]["labels"]
-                self.assertEqual(labels[gke_job.QUEUE_LABEL], "default")
-                self.assertNotIn(gke_job.PRIORITY_LABEL, labels)
-                pod_labels = manifest["spec"]["template"]["metadata"]["labels"]
-                self.assertNotIn("priority", pod_labels)
-
-    def test_kueue_pod_labels_with_declared_duration(self):
-        fake = FakeKubectl()
-        self.submit(fake, queue="default", declared_duration_minutes=15)
-        pod_labels = fake.applied_manifest(
-        )["spec"]["template"]["metadata"]["labels"]
         self.assertEqual(pod_labels["declared-duration-minutes"], "15")
-
-    def test_chip_count_is_configurable(self):
+        # Kueue refuses a Job naming a WorkloadPriorityClass that does not
+        # exist, so no priority chosen means no priority label at all.
         fake = FakeKubectl()
-        self.submit(fake, tpu_chips=8)
-        limits = fake.applied_manifest(
-        )["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]
-        self.assertEqual(limits[gke_job.TPU_RESOURCE], 8)
-
-    def test_missing_dispatch_fields_named_together(self):
-        driver = gke_job.GkeJobDriver.from_params({})
-        with self.assertRaises(ComputeConfigError) as ctx:
-            driver.submit(str(self.script))
-        message = ctx.exception.message
-        self.assertEqual(ctx.exception.error_code, "MISSING_FIELD")
-        # All three at once: reporting them one per attempt costs three round
-        # trips to find out what a dispatch needs.
-        for field in ("image", "tpu_accelerator", "tpu_topology"):
-            self.assertIn(field, message)
-        self.assertIn("--tpu-accelerator", message)
-
-    def test_configmap_removed_when_the_apply_fails(self):
-        # Otherwise the ConfigMap is orphaned and invisible, and a retry
-        # collides with the name instead of dispatching.
-        fake = FakeKubectl({"apply": (1, "", "admission webhook denied")})
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            with self.assertRaises(ComputeConfigError):
-                driver.submit(str(self.script), job_name="run-1")
-        self.assertIsNotNone(fake.find("delete configmap run-1"))
-
-    def test_kubectl_stderr_reaches_the_error_message(self):
-        fake = FakeKubectl({"create configmap": (1, "", "Forbidden: no RBAC")})
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            with self.assertRaises(ComputeConfigError) as ctx:
-                driver.submit(str(self.script), job_name="run-1")
-        self.assertEqual(ctx.exception.error_code, "KUBECTL_FAILED")
-        self.assertIn("Forbidden: no RBAC", ctx.exception.message)
-
-    def test_kubeconfig_passed_to_every_call(self):
-        fake = FakeKubectl()
-        self.submit(fake, kubeconfig="/tmp/kubeconfig")
-        for cmd in fake.calls:
-            self.assertIn("--kubeconfig", cmd)
-
-    def test_kube_context_passed_to_every_call_only_when_set(self):
-        fake = FakeKubectl()
-        self.submit(fake, kube_context="ctx-a")
-        for cmd in fake.calls:
-            self.assertEqual(cmd[cmd.index("--context") + 1], "ctx-a")
-        fake = FakeKubectl()
-        self.submit(fake)
-        for cmd in fake.calls:
-            self.assertNotIn("--context", cmd)
+        self.submit(fake, queue="default", priority="")
+        manifest = fake.applied_manifest()
+        self.assertNotIn(gke_job.gke_common.PRIORITY_LABEL,
+                         manifest["metadata"]["labels"])
+        self.assertNotIn("priority",
+                         manifest["spec"]["template"]["metadata"]["labels"])
 
     def test_colocate_takes_the_servers_placement_without_chips(self):
         server = {
@@ -828,10 +460,10 @@ class TestGkeJobSubmit(unittest.TestCase):
         pods = json.dumps({"items": [{"spec": server}]})
         fake = FakeKubectl({"get pods": (0, pods, "")})
         self.submit(fake, colocate_with="srv", colocate_requests="cpu=1")
-        pod_spec = fake.applied_manifest()["spec"]["template"]["spec"]
+        pod_spec = fake.applied_pod_spec()
         self.assertEqual(pod_spec["nodeSelector"], {
             "flavor": "tpu",
-            gke_job.HOSTNAME_LABEL: "n1"
+            gke_job.gke_common.HOSTNAME_LABEL: "n1"
         })
         self.assertEqual(pod_spec["tolerations"], server["tolerations"])
         self.assertEqual(pod_spec["containers"][0]["resources"],
@@ -845,36 +477,31 @@ class TestGkeJobSubmit(unittest.TestCase):
 
     def test_cpu_requests_book_no_tpu_node(self):
         """No chips, and nothing that sends the pod to a TPU node: only the
-        Workload Identity selector, no TPU toleration. Not with colocation."""
+        Workload Identity selector, no TPU toleration. Not with colocation.
+        The profile's TPU generation is passed on, as probe names it, for a
+        check that plans for that TPU without a chip."""
         fake = FakeKubectl()
         self.submit(fake,
                     cpu_requests="cpu=2,memory=8Gi",
                     pod_service_account="agent-sa")
-        pod_spec = fake.applied_manifest()["spec"]["template"]["spec"]
+        pod_spec = fake.applied_pod_spec()
         self.assertEqual(pod_spec["nodeSelector"],
-                         {gke_job.WORKLOAD_IDENTITY_LABEL: "true"})
+                         {gke_job.gke_common.WORKLOAD_IDENTITY_LABEL: "true"})
         self.assertNotIn("tolerations", pod_spec)
         self.assertEqual(pod_spec["containers"][0]["resources"],
                          {"requests": {
                              "cpu": "2",
                              "memory": "8Gi"
                          }})
+        env = {
+            e["name"]: e.get("value")
+            for e in fake.applied_container()["env"]
+        }
+        self.assertEqual(env[gke_job.gke_common.CHIPLESS_TPU_ENV], "tpu7x")
         with self.assertRaises(ComputeConfigError):
             make_driver(cpu_requests="cpu=2",
                         colocate_with="srv",
                         colocate_requests="cpu=1")
-
-    def test_a_cpu_job_is_told_the_profiles_tpu_generation(self):
-        """As probe names it, for a check that plans for that TPU without a
-        chip; a TPU Job has the chip and is told nothing."""
-        for cpu_requests, expected in (("cpu=2", "tpu7x"), (None, None)):
-            with self.subTest(cpu_requests=cpu_requests):
-                fake = FakeKubectl()
-                self.submit(fake, cpu_requests=cpu_requests)
-                container = fake.applied_manifest(
-                )["spec"]["template"]["spec"]["containers"][0]
-                env = {e["name"]: e.get("value") for e in container["env"]}
-                self.assertEqual(env.get(gke_job.CHIPLESS_TPU_ENV), expected)
 
     def test_a_cpu_run_that_needs_a_chip_runs_again_on_a_tpu_node(self):
         """Once, and only when no CPU node took it or it exited
@@ -888,7 +515,7 @@ class TestGkeJobSubmit(unittest.TestCase):
 
         cases = [
             (ran(1, never_started=True), "no CPU node took it"),
-            (ran(gke_job.NEEDS_TPU_EXIT_CODE), "it exited 75"),
+            (ran(gke_job.gke_common.NEEDS_TPU_EXIT_CODE), "it exited 75"),
             (ran(1), None),
         ]
         for first, why in cases:
@@ -897,7 +524,7 @@ class TestGkeJobSubmit(unittest.TestCase):
                 results, held = [first, ran(0)], []
 
                 def once(**_kwargs):
-                    held.append(dict(driver.cpu_requests))
+                    held.append(dict(driver.config.cpu_requests))
                     return results.pop(0)
 
                 with patch.object(driver, "_run_once", side_effect=once), \
@@ -910,53 +537,7 @@ class TestGkeJobSubmit(unittest.TestCase):
                 self.assertEqual(held, [{"cpu": "2"}, {}])
                 self.assertEqual(result.exit_code, 0)
                 self.assertIn(why, result.details["cpu_fallback"])
-                self.assertEqual(driver.cpu_requests, {"cpu": "2"})
-
-    def test_serve_adds_a_headless_service_owned_by_the_job(self):
-        fake = FakeKubectl({"jsonpath": (0, "uid-1", "")})
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.submit(str(self.script), job_name="run-1", serve=True)
-        service = json.loads(fake.stdins[-1])
-        self.assertEqual(service["spec"]["clusterIP"], "None")
-        self.assertEqual(service["metadata"]["ownerReferences"][0]["uid"],
-                         "uid-1")
-
-    def test_a_colocated_client_gives_its_batch_server_the_service(self):
-        """The server needs no flag to be reached, and stays a batch Job."""
-        pods = json.dumps({"items": [{"spec": {"nodeName": "n1"}}]})
-        fake = FakeKubectl({
-            "get pods": (0, pods, ""),
-            "get job srv": (0, "uid-srv", "")
-        })
-        self.submit(fake, colocate_with="srv", colocate_requests="cpu=1")
-        services = [
-            json.loads(stdin) for stdin in fake.stdins
-            if stdin and '"kind": "Service"' in stdin
-        ]
-        self.assertEqual(len(services), 1)
-        self.assertEqual(services[0]["metadata"]["name"], "srv")
-        self.assertEqual(services[0]["spec"]["selector"], {"job-name": "srv"})
-        self.assertEqual(services[0]["metadata"]["ownerReferences"][0]["uid"],
-                         "uid-srv")
-        # Before the client Job, so its address exists when the client starts.
-        kinds = [json.loads(stdin)["kind"] for stdin in fake.stdins if stdin]
-        self.assertEqual(kinds, ["Service", "Job"])
-
-    def test_a_batch_job_gets_no_service(self):
-        fake = FakeKubectl({"jsonpath": (0, "uid-1", "")})
-        self.submit(fake)
-        self.assertFalse(
-            any('"kind": "Service"' in (stdin or "") for stdin in fake.stdins))
-
-    def test_submit_keeps_the_job_uid(self):
-        """The UID comes back from the apply itself, with no extra call."""
-        fake = FakeKubectl({"jsonpath={.metadata.uid}": (0, "uid-7\n", "")})
-        with patch.object(gke_job.subprocess, "run", fake):
-            make_driver().submit(str(self.script), job_name="run-1")
-        self.assertEqual(jobs.JobRecord.load("run-1").extra["uid"], "uid-7")
-        self.assertIn("apply", fake.find("jsonpath={.metadata.uid}"))
-        self.assertIsNone(fake.find("get job"))
+                self.assertEqual(driver.config.cpu_requests, {"cpu": "2"})
 
     def test_a_refused_service_keeps_the_job_and_its_record(self):
         """RBAC refusing the Service warns; the running Job stays tracked.
@@ -980,8 +561,8 @@ class TestGkeJobSubmit(unittest.TestCase):
 
         fake = RefuseService({"jsonpath": (0, "uid-1", "")})
         driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake), \
-                patch.object(gke_job.auth_utils, "adc_token",
+        with patch.object(subprocess, "run", fake), \
+                patch.object(auth_utils, "adc_token",
                              return_value=("", "no ADC")), \
                 patch("sys.stderr", io.StringIO()) as err:
             job_id = driver.submit(str(self.script),
@@ -991,6 +572,10 @@ class TestGkeJobSubmit(unittest.TestCase):
         self.assertIsNotNone(jobs.JobRecord.load("run-1"))
         self.assertIsNone(fake.find("delete configmap"))
         self.assertIn("no Service for run-1", err.getvalue())
+        # A service that a single crash ends is not a service.
+        self.assertEqual(fake.applied_pod_spec()["restartPolicy"], "OnFailure")
+        self.assertEqual(fake.applied_manifest()["spec"]["backoffLimit"],
+                         gke_job.gke_common.SERVE_BACKOFF_LIMIT)
 
 
 def job_json(**status: Any) -> str:
@@ -1035,22 +620,18 @@ def failed_pod(*,
     return pod
 
 
+def phase_pods(*pods: tuple[str, str]) -> str:
+    """Pods, each (name, phase), as `kubectl get pods -o json` lists them."""
+    return json.dumps({
+        "items": [
+            dict(metadata=dict(name=name), status=dict(phase=phase))
+            for name, phase in pods
+        ]
+    })
+
+
 _RUNNING_POD = json.dumps({"items": [{"status": {"phase": "Running"}}]})
 _DONE_POD = json.dumps({"items": [{"status": {"phase": "Succeeded"}}]})
-_FAILED_POD = json.dumps({
-    "items": [{
-        "status": {
-            "containerStatuses": [{
-                "state": {
-                    "terminated": {
-                        "exitCode": 1,
-                        "reason": "Error"
-                    }
-                }
-            }]
-        }
-    }]
-})
 
 
 @contextlib.contextmanager
@@ -1068,121 +649,25 @@ class TestGkeJobLifecycle(unittest.TestCase):
 
     def status(self, fake: FakeKubectl):
         driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             return driver.get_status("run-1")
-
-    def test_succeeded_job_is_completed_with_exit_zero(self):
-        fake = FakeKubectl({
-            "get job":
-            (0, job_json(succeeded=1, startTime="t0", completionTime="t1"), "")
-        })
-        result = self.status(fake)
-        self.assertEqual(result.status, "COMPLETED")
-        self.assertEqual(result.exit_code, 0)
-        self.assertEqual(result.end_time, "t1")
-
-    def test_active_job_with_a_running_pod_is_running(self):
-        pods = json.dumps({"items": [{"status": {"phase": "Running"}}]})
-        fake = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, pods, ""),
-        })
-        self.assertEqual(self.status(fake).status, "RUNNING")
-
-    def test_a_hung_status_read_times_out_as_a_kubectl_error(self):
-        # Unbounded, one unreachable API server hung `job list` for good.
-        def hang(cmd: list[str], **kwargs: Any):
-            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
-
-        with self.assertRaises(gke_job.KubectlError) as ctx:
-            self.status(hang)
-        self.assertIn(f"no answer within {gke_job.KUBECTL_READ_TIMEOUT_SEC}s",
-                      str(ctx.exception))
-
-    def test_active_job_with_an_unschedulable_pod_is_pending(self):
-        """`active` counts pending pods too, so it cannot mean "running".
-
-        A pod that will never schedule -- no free chips, or a selector
-        matching nothing -- keeps the Job active indefinitely. Reported as
-        RUNNING it looks like healthy progress until the caller's timeout
-        expires, which is the one thing a caller must not be told here.
-        """
-        pods = json.dumps({
-            "items": [{
-                "status": {
-                    "phase":
-                    "Pending",
-                    "conditions": [{
-                        "type":
-                        "PodScheduled",
-                        "status":
-                        "False",
-                        "reason":
-                        "Unschedulable",
-                        "message": ("0/2 nodes are available: 2 Insufficient "
-                                    "google.com/tpu."),
-                    }],
-                }
-            }]
-        })
-        fake = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, pods, ""),
-        })
-        result = self.status(fake)
-        self.assertEqual(result.status, "PENDING")
-        self.assertIn("Insufficient google.com/tpu", result.error)
-        self.assertEqual(result.details["pod_phase"], "Pending")
-        # The reason is what `job wait` reads: unbound, no queue.
-        self.assertEqual(result.details["pending_reason"],
-                         gke_job.base.PENDING_UNSCHEDULED)
-
-        # The same pod under a queue is admitted but unschedulable.
-        labelled = json.loads(job_json(active=1))
-        labelled["metadata"] = {"labels": {gke_job.QUEUE_LABEL: "lq"}}
-        fake.responses["get job"] = (0, json.dumps(labelled), "")
-        self.assertEqual(
-            self.status(fake).details["pending_reason"],
-            gke_job.base.PENDING_ADMITTED_NO_NODE)
-
-        # Bound to a node, it is starting, queue or not.
-        bound = json.loads(pods)
-        bound["items"][0]["spec"] = {"nodeName": "gke-tpu-node-1"}
-        fake.responses["get pods"] = (0, json.dumps(bound), "")
-        self.assertEqual(
-            self.status(fake).details["pending_reason"],
-            gke_job.base.PENDING_STARTING)
 
     FIRST_FAILURE = "2026-01-01T00:04:00Z"
 
     @staticmethod
     def _pulling_pods(reason: str) -> str:
-        return json.dumps({
-            "items": [{
-                "metadata": {
-                    "name": "run-1-abcde"
-                },
-                "status": {
-                    "phase":
-                    "Pending",
-                    "containerStatuses": [{
-                        "image": "img:1",
-                        "state": {
-                            "waiting": {
-                                "reason": reason,
-                                "message": "manifest for img:1 not found"
-                            }
-                        },
-                    }],
-                },
-            }]
-        })
+        waiting = dict(reason=reason, message="manifest for img:1 not found")
+        pod = failed_pod(phase="Pending", node=None)
+        pod["status"]["containerStatuses"] = [
+            dict(image="img:1", state=dict(waiting=waiting))
+        ]
+        return json.dumps({"items": [pod]})
 
     @classmethod
     def _pull_events(cls, span: float) -> str:
         """The kubelet's events for pulls failing from FIRST_FAILURE for
         `span` seconds, and for back-offs that went on for an hour."""
-        first = gke_job._parse_time(cls.FIRST_FAILURE)
+        first = gke_job.gke_common.parse_time(cls.FIRST_FAILURE)
 
         def stamp(offset: float) -> str:
             return datetime.datetime.fromtimestamp(
@@ -1212,7 +697,7 @@ class TestGkeJobLifecycle(unittest.TestCase):
 
     def _pulling(self,
                  reason: str = "ImagePullBackOff",
-                 span: float = gke_job.PULL_FAILURE_GRACE_SEC,
+                 span: float = gke_job.pod_diagnostics.PULL_FAILURE_GRACE_SEC,
                  **responses: Any) -> FakeKubectl:
         return FakeKubectl({
             "get job": (0, job_json(active=1), ""),
@@ -1221,33 +706,27 @@ class TestGkeJobLifecycle(unittest.TestCase):
             **responses,
         })
 
-    def test_pulls_failing_for_the_grace_period_fail_the_job(self):
-        """The kubelet retries a bad pull forever; the Job must not wait."""
-        fake = self._pulling()
-        result = self.status(fake)
-        self.assertEqual(result.status, "FAILED")
-        self.assertIn("ImagePullBackOff: manifest for img:1 not found",
-                      result.error)
-        self.assertIn("involvedObject.name=run-1-abcde",
-                      " ".join(fake.find("get events")))
-        # The live pod would hold its TPU node forever: it is deleted.
-        self.assertIsNotNone(fake.find("delete job run-1"))
-
-    def test_one_failed_pull_is_not_final_however_long_ago(self):
+    def test_a_pull_failure_is_final_only_once_it_lasts(self):
         """The waiting reason outlasts the failure while a retry pulls; a
-        multi-gigabyte retry after one blip must be left to finish."""
-        for reason in ("ErrImagePull", "ImagePullBackOff"):
-            fake = self._pulling(reason, span=0)
-            result = self.status(fake)
-            self.assertEqual(result.status, "PENDING", reason)
-            self.assertIn("manifest for img:1 not found", result.error)
-            self.assertIsNone(fake.find("delete job"))
-
-    def test_a_pull_failure_without_readable_events_is_never_final(self):
-        # Not allowed to read events, or they aged out: wait, as before.
-        for events in ((1, "", "Forbidden"), (0, '{"items": []}', "")):
-            fake = self._pulling(**{"get events": events})
-            self.assertEqual(self.status(fake).status, "PENDING")
+        multi-gigabyte retry after one blip must be left to finish. Without
+        readable events (forbidden, or aged out) it is never final."""
+        cases = [
+            ("ErrImagePull", dict(span=0)),
+            ("ImagePullBackOff", dict(span=0)),
+            ("ImagePullBackOff", {
+                "get events": (1, "", "Forbidden")
+            }),
+            ("ImagePullBackOff", {
+                "get events": (0, '{"items": []}', "")
+            }),
+        ]
+        for reason, kwargs in cases:
+            with self.subTest(reason=reason, kwargs=kwargs):
+                fake = self._pulling(reason, **kwargs)
+                result = self.status(fake)
+                self.assertEqual(result.status, "PENDING")
+                self.assertIn("manifest for img:1 not found", result.error)
+                self.assertIsNone(fake.find("delete job"))
 
     def test_an_image_reference_that_can_never_pull_fails_at_once(self):
         fake = self._pulling("InvalidImageName")
@@ -1270,6 +749,8 @@ class TestGkeJobLifecycle(unittest.TestCase):
         jobs.JobRecord.create(job_id="run-1", backend="gke_job")
         fake = self._pulling()
         self.assertEqual(self.status(fake).status, "FAILED")
+        self.assertIn("involvedObject.name=run-1-abcde",
+                      " ".join(fake.find("get events")))
         self.assertIsNotNone(fake.find("delete job run-1"))
         self.assertIsNotNone(fake.find("delete configmap run-1"))
         self.assertEqual(
@@ -1279,7 +760,7 @@ class TestGkeJobLifecycle(unittest.TestCase):
         self.assertTrue(record.extra["never_started"])
         gone = FakeKubectl({"get job": self.GONE})
         driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", gone):
+        with patch.object(subprocess, "run", gone):
             result = driver.get_status("run-1")
             self.assertEqual(result.status, "FAILED")
             self.assertEqual(
@@ -1300,9 +781,9 @@ class TestGkeJobLifecycle(unittest.TestCase):
         """Left unsettled, the run-end reaper still tries to delete it."""
         record = MagicMock(status="RUNNING")
         fake = self._pulling(**{"delete job": (1, "", "Forbidden")})
-        with patch.object(gke_job.jobs.JobRecord, "load",
+        with patch.object(jobs.JobRecord, "load",
                           return_value=record), \
-                patch.object(gke_job.GkeJobDriver, "_save_logs"), \
+                patch.object(gke_job.records, "save_logs"), \
                 contextlib.redirect_stderr(io.StringIO()):
             result = self.status(fake)
         self.assertEqual(result.status, "FAILED")
@@ -1313,14 +794,14 @@ class TestGkeJobLifecycle(unittest.TestCase):
         # No record, or one still live: the Job's absence is unexplained.
         for create in (False, True):
             with self.subTest(record=create), _job_store(), \
-                    patch.object(gke_job.time, "sleep") as sleep:
+                    patch.object(time, "sleep") as sleep:
                 if create:
                     record = jobs.JobRecord.create(job_id="run-1",
                                                    backend="gke_job",
                                                    status="RUNNING")
                     record.start_time = "2026-01-01T00:00:00+00:00"
                     record.save()
-                with patch.object(gke_job.subprocess, "run",
+                with patch.object(subprocess, "run",
                                   FakeKubectl({"get job": self.GONE})):
                     with self.assertRaises(ComputeConfigError) as ctx:
                         driver.get_status("run-1")
@@ -1336,7 +817,7 @@ class TestGkeJobLifecycle(unittest.TestCase):
                               backend="gke_job").mark("COMPLETED", exit_code=0)
         unauthorized = FakeKubectl(
             {"get job": (1, "", "error: You must be logged in to the server")})
-        with patch.object(gke_job.subprocess, "run", unauthorized):
+        with patch.object(subprocess, "run", unauthorized):
             with self.assertRaises(ComputeConfigError):
                 driver.get_status("run-1")
 
@@ -1351,40 +832,9 @@ class TestGkeJobLifecycle(unittest.TestCase):
                 return next(answers, found)(cmd, **kwargs)
             return found(cmd, **kwargs)
 
-        with patch.object(gke_job.time, "sleep") as sleep:
+        with patch.object(time, "sleep") as sleep:
             self.assertEqual(self.status(kubectl).status, "PENDING")
         self.assertEqual(sleep.call_count, 2)
-
-    def test_cancel_keeps_a_running_jobs_logs(self):
-        """`job logs` after `job cancel` used to fail on NotFound."""
-        jobs.JobRecord.create(job_id="run-1", backend="gke_job")
-        alive = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, _RUNNING_POD, ""),
-            "logs": (0, "loading weights\n", ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", alive):
-            driver.cancel("run-1")
-        self.assertEqual(jobs.JobRecord.load("run-1").status, "CANCELLED")
-        gone = FakeKubectl({"get job": self.GONE, "logs": self.GONE})
-        with patch.object(gke_job.subprocess, "run", gone):
-            self.assertEqual(driver.fetch_logs("run-1"), "loading weights\n")
-
-    def test_run_reports_a_pull_failure_not_missing_logs(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            script = Path(tmp) / "hello_tpu.py"
-            script.write_text("print('hi')\n", encoding="utf-8")
-            fake = self._pulling()
-            with patch.object(gke_job.subprocess, "run", fake), \
-                    patch.object(gke_job.time, "sleep"):
-                result = make_driver().run(str(script))
-        self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.stdout, "")
-        self.assertIn("manifest for img:1 not found", result.stderr)
-        self.assertTrue(result.details["never_started"])
-        self.assertIsNone(fake.find("logs"))
-        self.assertIsNotNone(fake.find("delete job"))
 
     def test_active_job_with_unreadable_pods_stays_running(self):
         # No phase to read is not evidence of a stuck pod; the Job is active.
@@ -1394,30 +844,12 @@ class TestGkeJobLifecycle(unittest.TestCase):
         })
         self.assertEqual(self.status(fake).status, "RUNNING")
 
-    def test_unstarted_job_is_pending(self):
-        fake = FakeKubectl({"get job": (0, job_json(), "")})
-        result = self.status(fake)
-        self.assertEqual(result.status, "PENDING")
-        self.assertNotIn("suspended", result.details)
-
-    def test_suspended_job_is_distinguishable_from_plain_pending(self):
-        # A suspended Job exists, reports no error and starts no pod, so a
-        # caller that cannot tell it from pending reads a full queue as
-        # unreachable hardware.
-        fake = FakeKubectl({"get job": (0, job_json(suspend=True), "")})
-        result = self.status(fake)
-        self.assertEqual(result.status, "PENDING")
-        self.assertTrue(result.details["suspended"])
-        self.assertEqual(result.details["pending_reason"],
-                         gke_job.base.PENDING_QUEUED)
-        self.assertIn("queue", result.error)
-
     # -- Kueue refusing a suspended Job ------------------------------------
 
     CREATED = "2026-01-01T00:00:00Z"
     WORKLOAD = "job-run-1-3f2a1"
-    LABELLED = f"-l {gke_job.JOB_UID_LABEL}=uid-1"
-    UNLABELLED = f"{gke_job.WORKLOAD_RESOURCE} -n default -o json"
+    LABELLED = f"-l {gke_job.kueue_admission.JOB_UID_LABEL}=uid-1"
+    UNLABELLED = f"{gke_job.kueue_admission.WORKLOAD_RESOURCE} -n default -o json"
     NO_LQ = "LocalQueue lq doesn't exist"
     QUOTA_WAIT = ("couldn't assign flavors to pod set main: insufficient "
                   "unused quota for google.com/tpu in flavor tpu7x, 4 more "
@@ -1427,20 +859,19 @@ class TestGkeJobLifecycle(unittest.TestCase):
 
     @classmethod
     def _suspended_job(cls, **metadata: Any) -> str:
+        labels = {
+            gke_job.gke_common.QUEUE_LABEL: "lq",
+            gke_job.gke_common.PRIORITY_LABEL: "medium"
+        }
         return json.dumps({
-            "metadata": {
-                "name": "run-1",
-                "uid": "uid-1",
-                "creationTimestamp": cls.CREATED,
-                "labels": {
-                    gke_job.QUEUE_LABEL: "lq",
-                    gke_job.PRIORITY_LABEL: "medium"
-                },
-                **metadata,
-            },
-            "spec": {
-                "suspend": True
-            },
+            "metadata":
+            dict(name="run-1",
+                 uid="uid-1",
+                 creationTimestamp=cls.CREATED,
+                 labels=labels,
+                 **metadata),
+            "spec":
+            dict(suspend=True),
         })
 
     @staticmethod
@@ -1452,31 +883,17 @@ class TestGkeJobLifecycle(unittest.TestCase):
               reason: str,
               message: str,
               status: str = "True") -> dict[str, Any]:
-        return {
-            "type": kind,
-            "status": status,
-            "reason": reason,
-            "message": message
-        }
+        return dict(type=kind, status=status, reason=reason, message=message)
 
     @classmethod
     def _workload(cls,
                   *conditions: dict[str, Any],
                   owner: str = "uid-1",
                   **spec: Any) -> dict[str, Any]:
-        return {
-            "metadata": {
-                "name": cls.WORKLOAD,
-                "ownerReferences": [{
-                    "kind": "Job",
-                    "uid": owner
-                }],
-            },
-            "spec": spec,
-            "status": {
-                "conditions": list(conditions)
-            },
-        }
+        return dict(metadata=dict(
+            name=cls.WORKLOAD, ownerReferences=[dict(kind="Job", uid=owner)]),
+                    spec=spec,
+                    status=dict(conditions=list(conditions)))
 
     @classmethod
     def _unreserved(cls, reason: str, message: str) -> dict[str, Any]:
@@ -1519,8 +936,8 @@ class TestGkeJobLifecycle(unittest.TestCase):
         })
 
     def kueue_status(self, fake: Any, age: float = 3600):
-        created = gke_job._parse_time(self.CREATED)
-        with patch.object(gke_job.time, "time", return_value=created + age):
+        created = gke_job.gke_common.parse_time(self.CREATED)
+        with patch.object(time, "time", return_value=created + age):
             return self.status(fake)
 
     def test_a_workload_kueue_refuses_fails_the_job_with_kueues_reason(self):
@@ -1594,9 +1011,12 @@ class TestGkeJobLifecycle(unittest.TestCase):
                                           "Deactivated"),
                                active=False)
             w["metadata"]["annotations"] = {
-                gke_job.EVICTION_REASON_ANNOTATION: reason,
-                gke_job.EVICTION_MESSAGE_ANNOTATION: message,
-                gke_job.EVICTED_AT_ANNOTATION: "2026-01-01T02:00:24Z",
+                gke_job.kueue_admission.EVICTION_REASON_ANNOTATION:
+                reason,
+                gke_job.kueue_admission.EVICTION_MESSAGE_ANNOTATION:
+                message,
+                gke_job.kueue_admission.EVICTED_AT_ANNOTATION:
+                "2026-01-01T02:00:24Z",
             }
             return w
 
@@ -1610,7 +1030,8 @@ class TestGkeJobLifecycle(unittest.TestCase):
         self.assertNotIn("never_started", result.details)
         self.assertIsNone(fake.find("delete job run-1"))
         self.assertIsNone(
-            gke_job._time_limit_stop(stopped("finished-gc", "GC")))
+            gke_job.kueue_admission._time_limit_stop(
+                stopped("finished-gc", "GC")))
 
     def test_kueue_waits_that_end_on_their_own_stay_pending(self):
         """No free quota, a queue someone has put on hold, and a preemption
@@ -1655,6 +1076,9 @@ class TestGkeJobLifecycle(unittest.TestCase):
                 result = self.kueue_status(fake)
                 self.assertEqual(result.status, "PENDING")
                 self.assertTrue(result.details["suspended"])
+                # What `job wait` reads: queued, not lost hardware.
+                self.assertEqual(result.details["pending_reason"],
+                                 base.PENDING_QUEUED)
                 self.assertEqual(result.details.get("kueue_reason"), reason)
                 self.assertIn(said, result.error)
                 self.assertIsNone(fake.find("delete job"))
@@ -1662,7 +1086,7 @@ class TestGkeJobLifecycle(unittest.TestCase):
     def test_no_workload_after_the_grace_period_fails_the_job(self):
         """Kueue makes no Workload for a Job naming a priority class the
         cluster lacks; that Job stays suspended forever."""
-        late = gke_job.KUEUE_WORKLOAD_GRACE_SEC + 1
+        late = gke_job.kueue_admission.KUEUE_WORKLOAD_GRACE_SEC + 1
         none = {self.LABELLED: self._items(), self.UNLABELLED: self._items()}
         fake = self._kueue(
             **{
@@ -1704,8 +1128,8 @@ class TestGkeJobLifecycle(unittest.TestCase):
             self):
         # Kueue has not reconciled the Job yet: that is not a refusal.
         fake = self._kueue(**{self.LABELLED: self._items()})
-        result = self.kueue_status(fake,
-                                   age=gke_job.KUEUE_WORKLOAD_GRACE_SEC - 1)
+        result = self.kueue_status(
+            fake, age=gke_job.kueue_admission.KUEUE_WORKLOAD_GRACE_SEC - 1)
         self.assertEqual(result.status, "PENDING")
         self.assertIsNone(fake.find(self.UNLABELLED))
         # A JobSet's Job never has a Workload: Kueue admits the JobSet.
@@ -1716,7 +1140,7 @@ class TestGkeJobLifecycle(unittest.TestCase):
         }])
         fake = self._kueue(job=child, **{self.LABELLED: self._items()})
         self.assertEqual(self.kueue_status(fake).status, "PENDING")
-        self.assertIsNone(fake.find(gke_job.WORKLOAD_RESOURCE))
+        self.assertIsNone(fake.find(gke_job.kueue_admission.WORKLOAD_RESOURCE))
 
     def test_an_unreadable_workload_list_stays_pending(self):
         """Only an answer the cluster gave may fail a Job: no Kueue CRD, no
@@ -1743,65 +1167,12 @@ class TestGkeJobLifecycle(unittest.TestCase):
         answering = self._kueue()
 
         def hang_on_workloads(cmd: list[str], **kwargs: Any):
-            if gke_job.WORKLOAD_RESOURCE in cmd:
+            if gke_job.kueue_admission.WORKLOAD_RESOURCE in cmd:
                 raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
             return answering(cmd, **kwargs)
 
         self.assertEqual(
             self.kueue_status(hang_on_workloads).status, "PENDING")
-
-    def test_run_reports_a_kueue_refusal_without_waiting(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            script = Path(tmp) / "hello_tpu.py"
-            script.write_text("print('hi')\n", encoding="utf-8")
-            fake = self._kueue(self._unreserved("Inadmissible", self.NO_LQ))
-            with patch.object(gke_job.subprocess, "run", fake), \
-                    patch.object(gke_job.time, "sleep") as sleep:
-                result = make_driver(queue="lq").run(str(script))
-        sleep.assert_not_called()
-        self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.stdout, "")
-        self.assertIn(self.NO_LQ, result.stderr)
-        self.assertEqual(result.details["job_status"], "FAILED")
-        self.assertIsNone(fake.find("logs"))
-
-    def test_failed_job_reports_the_pod_exit_code(self):
-        pods = json.dumps({
-            "items": [{
-                "status": {
-                    "containerStatuses": [{
-                        "state": {
-                            "terminated": {
-                                "exitCode": 1,
-                                "reason": "Error"
-                            }
-                        }
-                    }]
-                }
-            }]
-        })
-        fake = FakeKubectl({
-            "get job": (0, job_json(failed=1), ""),
-            "get pods": (0, pods, ""),
-        })
-        result = self.status(fake)
-        self.assertEqual(result.status, "FAILED")
-        self.assertEqual(result.exit_code, 1)
-        # Not Kubernetes' bare "Error", which reads as the whole diagnosis.
-        self.assertEqual(result.error, "container exited with code 1")
-        self.assertEqual(gke_job._termination_error(137, "OOMKilled"),
-                         "container exited with code 137 (OOMKilled)")
-
-    def test_failed_job_survives_an_unreadable_pod(self):
-        # The pod is garbage-collected out from under a late status read; the
-        # Job still failed and must still say so.
-        fake = FakeKubectl({
-            "get job": (0, job_json(failed=1), ""),
-            "get pods": (1, "", "not found"),
-        })
-        result = self.status(fake)
-        self.assertEqual(result.status, "FAILED")
-        self.assertIsNone(result.exit_code)
 
     LOW_DISK = ("The node was low on resource: ephemeral-storage. Threshold "
                 "quantity: 10Gi, available: 1Gi.")
@@ -1810,40 +1181,30 @@ class TestGkeJobLifecycle(unittest.TestCase):
     def test_failed_job_says_why_the_pod_ended(self):
         """Exit 137 and no traceback reads as a crash; the pod's own reason
         (an eviction for a full disk, a node shutdown) is the diagnosis."""
-        killed = {"exit_code": 137, "container_reason": "Error"}
-        evicted = {"reason": "Evicted", "message": self.LOW_DISK}
+        killed = dict(exit_code=137, container_reason="Error")
+        evicted = dict(reason="Evicted", message=self.LOW_DISK)
+        disrupted = dict(type="DisruptionTarget",
+                         status="True",
+                         reason="TerminationByKubelet",
+                         message=self.LOW_DISK)
+        evicted_137 = (f"pod was evicted: {self.LOW_DISK} "
+                       "(container exited with code 137)")
         cases = [
             # (failed_pod arguments, error)
-            ({
-                **killed,
-                **evicted
-            }, (f"pod was evicted: {self.LOW_DISK} "
-                "(container exited with code 137)")),
+            (dict(killed, **evicted), evicted_137),
             # Evicted before the kubelet recorded the container's end.
             (evicted, f"pod was evicted: {self.LOW_DISK}"),
             # Only the DisruptionTarget condition kept the kubelet's words.
-            ({
-                **killed, "conditions": [{
-                    "type": "DisruptionTarget",
-                    "status": "True",
-                    "reason": "TerminationByKubelet",
-                    "message": self.LOW_DISK,
-                }]
-            }, (f"pod was evicted: {self.LOW_DISK} "
-                "(container exited with code 137)")),
-            ({
-                **killed, "reason": "Terminated",
-                "message": self.SHUTDOWN
-            }, ("container exited with code 137; pod Terminated: "
-                f"{self.SHUTDOWN}")),
+            (dict(killed, conditions=[disrupted]), evicted_137),
+            (dict(killed, reason="Terminated", message=self.SHUTDOWN),
+             f"container exited with code 137; pod Terminated: {self.SHUTDOWN}"
+             ),
             # No reason anywhere: say what sends a SIGKILL.
             (killed, ("container exited with code 137 (SIGKILL: out of "
                       "memory, an eviction, or the node going away)")),
             # A specific reason needs no hint.
-            ({
-                "exit_code": 137,
-                "container_reason": "OOMKilled"
-            }, "container exited with code 137 (OOMKilled)"),
+            (dict(exit_code=137, container_reason="OOMKilled"),
+             "container exited with code 137 (OOMKilled)"),
         ]
         for pod, error in cases:
             with self.subTest(error=error), _job_store():
@@ -1857,6 +1218,7 @@ class TestGkeJobLifecycle(unittest.TestCase):
                 result = self.status(fake)
                 self.assertEqual(result.status, "FAILED")
                 self.assertEqual(result.error, error)
+                self.assertEqual(result.exit_code, pod.get("exit_code"))
                 # Kept on the record, for once the pod is gone.
                 self.assertEqual(
                     jobs.JobRecord.load("run-1").extra["error"], error)
@@ -1909,8 +1271,8 @@ class TestGkeJobLifecycle(unittest.TestCase):
             "get job": self.GONE,
             "logs": (1, "", 'pods "run-1-abcde" not found'),
         })
-        with patch.object(gke_job.subprocess, "run", fake), \
-                patch.object(gke_job.shutil, "which",
+        with patch.object(subprocess, "run", fake), \
+                patch.object(shutil, "which",
                              return_value="/bin/gcloud" if on_path else None):
             try:
                 return make_driver().fetch_logs("run-1"), fake
@@ -1931,7 +1293,8 @@ class TestGkeJobLifecycle(unittest.TestCase):
         self.assertEqual(rest, ["Downloading shards: 40%", "Killed"])
         query = fake.find("logging read")
         self.assertIn("--order=desc", query)
-        self.assertIn(f"--limit={gke_job.CLOUD_LOGGING_MAX_LINES}", query)
+        self.assertIn(
+            f"--limit={gke_job.log_retrieval.CLOUD_LOGGING_MAX_LINES}", query)
         # The record's UID and start reach the query (the window itself is
         # covered by test_cloud_logging_query_keeps_to_one_job).
         self.assertIn('labels."k8s-pod/controller-uid"="uid-1"', query[3])
@@ -1961,52 +1324,24 @@ class TestGkeJobLifecycle(unittest.TestCase):
         With the UID, only this Job's pods match, so the window can be wide.
         Without it (an older record), the window is exactly the record's.
         """
-        start = gke_job._parse_time("2026-01-01T00:20:00Z")
-        end = gke_job._parse_time("2026-01-01T01:00:00Z")
+        start = gke_job.gke_common.parse_time("2026-01-01T00:20:00Z")
+        end = gke_job.gke_common.parse_time("2026-01-01T01:00:00Z")
         base = ('resource.type="k8s_container" AND '
                 'resource.labels.namespace_name="ns" AND '
                 'labels."k8s-pod/job-name"="run-1"')
         self.assertEqual(
-            gke_job._cloud_logging_query("ns", "run-1", "c1", start, end,
-                                         "uid-2"),
+            gke_job.log_retrieval._cloud_logging_query("ns", "run-1", "c1",
+                                                       start, end, "uid-2"),
             base + ' AND (labels."k8s-pod/controller-uid"="uid-2" OR '
             'labels."k8s-pod/batch_kubernetes_io/controller-uid"="uid-2") '
             'AND resource.labels.cluster_name="c1" AND '
             'timestamp>="2026-01-01T00:10:00Z" AND '
             'timestamp<="2026-01-01T01:10:00Z"')
         self.assertEqual(
-            gke_job._cloud_logging_query("ns", "run-1", None, start, end),
+            gke_job.log_retrieval._cloud_logging_query("ns", "run-1", None,
+                                                       start, end),
             base + ' AND timestamp>="2026-01-01T00:20:00Z" AND '
             'timestamp<="2026-01-01T01:00:00Z"')
-
-    def test_unreadable_logs_raise_rather_than_becoming_the_log(self):
-        reaped = "error: timed out waiting for the condition\n"
-        fake = FakeKubectl({"logs": (1, "", reaped)})
-        with tempfile.TemporaryDirectory() as out, \
-                patch.object(gke_job.subprocess, "run", fake):
-            with self.assertRaises(ComputeConfigError) as ctx:
-                make_driver().fetch_artifacts("run-1", Path(out))
-            self.assertEqual(ctx.exception.error_code, "LOGS_UNAVAILABLE")
-            self.assertIn("timed out", ctx.exception.message)
-            self.assertEqual(list(Path(out).iterdir()), [])
-
-    def test_finished_job_logs_outlive_its_pod(self):
-        """Seeing the Job finished, by status read or cancel, keeps its logs."""
-        alive = FakeKubectl({
-            "get job": (0, job_json(succeeded=1), ""),
-            "get pods": (0, _DONE_POD, ""),
-            "logs": (0, "step_time_ms: 41.7\n", ""),
-        })
-        reaped = FakeKubectl({"logs": (1, "", "timed out")})
-        for observe in ("get_status", "cancel"):
-            with self.subTest(observe), _job_store():
-                jobs.JobRecord.create(job_id="run-1", backend="gke_job")
-                driver = make_driver()
-                with patch.object(gke_job.subprocess, "run", alive):
-                    getattr(driver, observe)("run-1")
-                with patch.object(gke_job.subprocess, "run", reaped):
-                    self.assertEqual(driver.fetch_logs("run-1"),
-                                     "step_time_ms: 41.7\n")
 
     def _lost_node_fake(self,
                         cloud: list[str],
@@ -2034,25 +1369,25 @@ class TestGkeJobLifecycle(unittest.TestCase):
         driver = make_driver()
         cloud = ["c1 385", "c2 729", "c4 1393", "c8 2613"]
         status = self._lost_node_fake(cloud, "c1 385\nc2 72")
-        with patch.object(gke_job.subprocess, "run", status), \
-                patch.object(gke_job.shutil, "which",
+        with patch.object(subprocess, "run", status), \
+                patch.object(shutil, "which",
                              return_value="/bin/gcloud"):
             driver.get_status("run-1")
         self.assertIsNone(status.find("logging read"))
         read = self._lost_node_fake(cloud)
-        with patch.object(gke_job.subprocess, "run", read), \
-                patch.object(gke_job.shutil, "which",
+        with patch.object(subprocess, "run", read), \
+                patch.object(shutil, "which",
                              return_value="/bin/gcloud"), \
-                patch.object(gke_job.time, "sleep") as sleep:
+                patch.object(time, "sleep") as sleep:
             logs = driver.fetch_logs("run-1").splitlines()
         self.assertAlmostEqual(sleep.call_args[0][0],
-                               gke_job.CLOUD_LOGGING_SETTLE_SEC,
+                               gke_job.log_retrieval.CLOUD_LOGGING_SETTLE_SEC,
                                delta=5)
         self.assertEqual(logs[0], "c1 385")
         self.assertTrue(logs[1].startswith("[compute] The node was lost"))
         self.assertEqual(logs[2:], ["c2 729", "c4 1393", "c8 2613"])
         settled = FakeKubectl({"logs": (1, "", "timed out")})
-        with patch.object(gke_job.subprocess, "run", settled):
+        with patch.object(subprocess, "run", settled):
             self.assertEqual(driver.fetch_logs("run-1").splitlines(), logs)
         self.assertIsNone(settled.find("logging read"))
 
@@ -2062,23 +1397,16 @@ class TestGkeJobLifecycle(unittest.TestCase):
         takes all of Cloud Logging's."""
         jobs.JobRecord.create(job_id="run-1", backend="gke_job")
         driver = make_driver()
-        with patch.object(gke_job.subprocess, "run",
+        with patch.object(subprocess, "run",
                           self._lost_node_fake(["c1 385", "c2 729"], "c1 3")), \
-                patch.object(gke_job.shutil, "which",
+                patch.object(shutil, "which",
                              return_value="/bin/gcloud"), \
-                patch.object(gke_job.time, "sleep"):
+                patch.object(time, "sleep"):
             logs = driver.fetch_logs("run-1").splitlines()
         self.assertTrue(logs[0].startswith("[compute] The node was lost"))
         self.assertEqual(logs[1:], ["c1 385", "c2 729"])
-        self.assertFalse(driver._lost_node_marker("run-1").exists())
-
-    def test_logs_of_a_job_yet_to_start_are_empty(self):
-        fake = FakeKubectl({
-            "logs": (1, "", "container is waiting to start"),
-            "get job": (0, job_json(), ""),
-        })
-        with patch.object(gke_job.subprocess, "run", fake):
-            self.assertEqual(make_driver().fetch_logs("run-1"), "")
+        self.assertFalse(
+            gke_job.log_retrieval.lost_node_marker("run-1").exists())
 
     def test_logs_fall_back_to_the_copy_the_pod_uploaded(self):
         fake = FakeKubectl({"logs": (1, "", "timed out")})
@@ -2091,19 +1419,11 @@ class TestGkeJobLifecycle(unittest.TestCase):
             return True
 
         with \
-                patch.object(gke_job.subprocess, "run", fake), \
+                patch.object(subprocess, "run", fake), \
                 patch.object(gcs_staging, "download_file_from_gcs", download):
             self.assertEqual(
                 make_driver(staging_bucket="gs://b").fetch_logs("run-1"),
                 "step_time_ms: 41.7\n")
-
-    def test_status_without_a_pod_skips_kubectl_logs(self):
-        """`kubectl logs` on a podless Job blocks for 20s on every read."""
-        fake = FakeKubectl({"get job": (0, job_json(succeeded=1), "")})
-        jobs.JobRecord.create(job_id="run-1", backend="gke_job")
-        with patch.object(gke_job.subprocess, "run", fake):
-            make_driver().get_status("run-1")
-        self.assertIsNone(fake.find("logs"))
 
     def test_a_gcs_failure_breaks_neither_status_nor_cancel(self):
         fake = FakeKubectl({"get job": (0, job_json(succeeded=1), "")})
@@ -2114,12 +1434,18 @@ class TestGkeJobLifecycle(unittest.TestCase):
 
         for observe in ("get_status", "cancel"):
             with self.subTest(observe), _job_store(), \
-                    patch.object(gke_job.subprocess, "run", fake), \
+                    patch.object(subprocess, "run", fake), \
                     patch.object(gcs_staging, "download_file_from_gcs",
                                  download), \
+                    patch.object(gcs_staging, "delete_staged_prefix") as rm, \
                     contextlib.redirect_stderr(io.StringIO()):
-                jobs.JobRecord.create(job_id="run-1", backend="gke_job")
+                jobs.JobRecord.create(job_id="run-1",
+                                      backend="gke_job",
+                                      extra={"staged_prefix": "run-1/"})
                 getattr(make_driver(staging_bucket="gs://b"), observe)("run-1")
+                if observe == "cancel":
+                    # Inputs only: outputs nobody fetched survive a reap.
+                    rm.assert_called_once_with("b", "run-1/in/")
                 self.assertEqual(
                     jobs.JobRecord.load("run-1").status, "COMPLETED")
                 # A partial download must not pass for the saved log.
@@ -2127,71 +1453,19 @@ class TestGkeJobLifecycle(unittest.TestCase):
                     list((jobs.jobs_dir() / "run-1").glob("output.log*")), [])
         self.assertIsNotNone(fake.find("delete job run-1"))
 
-    def test_fetch_artifacts_writes_the_logs(self):
-        fake = FakeKubectl({"logs": (0, "SUCCESS: native-tpu\n", "")})
-        driver = make_driver()
-        with tempfile.TemporaryDirectory() as out:
-            with patch.object(gke_job.subprocess, "run", fake):
-                written = driver.fetch_artifacts("run-1", Path(out))
-            self.assertEqual(len(written), 1)
-            self.assertEqual(written[0].name, "run-1.log")
-            self.assertIn("native-tpu", written[0].read_text(encoding="utf-8"))
-
-    @patch("framework.compute.drivers.gcs_staging.delete_staged_prefix")
-    @patch("framework.compute.drivers.gcs_staging.download_file_from_gcs")
-    def test_declared_outputs_keep_their_directories(self, mock_download,
-                                                     mock_delete):
-        """Two outputs that share a basename are two files, not one."""
-        del mock_delete
-        fake = FakeKubectl({"logs": (0, "done\n", "")})
-        driver = make_driver(staging_bucket="gs://test-staging-bucket")
-
-        def fake_download(bucket, blob, dest):
-            del bucket
-            Path(dest).write_text(blob)
-            return True
-
-        mock_download.side_effect = fake_download
-        jobs.JobRecord.create(job_id="job-nested",
-                              backend="gke_job",
-                              extra={
-                                  "outputs": [
-                                      {
-                                          "local": "eval/metrics.json",
-                                          "remote": "eval/metrics.json",
-                                      },
-                                      {
-                                          "local": "train/metrics.json",
-                                          "remote": "train/metrics.json",
-                                      },
-                                  ]
-                              })
-        with tempfile.TemporaryDirectory() as out:
-            with patch.object(gke_job.subprocess, "run", fake):
-                written = driver.fetch_artifacts("job-nested", Path(out))
-            landed = sorted(
-                str(f.relative_to(out)) for f in written
-                if f.suffix == ".json")
-            self.assertEqual(landed,
-                             ["eval/metrics.json", "train/metrics.json"])
-            self.assertIn("job-nested/out/eval/metrics.json",
-                          (Path(out) / "eval" / "metrics.json").read_text())
-
     def test_cancel_removes_job_and_configmap(self):
         # Both: a Job left holding a TPU node keeps the next run pending, and
         # a stranded ConfigMap blocks the name.
         fake = FakeKubectl()
         driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             driver.cancel("run-1")
         self.assertIsNotNone(fake.find("delete job run-1"))
         self.assertIsNotNone(fake.find("delete configmap run-1"))
-
-    def test_cancel_tolerates_an_absent_job(self):
-        fake = FakeKubectl({"delete": (1, "", "NotFound")})
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.cancel("run-1")  # must not raise
+        # Already gone is not an error: cancel is safe to repeat.
+        with patch.object(subprocess, "run",
+                          FakeKubectl({"delete": (1, "", "NotFound")})):
+            driver.cancel("run-1")
 
     def test_cancel_that_cannot_delete_raises_and_keeps_the_record_live(self):
         """A CANCELLED record over a running Job is a leak; refuse to write it."""
@@ -2205,363 +1479,103 @@ class TestGkeJobLifecycle(unittest.TestCase):
         jobs.JobRecord.create(job_id="run-1",
                               job_name="run-1",
                               backend="gke_job")
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             with self.assertRaises(gke_job.KubectlError):
                 driver.cancel("run-1")
         self.assertEqual(jobs.JobRecord.load("run-1").status, "PENDING")
 
-    def test_cancel_of_a_finished_job_records_how_it_finished(self):
-        """Deleting a Job that already ended reclaims its objects, no more.
-
-        The record says COMPLETED or FAILED, as the cluster did; a Job that
-        succeeded and was then tidied up must not read as cancelled.
-        """
-        for scripted, expected, exit_code in (
-            (job_json(succeeded=1), "COMPLETED", 0),
-            (job_json(failed=1), "FAILED", 1),
-        ):
-            with self.subTest(expected=expected), _job_store():
-                fake = FakeKubectl({
-                    "get job": (0, scripted, ""),
-                    "get pods": (0, _FAILED_POD, ""),
-                })
-                driver = make_driver()
-                jobs.JobRecord.create(job_id="run-1",
-                                      job_name="run-1",
-                                      backend="gke_job")
-                with patch.object(gke_job.subprocess, "run", fake):
-                    driver.cancel("run-1")
-                record = jobs.JobRecord.load("run-1")
-                self.assertEqual(record.status, expected)
-                self.assertEqual(record.exit_code, exit_code)
-                self.assertIsNotNone(fake.find("delete job run-1"))
-
-    def test_cancel_of_a_running_job_records_cancelled(self):
-        fake = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, _RUNNING_POD, ""),
-        })
-        driver = make_driver()
-        jobs.JobRecord.create(job_id="run-1",
-                              job_name="run-1",
-                              backend="gke_job")
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.cancel("run-1")
-        self.assertEqual(jobs.JobRecord.load("run-1").status, "CANCELLED")
-
-    def test_status_read_settles_the_record(self):
-        """`job list` reads the record; a finished Job must show up as such."""
-        fake = FakeKubectl({"get job": (0, job_json(succeeded=1), "")})
-        driver = make_driver()
-        jobs.JobRecord.create(job_id="run-1",
-                              job_name="run-1",
-                              backend="gke_job")
-        with patch.object(gke_job.subprocess, "run", fake):
-            self.assertEqual(driver.get_status("run-1").status, "COMPLETED")
-        self.assertEqual(jobs.JobRecord.load("run-1").status, "COMPLETED")
-
-    def test_status_reports_pod_name_when_pod_exists(self):
-        pods = json.dumps({
-            "items": [{
-                "metadata": {
-                    "name": "job-worker-xyz"
-                },
-                "status": {
-                    "phase": "Running"
-                }
-            }]
-        })
-        fake = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, pods, ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            result = driver.get_status("run-1")
-            self.assertEqual(result.status, "RUNNING")
-            self.assertEqual(result.details.get("pod_name"), "job-worker-xyz")
-
-    def test_port_forward_targets_pod_when_available(self):
-        pods = json.dumps({
-            "items": [{
-                "metadata": {
-                    "name": "job-pod-123"
-                },
-                "status": {
-                    "phase": "Running"
-                }
-            }]
-        })
+    def test_port_forward_skips_a_dead_pod(self):
+        """`-l job-name=X` returns finished pods too, in no useful order."""
+        pods = phase_pods(("job-pod-old", "Failed"),
+                          ("job-pod-live", "Running"))
         fake = FakeKubectl({
             "get pods": (0, pods, ""),
-            "port-forward":
-            (0, "Forwarding from 127.0.0.1:8080 -> 8000\n", ""),
+            "port-forward": (0, "Forwarding\n", ""),
         })
         driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             rc = driver.port_forward(local_port=8080,
                                      remote_port=8000,
                                      job_id="my-job")
-            self.assertEqual(rc, 0)
-            self.assertIsNotNone(
-                fake.find("port-forward pod/job-pod-123 8080:8000"))
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(
+            fake.find("port-forward pod/job-pod-live 8080:8000"))
+        self.assertIsNone(fake.find("job-pod-old"))
 
-        # `_listening` stands in for the local socket: the Popen here is a
-        # mock, so nothing binds 8080 and the readiness poll would otherwise
-        # wait out its timeout before calling this forward dead.
-        with patch.object(gke_job.subprocess, "run",
-                          fake), patch.object(base,
-                                              "_listening",
-                                              return_value=True), patch.object(
-                                                  gke_job.subprocess,
-                                                  "Popen") as mock_popen:
-            mock_popen.return_value.pid = 7777
-            mock_popen.return_value.poll.return_value = None
-            pid = driver.port_forward(local_port=8080,
-                                      remote_port=8000,
-                                      job_id="my-job",
-                                      background=True)
-            self.assertEqual(pid, 7777)
-
-        def run_with_keyboard_interrupt(cmd, *args, **kwargs):
+        # Ctrl-C is how a foreground forward is meant to end.
+        def interrupted(cmd, *args, **kwargs):
             if "port-forward" in cmd:
                 raise KeyboardInterrupt()
             return fake(cmd, *args, **kwargs)
 
-        with patch.object(gke_job.subprocess, "run",
-                          run_with_keyboard_interrupt):
-            rc = driver.port_forward(local_port=8080,
-                                     remote_port=8000,
-                                     job_id="my-job")
-            self.assertEqual(rc, 0)
+        with patch.object(subprocess, "run", interrupted):
+            self.assertEqual(
+                driver.port_forward(local_port=8080,
+                                    remote_port=8000,
+                                    job_id="my-job"), 0)
 
-    def test_port_forward_skips_a_dead_pod(self):
-        """`-l job-name=X` returns finished pods too, in no useful order."""
-        pods = json.dumps({
-            "items": [
-                {
-                    "metadata": {
-                        "name": "job-pod-old"
-                    },
-                    "status": {
-                        "phase": "Failed"
-                    }
-                },
-                {
-                    "metadata": {
-                        "name": "job-pod-live"
-                    },
-                    "status": {
-                        "phase": "Running"
-                    }
-                },
-            ]
-        })
-        fake = FakeKubectl({
-            "get pods": (0, pods, ""),
-            "port-forward": (0, "Forwarding\n", ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.port_forward(local_port=8080,
-                                remote_port=8000,
-                                job_id="my-job")
-        self.assertIsNotNone(fake.find("port-forward pod/job-pod-live"))
-        self.assertIsNone(fake.find("job-pod-old"))
-
-    def test_port_forward_falls_back_to_the_job_when_no_pod_runs(self):
-        pods = json.dumps({
-            "items": [{
-                "metadata": {
-                    "name": "job-pod-gone"
-                },
-                "status": {
-                    "phase": "Succeeded"
-                }
-            }]
-        })
-        fake = FakeKubectl({
-            "get pods": (0, pods, ""),
-            "port-forward": (0, "Forwarding\n", ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
+        # No pod running: forward to the Job and let kubectl pick.
+        fake.responses["get pods"] = (0,
+                                      phase_pods(
+                                          ("job-pod-gone", "Succeeded")), "")
+        with patch.object(subprocess, "run", fake):
             driver.port_forward(local_port=8080,
                                 remote_port=8000,
                                 job_id="my-job")
         self.assertIsNotNone(fake.find("port-forward job/my-job"))
 
-    def test_pending_diagnostic_survives_a_finished_pod(self):
+    def test_the_pod_that_explains_the_job_speaks_for_it(self):
         """A retried Job has several pods; only one of them is the news.
 
-        The Pending pod is why the caller is still waiting, and a Succeeded
-        or Failed attempt sorting ahead of it would report the Job as healthy
+        A live pod means progress, whatever else is queued. Otherwise the
+        Pending pod is why the caller is still waiting, and a Succeeded or
+        Failed attempt sorting ahead of it would report the Job as healthy
         progress until the timeout expired.
         """
-        pods = json.dumps({
-            "items": [
-                {
-                    "metadata": {
-                        "name": "job-pod-attempt-1"
-                    },
-                    "status": {
-                        "phase": "Failed"
-                    }
-                },
-                {
-                    "metadata": {
-                        "name": "job-pod-attempt-2"
-                    },
-                    "status": {
-                        "phase":
-                        "Pending",
-                        "conditions": [{
-                            "type":
-                            "PodScheduled",
-                            "status":
-                            "False",
-                            "message":
-                            "0/2 nodes are available: 2 "
-                            "Insufficient google.com/tpu",
-                        }],
-                    },
-                },
-            ]
-        })
-        fake = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, pods, ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            status = driver.get_status("my-job")
-        self.assertEqual(status.status, "PENDING")
-        self.assertEqual(status.details["pod_phase"], "Pending")
-        self.assertIn("Insufficient google.com/tpu",
-                      status.details["pod_reason"])
+        why = "0/2 nodes are available: 2 Insufficient google.com/tpu"
+        unscheduled = dict(type="PodScheduled", status="False", message=why)
+        pending = failed_pod(phase="Pending",
+                             conditions=[unscheduled],
+                             node=None)
+        failed = failed_pod(name="job-pod-attempt-1")
+        running = failed_pod(phase="Running", name="job-pod-live")
 
-    def test_running_pod_outranks_a_pending_one(self):
-        """A Job with a live pod is progressing, whatever else is queued."""
-        pods = json.dumps({
-            "items": [
-                {
-                    "metadata": {
-                        "name": "job-pod-queued"
-                    },
-                    "status": {
-                        "phase": "Pending"
-                    }
-                },
-                {
-                    "metadata": {
-                        "name": "job-pod-live"
-                    },
-                    "status": {
-                        "phase": "Running"
-                    }
-                },
-            ]
-        })
-        fake = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, pods, ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            status = driver.get_status("my-job")
-        self.assertEqual(status.status, "RUNNING")
-        self.assertEqual(status.details["pod_name"], "job-pod-live")
+        def status(*pods: dict[str, Any], queue: bool = False):
+            job = json.loads(job_json(active=1))
+            if queue:
+                job["metadata"] = dict(
+                    labels={gke_job.gke_common.QUEUE_LABEL: "lq"})
+            return self.status(
+                FakeKubectl({
+                    "get job": (0, json.dumps(job), ""),
+                    "get pods": (0, json.dumps({"items": list(pods)}), ""),
+                }))
 
-    def test_status_reads_the_pod_list_once(self):
-        """Every poll of the synchronous wait goes through here."""
-        pods = json.dumps({
-            "items": [{
-                "metadata": {
-                    "name": "job-pod-1"
-                },
-                "status": {
-                    "phase": "Pending"
-                }
-            }]
-        })
-        fake = FakeKubectl({
-            "get job": (0, job_json(active=1), ""),
-            "get pods": (0, pods, ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.get_status("my-job")
-        pod_reads = [c for c in fake.calls if "pods" in " ".join(c)]
-        self.assertEqual(len(pod_reads), 1)
-
-    def test_port_forward_requires_job_id(self):
-        driver = make_driver()
-        with self.assertRaises(ComputeConfigError) as ctx:
-            driver.port_forward(local_port=8000, remote_port=8000, job_id=None)
-        self.assertEqual(ctx.exception.error_code, "MISSING_FIELD")
+        result = status(failed, pending)
+        self.assertEqual((result.status, result.details["pod_phase"]),
+                         ("PENDING", "Pending"))
+        self.assertIn(why, result.details["pod_reason"])
+        # Why it waits is what `job wait` reads: unbound with no queue,
+        # admitted by a queue but with no node, or bound to a node, starting.
+        bound = {**pending, "spec": {"nodeName": "gke-tpu-node-1"}}
+        for pods, queue, why in (([failed,
+                                   pending], False, base.PENDING_UNSCHEDULED),
+                                 ([failed, pending], True,
+                                  base.PENDING_ADMITTED_NO_NODE),
+                                 ([bound], True, base.PENDING_STARTING)):
+            self.assertEqual(
+                status(*pods, queue=queue).details["pending_reason"], why)
+        result = status(pending, running)
+        self.assertEqual((result.status, result.details["pod_name"]),
+                         ("RUNNING", "job-pod-live"))
 
 
 class TestGkeJobRun(unittest.TestCase):
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.script = Path(self.tmp.name) / "hello_tpu.py"
-        self.script.write_text("print('hi')\n", encoding="utf-8")
-        self.addCleanup(self.tmp.cleanup)
+        self.script = hello_script(self)
+        self.tmp = self.script.parent
         self.enterContext(_job_store())
-
-    def test_dispatch_waits_reads_logs_then_cleans_up(self):
-        fake = FakeKubectl({
-            "get job": (0, job_json(succeeded=1), ""),
-            "logs": (0, "device_type: native-tpu\n", ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            result = driver.run(str(self.script))
-
-        self.assertEqual(result.exit_code, 0)
-        self.assertIn("native-tpu", result.stdout)
-        # Order matters: deleting the Job deletes its pod and the logs go with
-        # it, so the read has to come first.
-        verbs = [" ".join(c) for c in fake.calls]
-        self.assertLess(
-            next(i for i, v in enumerate(verbs) if "logs" in v),
-            next(i for i, v in enumerate(verbs) if "delete job" in v))
-
-    def test_run_tags_its_job_with_the_run_id(self):
-        # Without the tag, a run killed mid-wait leaves a Job the run-end
-        # reaper cannot find: it looks jobs up by run id.
-        fake = FakeKubectl({
-            "get job": (0, job_json(succeeded=1), ""),
-            "logs": (0, "ok\n", ""),
-        })
-        driver = make_driver()
-        driver.run_id = "20260101T000000Z-123456789abc"
-        with patch.object(gke_job.subprocess, "run", fake):
-            result = driver.run(str(self.script))
-        record = jobs.JobRecord.load(result.details["job_id"])
-        self.assertEqual(record.run_id, driver.run_id)
-
-    def test_dispatch_cleans_up_after_a_failed_job(self):
-        fake = FakeKubectl({
-            "get job": (0, job_json(failed=1), ""),
-            "get pods": (0, json.dumps({"items": []}), ""),
-        })
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            result = driver.run(str(self.script))
-        self.assertEqual(result.exit_code, 1)
-        self.assertIsNotNone(fake.find("delete job"))
-
-    def test_dispatch_gives_up_at_the_timeout_and_says_so(self):
-        fake = FakeKubectl({"get job": (0, job_json(active=1), "")})
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake), \
-             patch.object(gke_job.time, "sleep"):
-            result = driver.run(str(self.script), timeout=0)
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("RUNNING", result.stderr)
-        self.assertIsNotNone(fake.find("delete job"))
 
     UNSCHEDULABLE = ("0/15 nodes are available: 8 Insufficient "
                      "google.com/tpu. No preemption victims found.")
@@ -2569,23 +1583,13 @@ class TestGkeJobRun(unittest.TestCase):
     def _pending_fake(self) -> FakeKubectl:
         """A cluster with no free chips: the Job stays active, its pod
         Pending with the scheduler's reason, for as long as anyone asks."""
-        pod = {
-            "metadata": {
-                "name": "run-1-abcde",
-                "namespace": "default"
-            },
-            "spec": {},
-            "status": {
-                "phase":
-                "Pending",
-                "conditions": [{
-                    "type": "PodScheduled",
-                    "status": "False",
-                    "reason": "Unschedulable",
-                    "message": self.UNSCHEDULABLE,
-                }],
-            },
-        }
+        unschedulable = dict(type="PodScheduled",
+                             status="False",
+                             reason="Unschedulable",
+                             message=self.UNSCHEDULABLE)
+        pod = failed_pod(phase="Pending",
+                         conditions=[unschedulable],
+                         node=None)
         return FakeKubectl({
             "get job": (0, job_json(active=1), ""),
             "get pods": (0, json.dumps({"items": [pod]}), ""),
@@ -2595,9 +1599,9 @@ class TestGkeJobRun(unittest.TestCase):
         # Timed out before any node took it: no log read, Job deleted.
         fake = self._pending_fake()
         driver = make_driver()
-        out = Path(self.tmp.name) / "probe.json"
-        with patch.object(gke_job.subprocess, "run", fake), \
-             patch.object(gke_job.time, "sleep"):
+        out = self.tmp / "probe.json"
+        with patch.object(subprocess, "run", fake), \
+             patch.object(time, "sleep"):
             result = driver.run(
                 str(self.script),
                 timeout=0,
@@ -2626,8 +1630,8 @@ class TestGkeJobRun(unittest.TestCase):
         def sleep(_sec: float) -> None:
             os.kill(os.getpid(), signal.SIGTERM)
 
-        with patch.object(gke_job.subprocess, "run", fake), \
-             patch.object(gke_job.time, "sleep", sleep), \
+        with patch.object(subprocess, "run", fake), \
+             patch.object(time, "sleep", sleep), \
              contextlib.redirect_stderr(io.StringIO()) as err, \
              self.assertRaises(SystemExit) as ctx:
             driver.run(str(self.script), timeout=3600)
@@ -2660,122 +1664,62 @@ class TestGkeJobRun(unittest.TestCase):
 
         driver = make_driver(queue="lq")
         with patch.object(driver, "get_status", side_effect=status), \
-                patch.object(gke_job.time, "sleep", side_effect=sleep), \
-                patch.object(gke_job.time, "monotonic",
+                patch.object(time, "sleep", side_effect=sleep), \
+                patch.object(time, "monotonic",
                              side_effect=lambda: clock[0]):
             return driver._wait("job-1", timeout)
 
-    def test_queue_time_does_not_count_against_the_timeout(self):
+    def test_only_running_time_counts_against_the_timeout(self):
         # 40 minutes queued, then 25 of work, on a 1h timeout.
         result = self._wait_through(3600, (2400, "PENDING"), (1500, "RUNNING"),
                                     (1, "COMPLETED"))
         self.assertEqual(result.status, "COMPLETED")
-
-    def test_run_timeout_reports_the_time_queued(self):
+        # A timeout says how long it queued first.
         result = self._wait_through(3600, (600, "PENDING"), (1, "RUNNING"))
         self.assertEqual(result.details["queued_sec"], 600)
         self.assertIn("running for 3600s", result.error)
-
-    def test_a_job_that_never_starts_still_times_out(self):
+        # A Job that never starts still times out.
         result = self._wait_through(300, (1, "PENDING"))
         self.assertEqual(result.status, "PENDING")
         self.assertIn("never ran", result.error)
-
-    def test_interpreter_override_reaches_the_container(self):
-        fake = FakeKubectl({"get job": (0, job_json(succeeded=1), "")})
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.run(str(self.script),
-                       python_interpreter="/opt/py/bin/python")
-        container = fake.applied_manifest(
-        )["spec"]["template"]["spec"]["containers"][0]
-        command = workload_command(container)
-        self.assertEqual(command[0], "/opt/py/bin/python")
-
-    def test_shell_script_runs_under_bash(self):
-        # A `.sh` run without `--interpreter bash` went to python3 and died
-        # with a SyntaxError on `set -uo pipefail`.
-        script = Path(self.tmp.name) / "discover.sh"
-        script.write_text("set -uo pipefail\n", encoding="utf-8")
-        fake = FakeKubectl({"get job": (0, job_json(succeeded=1), "")})
-        driver = make_driver()
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.run(str(script), python_interpreter="/opt/py/bin/python")
-        container = fake.applied_manifest(
-        )["spec"]["template"]["spec"]["containers"][0]
-        self.assertEqual(workload_command(container),
-                         ["bash", "/app/discover.sh"])
-        # The interpreter still reaches the script, to find `vllm` beside it.
-        self.assertIn(
-            {
-                "name": "TPU_AGENT_SUITE_PYTHON",
-                "value": "/opt/py/bin/python"
-            }, container["env"])
-
-    def test_named_run_creates_a_job_under_that_name(self):
-        fake = FakeKubectl({"get job": (0, job_json(succeeded=1), "")})
-        driver = make_driver(job_name_prefix="agent")
-        with patch.object(gke_job.subprocess, "run", fake):
-            result = driver.run(str(self.script), job_name="qwen-bench")
-        name = result.details["job_id"]
-        self.assertRegex(name, r"^agent-qwen-bench-[0-9a-f]{6}$")
-        self.assertEqual(fake.applied_manifest()["metadata"]["name"], name)
-        self.assertIsNotNone(fake.find(f"create configmap {name}"))
-        self.assertIsNotNone(fake.find(f"delete job {name}"))
 
 
 def node_json(count: int = 1,
               chips: int = 4,
               accelerator: str = "tpu7x") -> str:
+    labels = {
+        base.ACCELERATOR_LABEL: accelerator,
+        base.TOPOLOGY_LABEL: "2x2x1"
+    }
     return json.dumps({
-        "items": [{
-            "metadata": {
-                "name": f"node-{i}",
-                "labels": {
-                    gke_job.ACCELERATOR_LABEL: accelerator,
-                    gke_job.TOPOLOGY_LABEL: "2x2x1",
-                },
-            },
-            "status": {
-                "allocatable": {
-                    gke_job.TPU_RESOURCE: str(chips)
-                }
-            },
-        } for i in range(count)]
+        "items": [
+            dict(metadata=dict(name=f"node-{i}", labels=labels),
+                 status=dict(allocatable={base.TPU_RESOURCE: str(chips)}))
+            for i in range(count)
+        ]
     })
 
 
 def pods_json(*requests: tuple[str, int, str]) -> str:
     """Pods as `kubectl get pods` lists them; a Pending one is unscheduled."""
-    return json.dumps({
-        "items": [{
-            "metadata": {
-                "name": name,
-                "namespace": "default"
-            },
-            "status": {
-                "phase": phase
-            },
-            "spec": {
-                **({} if phase == "Pending" else {
-                       "nodeName": "gke-tpu-node-1"
-                   }), "containers": [{
-                    "resources": {
-                        "limits": {
-                            gke_job.TPU_RESOURCE: str(chips)
-                        }
-                    }
-                }]
-            },
-        } for name, chips, phase in requests]
-    })
+    pods = []
+    for name, chips, phase in requests:
+        pod = failed_pod(phase=phase,
+                         name=name,
+                         node=None if phase == "Pending" else "gke-tpu-node-1")
+        pod["metadata"]["namespace"] = "default"
+        pod.setdefault("spec", {})["containers"] = [
+            dict(resources=dict(limits={base.TPU_RESOURCE: str(chips)}))
+        ]
+        pods.append(pod)
+    return json.dumps({"items": pods})
 
 
 class TestGkeJobInspect(unittest.TestCase):
 
     def inspect(self, fake: FakeKubectl, **overrides: Any):
         driver = make_driver(**overrides)
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             return driver.inspect()
 
     def _preflight(self, responses, **overrides):
@@ -2801,29 +1745,15 @@ class TestGkeJobInspect(unittest.TestCase):
         env = {
             k: v
             for k, v in os.environ.items()
-            if k != gke_job.base.GAC_ENV and not k.startswith("GKE_")
+            if k != base.GAC_ENV and not k.startswith("GKE_")
         }
         env.update(overrides.pop("env", {}))
-        with patch.object(gke_job.shutil, "which",
+        with patch.object(shutil, "which",
                           return_value="/bin/tool"), \
                 patch.dict(os.environ, env, clear=True), \
-                patch.object(gke_job.subprocess, "run", fake):
+                patch.object(subprocess, "run", fake):
             report = make_driver(**overrides).preflight()
         return report, {c.name: c for c in report.checks}, fake
-
-    def test_preflight(self):
-        """The cluster answers, and the settings a Job needs are there."""
-        report, checks, _ = self._preflight(
-            {"version": (1, "", "Unable to connect")})
-        self.assertFalse(report.reachable)
-        self.assertEqual(checks["cluster"].status, "fail")
-        self.assertNotIn("rbac:create jobs", checks)
-        report, checks, _ = self._preflight({}, image="")
-        self.assertTrue(report.reachable)
-        self.assertEqual(
-            {name
-             for name, c in checks.items() if c.status != "ok"},
-            {"dispatch_settings"})
 
     def test_preflight_checks_the_image_in_artifact_registry(self):
         image = "us-docker.pkg.dev/p/repo/torch-tpu:v1"
@@ -2931,100 +1861,53 @@ class TestGkeJobInspect(unittest.TestCase):
             checks, _ = self._node_pull(image, policy=self._readers(member))
             self.assertEqual(checks["image:node_pull"].status, "ok", member)
 
-    def test_preflight_node_pull_without_the_node_accounts(self):
-        """Pools gcloud cannot list: a generic warning, unless the
-        repository is public."""
-        public = self._readers("allAuthenticatedUsers")
-        for policy, status, says in ((None, "warn",
-                                      "the node pools' service account"),
-                                     (public, "ok", "grants the nodes read")):
-            checks, _ = self._node_pull(
-                "us-docker.pkg.dev/p/repo/img:1",
-                policy=policy,
-                **{"node-pools list": (1, "", "ERROR: PERMISSION_DENIED")})
-            pull = checks["image:node_pull"]
-            self.assertEqual(pull.status, status)
-            self.assertIn(says, pull.detail)
-
     def test_preflight_node_pull_picks_a_scaled_down_pool_by_topology(self):
-        """No TPU nodes to name the pool: the pool of that topology."""
-        pools = [{
-            "name": "tpu-pool",
+        """No TPU nodes to name the pool: the pool of that topology, or with
+        none of that topology, a generic account rather than every pool's."""
+        pools = json.dumps([{
             "placementPolicy": {
                 "tpuTopology": "2x2x1"
             },
             "config": {
-                "serviceAccount": "tpu@x.iam.gserviceaccount.com"
+                "serviceAccount": "tpu@x"
             }
         }, {
-            "name": "cpu-pool",
             "config": {
-                "serviceAccount": "cpu@x.iam.gserviceaccount.com"
+                "serviceAccount": "cpu@x"
             }
-        }]
-        checks, _ = self._node_pull(
-            "us-docker.pkg.dev/p/repo/img:1", **{
-                "get nodes": (0, "", ""),
-                "node-pools list": (0, json.dumps(pools), "")
-            })
-        pull = checks["image:node_pull"]
-        self.assertIn("tpu@x", pull.detail)
-        self.assertNotIn("cpu@x", pull.detail)
-        # No pool of that topology: not every pool's account, a generic one.
-        checks, _ = self._node_pull("us-docker.pkg.dev/p/repo/img:1",
-                                    driver={"tpu_topology": "4x4"},
-                                    **{
-                                        "get nodes": (0, "", ""),
-                                        "node-pools list":
-                                        (0, json.dumps(pools), "")
-                                    })
-        self.assertIn("the node pools' service account",
-                      checks["image:node_pull"].detail)
+        }])
+        for topology, said in (("2x2x1", "tpu@x"),
+                               ("4x4", "the node pools' service account")):
+            checks, _ = self._node_pull("us-docker.pkg.dev/p/repo/img:1",
+                                        driver={"tpu_topology": topology},
+                                        **{
+                                            "get nodes": (0, "", ""),
+                                            "node-pools list": (0, pools, "")
+                                        })
+            self.assertIn(said, checks["image:node_pull"].detail)
+            self.assertNotIn("cpu@x", checks["image:node_pull"].detail)
 
-    def test_preflight_says_nothing_of_node_pulls_it_cannot_judge(self):
-        # The cluster's own project.
-        checks, fake = self._node_pull(
-            "us-central2-docker.pkg.dev/tpu-nexus-767207/nexus-dev/img:1")
-        self.assertNotIn("image:node_pull", checks)
-        self.assertIsNone(fake.find("node-pools list"))
-        # Not Artifact Registry.
-        checks, _ = self._node_pull("docker.io/me/img:1")
-        self.assertNotIn("image:node_pull", checks)
-        # A context that does not name a GKE cluster, without GKE_*.
-        renamed = {"config current-context": (0, "ctx", "")}
-        checks, _ = self._node_pull("us-docker.pkg.dev/p/repo/img:1",
-                                    **renamed)
-        self.assertNotIn("image:node_pull", checks)
-        # GKE_* names it instead.
-        gke = {
-            f"GKE_{part}": value
-            for part, value in (("CLUSTER", "c"), ("LOCATION", "l"),
-                                ("PROJECT", "cp"))
-        }
-        checks, fake = self._node_pull("us-docker.pkg.dev/p/repo/img:1",
-                                       driver={"env": gke},
-                                       **renamed)
-        self.assertEqual(checks["image:node_pull"].status, "warn")
-        self.assertIn("--cluster c --location l --project cp",
-                      " ".join(fake.find("node-pools list")))
-        # An image that does not exist: its failure says enough.
-        checks, _ = self._node_pull(
-            "us-docker.pkg.dev/p/repo/img:1",
-            **{"images describe": (1, "", "ERROR: Image not found.")})
-        self.assertNotIn("image:node_pull", checks)
-
-    def test_preflight_times_out_as_a_network_problem(self):
-        """A cluster that never answers is not a credentials problem."""
-        _, checks, _ = self._preflight({
+    def test_preflight_reachability(self):
+        """A cluster that never answers is not a credentials problem, and
+        nothing is asked of it; one that answers flags only what is unset."""
+        report, checks, _ = self._preflight({
             "version": (1, "", "Unable to connect to the server: context "
                         "deadline exceeded")
         })
+        self.assertFalse(report.reachable)
         self.assertEqual(checks["cluster"].status, "fail")
+        self.assertNotIn("rbac:create jobs", checks)
         self.assertIn("authorized networks", checks["cluster"].fix)
         self.assertIn("--dns-endpoint", checks["cluster"].fix)
         _, checks, _ = self._preflight(
             {"version": (1, "", "error: You must be logged in")})
         self.assertNotIn("authorized networks", checks["cluster"].fix)
+        report, checks, _ = self._preflight({}, image="")
+        self.assertTrue(report.reachable)
+        self.assertEqual(
+            {name
+             for name, c in checks.items() if c.status != "ok"},
+            {"dispatch_settings"})
 
     def test_preflight_warns_on_an_unknown_accelerator(self):
         report, checks, fake = self._preflight({"get nodes": (0, "", "")},
@@ -3066,13 +1949,6 @@ class TestGkeJobInspect(unittest.TestCase):
         self.assertEqual(checks["rbac:create jobs"].status, "fail")
         self.assertIn("Ask a cluster admin", checks["rbac:create jobs"].fix)
 
-    def test_preflight_without_a_queue_skips_kueue(self):
-        _, checks, fake = self._preflight({}, priority="low")
-        self.assertNotIn("namespace", checks)  # `default` always exists
-        self.assertNotIn("kueue:queue", checks)
-        self.assertNotIn("kueue:priority", checks)
-        self.assertIsNone(fake.find("localqueue"))
-
     def test_preflight_checks_staging_only_with_a_bucket(self):
         staged = [base.PreflightCheck("staging:signing", "fail", "no")]
         with patch.object(gcs_staging, "preflight_checks",
@@ -3088,34 +1964,11 @@ class TestGkeJobInspect(unittest.TestCase):
             self._preflight({})
             staging.assert_called_once()
 
-    def test_preflight_checks_the_pod_service_account_and_its_nodes(self):
-        """A missing account leaves the Job with no pod, and a
-        node without the metadata server gives the pod no token."""
-        _, checks, fake = self._preflight(
-            {
-                "get serviceaccount":
-                (1, "", 'Error from server (NotFound): serviceaccounts "ksa" '
-                 "not found"),
-                "get nodes": (0, "", ""),
-            },
-            pod_service_account="ksa")
-        self.assertEqual(checks["pod_service_account"].status, "fail")
-        fix = checks["pod_service_account"].fix
-        self.assertIn("kubectl create serviceaccount ksa -n default", fix)
-        self.assertIn("iam.gke.io/gcp-service-account", fix)
-        self.assertIn(f"{gke_job.WORKLOAD_IDENTITY_LABEL}=true",
-                      " ".join(fake.find("get nodes")))
-        # No TPU node at all: the plain warning, not the Workload Identity one.
-        self.assertNotIn("GKE_METADATA", checks["tpu_nodes"].fix)
-        _, checks, _ = self._preflight({}, pod_service_account="ksa")
-        self.assertEqual(checks["pod_service_account"].status, "ok")
-        _, checks, _ = self._preflight({})
-        self.assertNotIn("pod_service_account", checks)
-
     def test_preflight_names_tpu_pools_without_workload_identity(self):
         _, checks, _ = self._preflight(
             {
-                f"{gke_job.WORKLOAD_IDENTITY_LABEL}=true": (0, "", ""),
+                f"{gke_job.gke_common.WORKLOAD_IDENTITY_LABEL}=true":
+                (0, "", ""),
                 "get nodes": (0, "tpu-pool\n", ""),
             },
             pod_service_account="ksa")
@@ -3144,81 +1997,52 @@ class TestGkeJobInspect(unittest.TestCase):
         self.assertNotIn("hf_cache_pvc", checks)
         self.assertIsNone(fake.find("get pvc"))
 
-        report, checks, fake = self._preflight({"get pvc": self._pvc()},
-                                               namespace="ns",
-                                               hf_cache_pvc="hf-cache")
+        _, checks, fake = self._preflight({"get pvc": self._pvc()},
+                                          namespace="ns",
+                                          hf_cache_pvc="hf-cache")
         self.assertEqual(checks["hf_cache_pvc"].status, "ok")
         self.assertIn("Bound, ReadWriteMany, 1Ti",
                       checks["hf_cache_pvc"].detail)
         self.assertIn("-n ns", " ".join(fake.find("get pvc hf-cache")))
 
-    def test_preflight_fails_a_missing_hf_cache_pvc(self):
-        # Every Job naming it would sit Pending, so the installer must flag
-        # it before anything is written.
-        report, checks, _ = self._preflight(
-            {
-                "get pvc": (1, "", 'Error from server (NotFound): '
-                            'persistentvolumeclaims "hf-cache" not found')
-            },
-            hf_cache_pvc="hf-cache")
-        self.assertEqual(checks["hf_cache_pvc"].status, "fail")
-        self.assertIn("not found", checks["hf_cache_pvc"].detail)
-        self.assertIn("Ask a cluster admin to create a ReadWriteMany",
-                      checks["hf_cache_pvc"].fix)
-        self.assertEqual(report.status, "fail")
-
-    def test_preflight_fails_an_hf_cache_pvc_that_is_not_read_write_many(self):
-        _, checks, _ = self._preflight(
-            {"get pvc": self._pvc(modes=("ReadWriteOnce", ))},
-            hf_cache_pvc="hf-cache")
-        self.assertEqual(checks["hf_cache_pvc"].status, "fail")
-        self.assertIn("ReadWriteOnce, not ReadWriteMany",
-                      checks["hf_cache_pvc"].detail)
-
-    def test_preflight_hf_cache_pvc_pending(self):
-        # Pending is healthy under a class that binds on first use...
-        _, checks, fake = self._preflight(
-            {
-                "get pvc": self._pvc(phase="Pending"),
-                "get storageclass": (0, "WaitForFirstConsumer", ""),
-            },
-            hf_cache_pvc="hf-cache")
-        self.assertEqual(checks["hf_cache_pvc"].status, "warn")
-        self.assertIn("until the first Job", checks["hf_cache_pvc"].detail)
-        self.assertIn("filestore-rwx", " ".join(fake.find("get storageclass")))
-        # ...and a failure under one that should already have bound it.
-        _, checks, _ = self._preflight(
-            {
-                "get pvc": self._pvc(phase="Pending"),
-                "get storageclass": (0, "Immediate", ""),
-            },
-            hf_cache_pvc="hf-cache")
-        self.assertEqual(checks["hf_cache_pvc"].status, "fail")
-        self.assertIn("not Bound", checks["hf_cache_pvc"].detail)
-        # A class this account cannot read leaves it undecided.
-        _, checks, _ = self._preflight(
-            {
-                "get pvc": self._pvc(phase="Pending"),
-                "get storageclass": (1, "", "Error from server (Forbidden)"),
-            },
-            hf_cache_pvc="hf-cache")
-        self.assertEqual(checks["hf_cache_pvc"].status, "warn")
-
-    def test_preflight_warns_when_the_hf_cache_pvc_cannot_be_read(self):
-        _, checks, _ = self._preflight(
-            {
-                "get pvc": (1, "", 'Error from server (Forbidden): '
-                            'persistentvolumeclaims is forbidden')
-            },
-            hf_cache_pvc="hf-cache")
-        self.assertEqual(checks["hf_cache_pvc"].status, "warn")
-
-    def test_no_matching_nodes_reports_no_accelerator(self):
-        fake = FakeKubectl({"get nodes": (0, json.dumps({"items": []}), "")})
-        profile = self.inspect(fake)
-        self.assertEqual(profile.accelerator, "none")
-        self.assertEqual(profile.chips, 0)
-        self.assertEqual(profile.status, "no_accelerator")
+    def test_preflight_judges_an_unusable_hf_cache_pvc(self):
+        # A missing claim leaves every Job naming it Pending, so the
+        # installer must flag it before anything is written.
+        pending = self._pvc(phase="Pending")
+        forbidden = (1, "", "Error from server (Forbidden)")
+        cases = [
+            # (the claim, its storage class's binding mode, status, said)
+            ((1, "", 'Error from server (NotFound): persistentvolumeclaims '
+              '"hf-cache" not found'), None, "fail",
+             "Ask a cluster admin to create a ReadWriteMany"),
+            (self._pvc(modes=("ReadWriteOnce", )), None, "fail",
+             "ReadWriteOnce, not ReadWriteMany"),
+            # Unreadable is not proof it is missing.
+            (forbidden, None, "warn", ""),
+            # Pending is healthy under a class that binds on first use, a
+            # failure under one that should already have bound it, and
+            # undecided under one this account cannot read.
+            (pending, (0, "WaitForFirstConsumer", ""), "warn",
+             "until the first Job"),
+            (pending, (0, "Immediate", ""), "fail", "not Bound"),
+            (pending, forbidden, "warn", ""),
+        ]
+        for answer, binding, status, said in cases:
+            with self.subTest(status=status, said=said):
+                report, checks, fake = self._preflight(
+                    {
+                        "get pvc": answer,
+                        "get storageclass": binding or (0, "", "")
+                    },
+                    hf_cache_pvc="hf-cache")
+                check = checks["hf_cache_pvc"]
+                self.assertEqual(check.status, status)
+                self.assertIn(said, check.detail + check.fix)
+                if status == "fail":
+                    self.assertEqual(report.status, "fail")
+                if binding:
+                    self.assertIn("filestore-rwx",
+                                  " ".join(fake.find("get storageclass")))
 
     def test_a_pool_with_no_node_still_reports_the_profiles_tpu(self):
         """Review on #840: an autoscaled pool at zero nodes read as
@@ -3226,30 +2050,18 @@ class TestGkeJobInspect(unittest.TestCase):
         and TP nothing to be sized to. What the profile names is reported in
         `details`, and the top-level fields still say no node is there."""
         fake = FakeKubectl({"get nodes": (0, json.dumps({"items": []}), "")})
-        with patch.object(gke_job,
+        with patch.object(gke_job.manifest,
                           "_chip_spec",
                           return_value=({
                               "hbm_gb": 192.0,
                               "devices_per_chip": 2
                           }, "")):
             profile = self.inspect(fake, tpu_accelerator="tpu7x")
-        self.assertEqual(profile.status, "no_accelerator")
+        self.assertEqual((profile.status, profile.accelerator, profile.chips),
+                         ("no_accelerator", "none", 0))
         details = profile.details
         self.assertEqual((details["tpu_accelerator"], details["job_devices"],
                           details["hbm_gb_per_device"]), ("tpu7x", 8, 96.0))
-
-    def test_chips_summed_across_the_pool(self):
-        fake = FakeKubectl({
-            "get nodes": (0, node_json(count=4, chips=4), ""),
-            "get pods": (0, pods_json(), ""),
-        })
-        profile = self.inspect(fake)
-        self.assertEqual(profile.accelerator, "tpu7x")
-        self.assertEqual(profile.topology, "2x2x1")
-        self.assertEqual(profile.chips, 16)
-        self.assertEqual(profile.available_chips, 16)
-        self.assertEqual(profile.status, "healthy")
-        self.assertEqual(profile.hbm_gb, 192.0)
 
     def test_job_devices_and_hbm_come_from_tpu_info(self):
         # A 2x2x1 tpu7x Job is 4 chips but 8 devices of 96 GB each; reporting
@@ -3258,10 +2070,9 @@ class TestGkeJobInspect(unittest.TestCase):
         cases = [
             # (label, tpu_info importable, hbm_gb, devices_per_chip, note)
             ("tpu7x", True, 192.0, 2, None),
-            ("tpu-v6e-slice", True, 32.0, 1, None),
             ("tpu-v99-slice", True, 0.0, None, "tpu-v99-slice"),
             ("tpu7x", False, 0.0, None,
-             "Before anything else, ask the user to install this package"),
+             "Before anything else, ask the user to run `"),
         ]
         for label, has_tpu_info, hbm_gb, per_chip, note in cases:
             with self.subTest(label=label, tpu_info=has_tpu_info):
@@ -3293,8 +2104,14 @@ class TestGkeJobInspect(unittest.TestCase):
             "get pods": (0, pods_json(("busy", 4, "Running")), ""),
         })
         profile = self.inspect(fake)
-        self.assertEqual(profile.available_chips, 4)
+        self.assertEqual((profile.chips, profile.available_chips), (8, 4))
         self.assertEqual(profile.held_by, ["default/busy"])
+        # Only the configured pool's nodes are counted.
+        selector = " ".join(fake.find("get nodes"))
+        self.assertIn(f"{base.ACCELERATOR_LABEL}=tpu7x", selector)
+        self.assertIn(f"{base.TOPOLOGY_LABEL}=2x2x1", selector)
+        fake.responses["get nodes"] = (0, node_json(count=1, chips=4), "")
+        self.assertEqual(self.inspect(fake).status, "busy")
 
     def test_finished_and_unscheduled_pods_do_not_hold_chips(self):
         # A Pending pod with no node is waiting for chips, not holding them;
@@ -3309,13 +2126,6 @@ class TestGkeJobInspect(unittest.TestCase):
         self.assertEqual(profile.available_chips, 4)
         self.assertEqual(profile.held_by, [])
 
-    def test_full_pool_reports_busy(self):
-        fake = FakeKubectl({
-            "get nodes": (0, node_json(count=1, chips=4), ""),
-            "get pods": (0, pods_json(("busy", 4, "Running")), ""),
-        })
-        self.assertEqual(self.inspect(fake).status, "busy")
-
     def test_unlistable_pods_leave_contention_unknown(self):
         # Not 0 and not `chips`: one would report a healthy pool as saturated
         # and the other would send a scheduler at chips somebody else holds.
@@ -3327,40 +2137,19 @@ class TestGkeJobInspect(unittest.TestCase):
         self.assertIsNone(profile.available_chips)
         self.assertEqual(profile.status, "unknown_contention")
 
-    def test_unknown_generation_reports_no_hbm_and_says_why(self):
-        nodes = json.dumps({
-            "items": [{
-                "metadata": {
-                    "name": "n",
-                    "labels": {
-                        gke_job.ACCELERATOR_LABEL: "tpu9z",
-                        gke_job.TOPOLOGY_LABEL: "1x1",
-                    },
-                },
-                "status": {
-                    "allocatable": {
-                        gke_job.TPU_RESOURCE: "1"
-                    }
-                },
-            }]
-        })
-        fake = FakeKubectl({
-            "get nodes": (0, nodes, ""),
-            "get pods": (0, pods_json(), ""),
-        })
-        profile = self.inspect(fake)
-        self.assertEqual(profile.hbm_gb, 0.0)
-        self.assertIn("tpu9z", profile.details["hbm_gb_note"])
 
-    def test_selector_narrows_to_the_configured_pool(self):
-        fake = FakeKubectl({
-            "get nodes": (0, node_json(), ""),
-            "get pods": (0, pods_json(), ""),
-        })
-        self.inspect(fake, tpu_accelerator="tpu7x", tpu_topology="2x2x1")
-        selector = fake.find("get nodes")
-        self.assertIn(f"{gke_job.ACCELERATOR_LABEL}=tpu7x", " ".join(selector))
-        self.assertIn(f"{gke_job.TOPOLOGY_LABEL}=2x2x1", " ".join(selector))
+class _KeyCreds:
+    """Credentials with their own signer: a key or impersonation."""
+    signer_email = "sa@proj.iam.gserviceaccount.com"
+
+    def sign_bytes(self, data):
+        del data
+        return b"sig"
+
+
+class _UserCreds:
+    """A person's ADC login: a token, and no way to sign."""
+    token = "mock-user-token"
 
 
 class TestGkeJobStaging(unittest.TestCase):
@@ -3369,53 +2158,6 @@ class TestGkeJobStaging(unittest.TestCase):
     def setUp(self):
         # Dispatch writes job records; none of them belong in the real store.
         self.enterContext(_job_store())
-
-    def test_clean_bucket_name(self):
-        self.assertEqual(gcs_staging.clean_bucket_name("gs://my-bucket"),
-                         "my-bucket")
-        self.assertEqual(gcs_staging.clean_bucket_name("gs://my-bucket/"),
-                         "my-bucket")
-        self.assertEqual(gcs_staging.clean_bucket_name("my-bucket"),
-                         "my-bucket")
-        self.assertEqual(gcs_staging.clean_bucket_name(""), "")
-
-    def test_build_pod_bootstrap_command(self):
-        cmd = gcs_staging.build_pod_bootstrap_command(
-            interpreter="python3",
-            script_mount="/opt/workload",
-            script_name="workload.py",
-            args=["--flag", "val"],
-            input_urls=[("sub/in.txt", "https://gcs/in?sig=1")],
-            output_urls=[("out.txt", "https://gcs/out?sig=2")],
-        )
-        self.assertEqual(cmd[0], "bash")
-        self.assertEqual(cmd[1], "-c")
-        script = cmd[2]
-        self.assertIn("mkdir -p sub", script)
-        self.assertIn(
-            f"mkdir -p {gcs_staging.POD_WORK_DIR} && cd "
-            f"{gcs_staging.POD_WORK_DIR}", script)
-        self.assertIn("curl -fsSL --retry 3 -o sub/in.txt", script)
-        self.assertIn("python3 /opt/workload/workload.py --flag val", script)
-        self.assertIn(
-            "curl -fsSL --retry 3 -X PUT -H 'Content-Type: application/octet-stream' "
-            "--upload-file out.txt",
-            script,
-        )
-        self.assertIn("exit $WORKLOAD_EXIT_CODE", script)
-
-    def test_bootstrap_uploads_the_log_without_failing_on_it(self):
-        script = gcs_staging.build_pod_bootstrap_command(
-            interpreter="python3",
-            script_mount="/opt/workload",
-            script_name="workload.py",
-            log_url="https://gcs/log?sig=3",
-        )[2]
-        self.assertIn(
-            f"tee {gcs_staging.POD_LOG_FILE} < {gcs_staging.LOG_FIFO} &",
-            script)
-        self.assertIn(f"> {gcs_staging.LOG_FIFO} 2>&1 &", script)
-        self.assertIn("https://gcs/log?sig=3' || echo", script)
 
     @staticmethod
     def _client_with(creds: Any) -> tuple[MagicMock, MagicMock]:
@@ -3427,63 +2169,32 @@ class TestGkeJobStaging(unittest.TestCase):
             "https://storage.googleapis.com/test-signed-url")
         return client, blob
 
-    def test_key_or_impersonated_credentials_sign_locally(self):
-        """Credentials with their own signer need no IAM detour."""
-
-        class KeyCreds:
-            signer_email = "sa@proj.iam.gserviceaccount.com"
-
-            def sign_bytes(self, data):
-                return b"sig"
-
-        client, blob = self._client_with(KeyCreds())
-        url = gcs_staging.generate_v4_signed_url("my-bucket",
-                                                 "in/data.txt",
-                                                 client=client)
-        self.assertEqual(url, "https://storage.googleapis.com/test-signed-url")
-        kwargs = blob.generate_signed_url.call_args.kwargs
-        self.assertNotIn("service_account_email", kwargs)
-        self.assertNotIn("access_token", kwargs)
-
-    def test_ambient_gce_credentials_sign_through_iam_after_refresh(self):
+    def test_iam_signing_failure_names_the_missing_role(self):
         """A GCE/GKE identity has no key; it is refreshed for its real
         email and token, and those go to the IAM signBlob path."""
 
         class GceCreds:
-
-            def __init__(self):
-                self.service_account_email = "default"
-                self.token = None
+            service_account_email = "default"
+            token = None
 
             def refresh(self, req):
+                del req
                 self.service_account_email = "my-sa@proj.iam.gserviceaccount.com"
                 self.token = "fake-token"
 
         creds = GceCreds()
         client, blob = self._client_with(creds)
-        with _fake_google_auth(creds):
-            url = gcs_staging.generate_v4_signed_url("my-bucket",
-                                                     "in/data.txt",
-                                                     client=client)
-        self.assertEqual(url, "https://storage.googleapis.com/test-signed-url")
+        blob.generate_signed_url.side_effect = Exception(
+            "403 Forbidden: Permission denied")
+        with _fake_google_auth(creds), \
+                self.assertRaises(ComputeConfigError) as ctx:
+            gcs_staging.generate_v4_signed_url("my-bucket",
+                                               "in/data.txt",
+                                               client=client)
         kwargs = blob.generate_signed_url.call_args.kwargs
         self.assertEqual(kwargs["service_account_email"],
                          "my-sa@proj.iam.gserviceaccount.com")
         self.assertEqual(kwargs["access_token"], "fake-token")
-
-    def test_iam_signing_failure_names_the_missing_role(self):
-
-        class GceCreds:
-            service_account_email = "my-sa@proj.iam.gserviceaccount.com"
-            token = "fake-token"
-
-        client, blob = self._client_with(GceCreds())
-        blob.generate_signed_url.side_effect = Exception(
-            "403 Forbidden: Permission denied")
-        with self.assertRaises(ComputeConfigError) as ctx:
-            gcs_staging.generate_v4_signed_url("my-bucket",
-                                               "in/data.txt",
-                                               client=client)
         self.assertEqual(ctx.exception.error_code, "SIGNING_FAILED")
         self.assertIn("serviceAccountTokenCreator", str(ctx.exception))
         self.assertIn("my-sa@proj.iam.gserviceaccount.com", str(ctx.exception))
@@ -3503,14 +2214,7 @@ class TestGkeJobStaging(unittest.TestCase):
             yield client, blob
 
     def test_preflight_signs_and_lists_the_bucket(self):
-
-        class KeyCreds:
-            signer_email = "sa@proj.iam.gserviceaccount.com"
-
-            def sign_bytes(self, data):
-                return b"sig"
-
-        with self._fake_storage(KeyCreds()) as (client, blob):
+        with self._fake_storage(_KeyCreds()) as (client, blob):
             checks = gcs_staging.preflight_checks("b")
         self.assertEqual([(c.name, c.status) for c in checks],
                          [("staging:credentials", "ok"),
@@ -3519,37 +2223,32 @@ class TestGkeJobStaging(unittest.TestCase):
         client.list_blobs.assert_called_once_with("b",
                                                   prefix=None,
                                                   max_results=1)
-        # A folder in the bucket is listed as one, not as a bucket name.
-        with self._fake_storage(KeyCreds()) as (client, _):
-            gcs_staging.preflight_checks("gs://b/runs/")
+        # A folder in the bucket is listed as one, not as a bucket name. A
+        # staging credential is used as given, never swapped for ADC.
+        with self._fake_storage(_KeyCreds()) as (client, _):
+            storage = sys.modules["google.cloud.storage"]
+            with patch("google.auth.default") as default:
+                checks = gcs_staging.preflight_checks("gs://b/runs/",
+                                                      credentials=_KeyCreds())
         client.list_blobs.assert_called_once_with("b",
                                                   prefix="runs/",
                                                   max_results=1)
+        default.assert_not_called()
+        self.assertIsInstance(storage.Client.call_args.kwargs["credentials"],
+                              _KeyCreds)
+        self.assertEqual(checks[0].status, "ok")
 
     def test_preflight_does_not_ask_a_pod_token_setup_to_sign(self):
         """With pod_service_account nothing is signed, so a
         person's login, which cannot sign, is not a warning."""
-
-        class UserCreds:
-            token = "mock-user-token"
-
-        with self._fake_storage(UserCreds()) as (_, blob):
+        with self._fake_storage(_UserCreds()) as (_, blob):
             checks = gcs_staging.preflight_checks("b",
                                                   pod_service_account="ksa")
-        self.assertEqual({c.name: c.status
-                          for c in checks}, {
-                              "staging:credentials": "ok",
-                              "staging:signing": "ok",
-                              "staging:bucket": "ok"
-                          })
+        self.assertEqual([c.status for c in checks], ["ok"] * 3)
         blob.generate_signed_url.assert_not_called()
 
     def test_preflight_reports_credentials_that_cannot_sign(self):
-
-        class UserCreds:
-            token = "mock-user-token"
-
-        with self._fake_storage(UserCreds()) as (client, _):
+        with self._fake_storage(_UserCreds()) as (client, _):
             error = Exception("403 no list")
             error.code = 403
             client.list_blobs.side_effect = error
@@ -3559,32 +2258,6 @@ class TestGkeJobStaging(unittest.TestCase):
                       checks["staging:signing"].fix)
         # Forbidden to list is not proof the bucket is missing.
         self.assertEqual(checks["staging:bucket"].status, "warn")
-
-    def test_user_credentials_are_refused_with_a_way_forward(self):
-        """`gcloud auth application-default login` on a laptop: no key, no
-        service account. Say so before touching the library, and say what
-        to do instead."""
-
-        class UserCreds:
-            token = "mock-user-token"
-
-        client, blob = self._client_with(UserCreds())
-        with self.assertRaises(ComputeConfigError) as ctx:
-            gcs_staging.generate_v4_signed_url("my-bucket",
-                                               "in/data.txt",
-                                               client=client)
-        self.assertEqual(ctx.exception.error_code, "SIGNING_UNSUPPORTED")
-        message = str(ctx.exception)
-        self.assertIn("--impersonate-service-account", message)
-        # The staging-only credential comes first: it signs without changing
-        # who kubectl is.
-        self.assertLess(message.index(gcs_staging.SERVICE_ACCOUNT_PARAM),
-                        message.index("--impersonate-service-account"))
-        self.assertIn(gcs_staging.KEY_FILE_PARAM, message)
-        self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", message)
-        # Never mentioned without what it does to kubectl.
-        self.assertIn(gke_job.base.KUBECTL_IDENTITY_WARNING, message)
-        blob.generate_signed_url.assert_not_called()
 
     def test_staging_credential_validation(self):
         self.assertIsNone(gcs_staging.staging_credentials(None, None))
@@ -3608,9 +2281,9 @@ class TestGkeJobStaging(unittest.TestCase):
         driver = make_driver(
             staging_bucket="gs://b",
             staging_service_account_key="/nonexistent/key.json")
-        self.assertEqual(driver._staging(best_effort=True), {})
+        self.assertEqual(driver.storage.client_kwargs(best_effort=True), {})
         with self.assertRaises(ComputeConfigError):
-            driver._staging()
+            driver.storage.client_kwargs()
 
     @unittest.skipUnless(_google_auth_errors, "needs google-auth")
     def test_impersonated_staging_credential_signs_locally(self):
@@ -3623,10 +2296,10 @@ class TestGkeJobStaging(unittest.TestCase):
                                  "proj")) as default, patch.dict(os.environ,
                                                                  {},
                                                                  clear=False):
-            os.environ.pop(gke_job.base.GAC_ENV, None)
+            os.environ.pop(base.GAC_ENV, None)
             creds = gcs_staging.staging_credentials(
                 "stager@p.iam.gserviceaccount.com")
-            self.assertNotIn(gke_job.base.GAC_ENV, os.environ)
+            self.assertNotIn(base.GAC_ENV, os.environ)
         default.assert_called_once()
         self.assertIsInstance(creds, impersonated_credentials.Credentials)
         self.assertEqual(creds.signer_email,
@@ -3644,25 +2317,6 @@ class TestGkeJobStaging(unittest.TestCase):
                 raise _google_auth_errors.RefreshError("getAccessToken denied")
         self.assertEqual(ctx.exception.error_code, "GCS_FORBIDDEN")
         self.assertIn("serviceAccountTokenCreator", str(ctx.exception))
-
-    def test_preflight_uses_the_staging_credential_not_adc(self):
-
-        class KeyCreds:
-            signer_email = "stager@p.iam.gserviceaccount.com"
-
-            def sign_bytes(self, data):
-                return b"sig"
-
-        with self._fake_storage(MagicMock()) as (client, _):
-            storage = sys.modules["google.cloud.storage"]
-            with patch("google.auth.default") as default:
-                checks = gcs_staging.preflight_checks("b",
-                                                      credentials=KeyCreds())
-        default.assert_not_called()
-        self.assertIsInstance(storage.Client.call_args.kwargs["credentials"],
-                              KeyCreds)
-        self.assertEqual(checks[0].name, "staging:credentials")
-        self.assertEqual(checks[0].status, "ok")
 
     @unittest.skipUnless(_google_auth_errors, "needs google-auth")
     def test_credentials_that_will_not_refresh_cannot_sign(self):
@@ -3682,64 +2336,33 @@ class TestGkeJobStaging(unittest.TestCase):
         self.assertEqual(ctx.exception.error_code, "SIGNING_FAILED")
         self.assertIn("metadata unreachable", str(ctx.exception))
 
-    @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
-    def test_run_requires_staging_bucket_when_staging(self):
-        driver = make_driver()
-        with tempfile.NamedTemporaryFile("w", suffix=".py") as tf:
-            tf.write("print('ok')\n")
-            tf.flush()
-            staged = base.StagedFile(tf.name, "in.txt")
-            with self.assertRaises(ComputeConfigError) as ctx:
-                driver.run(tf.name, inputs=[staged])
-            self.assertEqual(ctx.exception.error_code,
-                             "STAGING_NOT_CONFIGURED")
-            self.assertEqual(ctx.exception.missing, ["staging_bucket"])
+    @staticmethod
+    def _script_and_input(directory: str) -> tuple[Path, Path]:
+        """A workload script and one input file for it, in `directory`."""
+        script_path = Path(directory) / "script.py"
+        script_path.write_text("print('test')")
+        in_file = Path(directory) / "input.dat"
+        in_file.write_text("in-data")
+        return script_path, in_file
 
-    @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
-    @patch("framework.compute.drivers.gcs_staging.delete_staged_prefix")
-    @patch("framework.compute.drivers.gcs_staging.download_file_from_gcs")
-    @patch("framework.compute.drivers.gcs_staging.generate_v4_signed_url")
-    @patch("framework.compute.drivers.gcs_staging.upload_file_to_gcs")
-    def test_run_with_gcs_staging(self, mock_upload, mock_sign, mock_download,
-                                  mock_delete):
-        mock_sign.return_value = "https://storage.googleapis.com/test-url"
-        fake = FakeKubectl({
+    @staticmethod
+    def _finished_job() -> FakeKubectl:
+        """A cluster on which the Job succeeds and logs `hello output`."""
+        return FakeKubectl({
             "get job": (0, job_json(succeeded=1), ""),
             "wait": (0, "job.batch/run-1 condition met", ""),
             "get pods": (0, _DONE_POD, ""),
             "logs": (0, "hello output\n", ""),
         })
-        driver = make_driver(staging_bucket="gs://test-staging-bucket")
 
-        with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "script.py"
-            script_path.write_text("print('test')")
-            in_file = Path(td) / "input.dat"
-            in_file.write_text("in-data")
-            out_file = Path(td) / "output.dat"
-
-            def fake_download(bucket, blob, dest):
-                Path(dest).write_text("downloaded-result")
-                return True
-
-            mock_download.side_effect = fake_download
-
-            staged_in = base.StagedFile(str(in_file), "input.dat")
-            staged_out = base.StagedFile(str(out_file), "output.dat")
-
-            with patch.object(gke_job.subprocess, "run", fake):
-                res = driver.run(
-                    str(script_path),
-                    inputs=[staged_in],
-                    outputs=[staged_out],
-                )
-            self.assertEqual(res.exit_code, 0)
-            self.assertEqual(res.stdout, "hello output\n")
-            self.assertTrue(out_file.is_file())
-            self.assertEqual(out_file.read_text(), "downloaded-result")
-            mock_upload.assert_called_once()
-            mock_delete.assert_called_with("test-staging-bucket",
-                                           f"{res.details['job_id']}/")
+    @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
+    def test_run_requires_staging_bucket_when_staging(self):
+        script = str(hello_script(self))
+        with self.assertRaises(ComputeConfigError) as ctx:
+            make_driver().run(script,
+                              inputs=[base.StagedFile(script, "in.txt")])
+        self.assertEqual((ctx.exception.error_code, ctx.exception.missing),
+                         ("STAGING_NOT_CONFIGURED", ["staging_bucket"]))
 
     @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
     @patch("framework.compute.drivers.gcs_staging.get_storage_client")
@@ -3756,33 +2379,30 @@ class TestGkeJobStaging(unittest.TestCase):
         for kubectl to inherit."""
         mock_sign.return_value = "https://storage.googleapis.com/test-url"
         client = mock_client.return_value
-        fake = FakeKubectl({
-            "get job": (0, job_json(succeeded=1), ""),
-            "wait": (0, "job.batch/run-1 condition met", ""),
-            "get pods": (0, _DONE_POD, ""),
-            "logs": (0, "hello output\n", ""),
-        })
+        fake = self._finished_job()
         driver = make_driver(
             staging_bucket="gs://test-staging-bucket",
             staging_service_account="stager@p.iam.gserviceaccount.com",
         )
+        driver.run_id = "r1"
         mock_download.side_effect = lambda _b, _k, dest, **_kw: bool(
             Path(dest).write_text("downloaded-result"))
         environ = dict(os.environ)
         with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "script.py"
-            script_path.write_text("print('test')")
-            in_file = Path(td) / "input.dat"
-            in_file.write_text("in-data")
-            with patch.object(gke_job.subprocess, "run", fake):
+            script_path, in_file = self._script_and_input(td)
+            out_file = Path(td) / "o.dat"
+            with patch.object(subprocess, "run", fake):
                 res = driver.run(
                     str(script_path),
                     inputs=[base.StagedFile(str(in_file), "input.dat")],
-                    outputs=[
-                        base.StagedFile(str(Path(td) / "o.dat"), "o.dat")
-                    ],
+                    outputs=[base.StagedFile(str(out_file), "o.dat")],
                 )
-        self.assertEqual(res.exit_code, 0)
+            self.assertEqual(out_file.read_text(), "downloaded-result")
+        self.assertEqual((res.exit_code, res.stdout), (0, "hello output\n"))
+        mock_upload.assert_called_once()
+        mock_delete.assert_called_with("test-staging-bucket",
+                                       f"{res.details['job_id']}/",
+                                       client=client)
         mock_creds.assert_called_once_with("stager@p.iam.gserviceaccount.com",
                                            None)
         mock_client.assert_called_once_with(
@@ -3792,92 +2412,13 @@ class TestGkeJobStaging(unittest.TestCase):
             for call in mock.call_args_list:
                 self.assertIs(call.kwargs.get("client"), client)
         self.assertEqual(dict(os.environ), environ)
-
-    @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
-    @patch("framework.compute.drivers.gcs_staging.delete_staged_prefix")
-    @patch("framework.compute.drivers.gcs_staging.generate_v4_signed_url")
-    @patch("framework.compute.drivers.gcs_staging.upload_file_to_gcs")
-    def test_submit_signs_for_the_long_haul(self, mock_upload, mock_sign,
-                                            mock_delete):
-        """A submitted job may outlive any wait, so its URLs must too."""
-        del mock_upload, mock_delete
-        mock_sign.return_value = "https://storage.googleapis.com/test-url"
-        fake = FakeKubectl()
-        driver = make_driver(staging_bucket="gs://test-staging-bucket")
-        with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "script.py"
-            script_path.write_text("print('test')")
-            in_file = Path(td) / "input.dat"
-            in_file.write_text("in-data")
-            with patch.object(gke_job.subprocess, "run", fake):
-                driver.submit(
-                    str(script_path),
-                    inputs=[base.StagedFile(str(in_file), "input.dat")],
-                    outputs=[
-                        base.StagedFile(str(Path(td) / "o.dat"), "o.dat")
-                    ],
-                )
-        for call in mock_sign.call_args_list:
-            self.assertEqual(call.kwargs["expiration_seconds"],
-                             gke_job.SUBMIT_URL_EXP_SEC)
-
-    @patch("framework.compute.drivers.gcs_staging.generate_v4_signed_url")
-    def test_submit_without_files_survives_credentials_that_cannot_sign(
-            self, mock_sign):
-        """The log copy is a backup; a person's ADC must not fail the Job."""
-        mock_sign.side_effect = ComputeConfigError(
-            "cannot sign", error_code="SIGNING_UNSUPPORTED")
-        fake = FakeKubectl()
-        driver = make_driver(staging_bucket="gs://test-staging-bucket")
-        with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "script.py"
-            script_path.write_text("print('test')")
-            with patch.object(gke_job.subprocess, "run", fake), \
-                    patch("sys.stderr", new_callable=io.StringIO) as err:
-                driver.submit(str(script_path))
-        container = fake.applied_manifest(
-        )["spec"]["template"]["spec"]["containers"][0]
-        command = workload_command(container)
-        self.assertEqual(command[0], "python3")
-        self.assertIn("SIGNING_UNSUPPORTED", err.getvalue())
-
-    @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
-    @patch("framework.compute.drivers.gcs_staging.upload_file_to_gcs")
-    def test_submit_cleans_up_staged_blobs_when_it_fails(self, mock_upload):
-        """Blobs uploaded for a Job that never started have nothing to own them.
-
-        The upload comes first, so every later step that can fail must clean
-        it up: the signing, the ConfigMap create and the Job apply.
-        """
-        del mock_upload
-        refused = ComputeConfigError("cannot sign",
-                                     error_code="SIGNING_UNSUPPORTED")
-        for step, sign, responses in (
-            ("signing", refused, {}),
-            ("configmap", None, {
-                "create configmap": (1, "", "exists")
-            }),
-            ("apply", None, {
-                "apply": (1, "", "webhook denied")
-            }),
-        ):
-            with self.subTest(step), \
-                    patch.object(gcs_staging, "generate_v4_signed_url",
-                                 side_effect=sign, return_value="https://u"), \
-                    patch.object(gcs_staging,
-                                 "delete_staged_prefix") as mock_delete, \
-                    tempfile.TemporaryDirectory() as td:
-                in_file = Path(td) / "input.dat"
-                in_file.write_text("in-data")
-                with patch.object(gke_job.subprocess, "run",
-                                  FakeKubectl(responses)):
-                    with self.assertRaises(Exception):
-                        make_driver(staging_bucket="gs://b").submit(
-                            str(in_file),
-                            job_name="job-1",
-                            inputs=[base.StagedFile(str(in_file), "in.dat")],
-                        )
-                mock_delete.assert_called_once_with("b", "job-1/")
+        # The run-end reaper finds jobs by run id; logs go with the pod.
+        self.assertEqual(
+            jobs.JobRecord.load(res.details["job_id"]).run_id, "r1")
+        verbs = [" ".join(c) for c in fake.calls]
+        self.assertLess(
+            next(i for i, v in enumerate(verbs) if "logs" in v),
+            next(i for i, v in enumerate(verbs) if "delete job" in v))
 
     @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
     @patch("framework.compute.drivers.gcs_staging.delete_staged_prefix")
@@ -3891,11 +2432,8 @@ class TestGkeJobStaging(unittest.TestCase):
         fake = FakeKubectl()
         driver = make_driver(staging_bucket="gs://test-staging-bucket")
         with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "script.py"
-            script_path.write_text("print('test')")
-            in_file = Path(td) / "input.dat"
-            in_file.write_text("in-data")
-            with patch.object(gke_job.subprocess, "run", fake):
+            script_path, in_file = self._script_and_input(td)
+            with patch.object(subprocess, "run", fake):
                 with self.assertRaises(ComputeConfigError):
                     driver.run(
                         str(script_path),
@@ -3916,17 +2454,13 @@ class TestGkeJobStaging(unittest.TestCase):
     def test_a_name_taken_after_the_lookup_keeps_the_other_jobs_files(
             self, mock_upload, mock_sign, mock_delete):
         """The ConfigMap and staged prefix under the name are another job's."""
-        del mock_sign
         fake = FakeKubectl({
             "create configmap": (1, "", 'error: failed to create configmap: '
                                  'configmaps "run-1" already exists')
         })
         with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "script.py"
-            script_path.write_text("print('test')")
-            in_file = Path(td) / "input.dat"
-            in_file.write_text("in-data")
-            with patch.object(gke_job.subprocess, "run", fake):
+            script_path, in_file = self._script_and_input(td)
+            with patch.object(subprocess, "run", fake):
                 with self.assertRaises(ComputeConfigError):
                     make_driver(staging_bucket="gs://b").submit(
                         str(script_path),
@@ -3935,56 +2469,13 @@ class TestGkeJobStaging(unittest.TestCase):
         mock_upload.assert_called_once()
         mock_delete.assert_not_called()
         self.assertIsNone(fake.find("delete configmap"))
-
-    @patch("framework.compute.drivers.gcs_staging.delete_staged_prefix")
-    def test_cancel_deletes_staged_inputs_only(self, mock_delete):
-        """Outputs nobody has fetched must survive a reap; inputs need not."""
-        fake = FakeKubectl({"get job": (0, job_json(active=1), "")})
-        driver = make_driver(staging_bucket="gs://test-staging-bucket")
-        record = jobs.JobRecord.create(
-            job_id="job-staged-1",
-            backend="gke_job",
-            status="RUNNING",
-            extra={"staged_prefix": "job-staged-1/"},
-        )
-        with patch.object(gke_job.subprocess, "run", fake):
-            driver.cancel(record.job_id)
-        mock_delete.assert_called_once_with("test-staging-bucket",
-                                            "job-staged-1/in/")
-
-    def test_serving_job_is_dispatched_with_a_restart_policy(self):
-        """A service that a single crash ends is not a service."""
-        fake = FakeKubectl()
-        driver = make_driver()
-        with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "server.py"
-            script_path.write_text("serve()")
-            with patch.object(gke_job.subprocess, "run", fake):
-                driver.submit(str(script_path), serve=True)
-        manifest = fake.applied_manifest()
-        self.assertEqual(manifest["spec"]["template"]["spec"]["restartPolicy"],
-                         "OnFailure")
-        self.assertEqual(manifest["spec"]["backoffLimit"],
-                         gke_job.SERVE_BACKOFF_LIMIT)
-
-    def test_batch_job_still_gets_one_attempt(self):
-        fake = FakeKubectl()
-        driver = make_driver()
-        with tempfile.TemporaryDirectory() as td:
-            script_path = Path(td) / "batch.py"
-            script_path.write_text("train()")
-            with patch.object(gke_job.subprocess, "run", fake):
-                driver.submit(str(script_path))
-        manifest = fake.applied_manifest()
-        self.assertEqual(manifest["spec"]["template"]["spec"]["restartPolicy"],
-                         "Never")
-        self.assertEqual(manifest["spec"]["backoffLimit"], 0)
+        # A submitted job may outlive any wait, so its URLs must too.
+        self.assertEqual(mock_sign.call_args.kwargs["expiration_seconds"],
+                         gke_job.gke_common.SUBMIT_URL_EXP_SEC)
 
 
 def _framed(index: int, data: bytes, job: str = "run-1") -> str:
     """An output as the pod's bootstrap prints it into `job`'s log."""
-    import base64
-    import hashlib
     body = base64.b64encode(data).decode()
     lines = [body[i:i + 76] for i in range(0, len(body), 76)]
     return "\n".join([
@@ -4005,7 +2496,7 @@ class TestGkeJobSmallFiles(unittest.TestCase):
         self.enterContext(_job_store())
         # `run` names its Job, and the frames in a scripted log name it too.
         self.enterContext(
-            patch.object(gke_job.jobs, "new_job_id", return_value="run-1"))
+            patch.object(jobs, "new_job_id", return_value="run-1"))
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.script = self.tmp / "job.py"
         self.script.write_text("print('hi')\n")
@@ -4014,7 +2505,7 @@ class TestGkeJobSmallFiles(unittest.TestCase):
 
     def test_small_inputs_ride_in_the_configmap(self):
         fake = FakeKubectl()
-        with patch.object(gke_job.subprocess, "run", fake), \
+        with patch.object(subprocess, "run", fake), \
                 patch.object(gcs_staging, "upload_file_to_gcs") as upload:
             make_driver().submit(
                 str(self.script),
@@ -4022,8 +2513,7 @@ class TestGkeJobSmallFiles(unittest.TestCase):
         upload.assert_not_called()
         self.assertIn(f"--from-file=tpu-agent-suite-input-0={self.config}",
                       fake.find("create configmap"))
-        container = fake.applied_manifest(
-        )["spec"]["template"]["spec"]["containers"][0]
+        container = fake.applied_container()
         script = workload_command(container)[2]
         self.assertIn("mkdir -p cfg", script)
         self.assertIn("cp /app/tpu-agent-suite-input-0 cfg/c.json", script)
@@ -4035,7 +2525,7 @@ class TestGkeJobSmallFiles(unittest.TestCase):
             "get pods": (0, _DONE_POD, ""),
             "logs": (0, "step 1\n" + _framed(0, b'{"ok": 1}'), ""),
         })
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             res = make_driver().run(
                 str(self.script),
                 outputs=[
@@ -4049,31 +2539,12 @@ class TestGkeJobSmallFiles(unittest.TestCase):
             "'never.txt' was not produced on the target: was not "
             "created", res.stderr)
 
-    def test_outputs_fall_back_to_the_log_when_signing_fails(self):
-        fake = FakeKubectl()
-        refused = ComputeConfigError("cannot sign",
-                                     error_code="SIGNING_UNSUPPORTED")
-        with patch.object(gke_job.subprocess, "run", fake), \
-                patch.object(gcs_staging, "generate_v4_signed_url",
-                             side_effect=refused), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
-            job_id = make_driver(staging_bucket="gs://b").submit(
-                str(self.script), outputs=[base.StagedFile("r", "r.json")])
-        self.assertIn("through the pod's log", err.getvalue())
-        self.assertEqual(
-            jobs.JobRecord.load(job_id).extra["outputs_in_log"],
-            "SIGNING_UNSUPPORTED")
-        container = fake.applied_manifest(
-        )["spec"]["template"]["spec"]["containers"][0]
-        script = workload_command(container)[2]
-        self.assertIn("log_output 0 r.json", script)
-
     @unittest.skipUnless(_google_auth_errors, "needs google-auth")
     def test_outputs_fall_back_to_the_log_without_any_credentials(self):
         """A laptop that never ran `application-default login`."""
         from google.cloud import storage  # noqa: PLC0415
         fake = FakeKubectl()
-        with patch.object(gke_job.subprocess, "run", fake), \
+        with patch.object(subprocess, "run", fake), \
                 patch.object(storage, "Client", side_effect=(
                     _google_auth_errors.DefaultCredentialsError("no ADC"))), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
@@ -4091,7 +2562,7 @@ class TestGkeJobSmallFiles(unittest.TestCase):
             "get pods": (0, _DONE_POD, ""),
             "logs": (0, log, ""),
         })
-        with patch.object(gke_job.subprocess, "run", fake), \
+        with patch.object(subprocess, "run", fake), \
                 patch.object(gcs_staging, "delete_staged_prefix"), \
                 contextlib.redirect_stderr(io.StringIO()):
             return make_driver(**driver_kw).run(
@@ -4118,16 +2589,6 @@ class TestGkeJobSmallFiles(unittest.TestCase):
         res = self._run_losing_an_output(_TOO_LARGE)
         self.assertEqual(res.details["setup_fields"], ["staging_bucket"])
 
-    def test_an_output_the_upload_refused_and_the_log_lost_says_so(self):
-        with patch.object(gcs_staging,
-                          "generate_v4_signed_url",
-                          return_value="https://u"):
-            res = self._run_losing_an_output(_TOO_LARGE,
-                                             staging_bucket="gs://b")
-        self.assertIn("after the pod failed to upload it to gs://b",
-                      res.stderr)
-        self.assertNotIn("setup_fields", res.details)
-
     def test_artifacts_lost_in_the_log_fail_with_why_at_submit(self):
         """The reason is the one recorded at submit: a bucket set since then
         would not have helped that Job."""
@@ -4137,10 +2598,11 @@ class TestGkeJobSmallFiles(unittest.TestCase):
                                   "outputs": [{
                                       "remote": "p.tgz"
                                   }],
-                                  "outputs_in_log": gke_job.NO_BUCKET
+                                  "outputs_in_log":
+                                  gke_job.gke_common.NO_BUCKET
                               })
         fake = FakeKubectl({"logs": (0, _TOO_LARGE, "")})
-        with patch.object(gke_job.subprocess, "run", fake), \
+        with patch.object(subprocess, "run", fake), \
                 contextlib.redirect_stderr(io.StringIO()) as err, \
                 self.assertRaises(base.NotConfigured) as ctx:
             make_driver(staging_bucket="gs://b").fetch_artifacts(
@@ -4149,40 +2611,6 @@ class TestGkeJobSmallFiles(unittest.TestCase):
                          ("STAGING_NOT_CONFIGURED", ["staging_bucket"]))
         self.assertIn("no 'staging_bucket' was set", err.getvalue())
         self.assertTrue((self.tmp / "out" / "run-1.log").is_file())
-
-    def test_a_missing_script_is_reported_not_raised_raw(self):
-        with self.assertRaises(ComputeConfigError) as ctx:
-            make_driver().submit(str(self.tmp / "gone.py"))
-        self.assertEqual(ctx.exception.error_code, "INPUT_NOT_FOUND")
-
-    def test_run_takes_an_output_the_bucket_refused_from_the_log(self):
-        result_file = self.tmp / "result.json"
-        fake = FakeKubectl({
-            "get job": (0, job_json(succeeded=1), ""),
-            "get pods": (0, _DONE_POD, ""),
-            "logs": (0, _framed(0, b"42"), ""),
-        })
-        with patch.object(gke_job.subprocess, "run", fake), \
-                patch.object(gcs_staging, "generate_v4_signed_url",
-                             return_value="https://u"), \
-                patch.object(gcs_staging, "delete_staged_prefix"), \
-                patch.object(gcs_staging, "download_file_from_gcs") as get:
-            res = make_driver(staging_bucket="gs://b").run(
-                str(self.script),
-                outputs=[base.StagedFile(str(result_file), "r.json")])
-        self.assertEqual(res.exit_code, 0)
-        self.assertEqual(result_file.read_bytes(), b"42")
-        get.assert_not_called()
-
-    def test_a_failed_submit_touches_no_bucket_it_did_not_upload_to(self):
-        fake = FakeKubectl({"create configmap": (1, "", "exists")})
-        with patch.object(gke_job.subprocess, "run", fake), \
-                patch.object(gcs_staging, "delete_staged_prefix") as delete:
-            with self.assertRaises(ComputeConfigError):
-                make_driver(staging_bucket="gs://b").submit(
-                    str(self.script),
-                    inputs=[base.StagedFile(str(self.config), "c.json")])
-        delete.assert_not_called()
 
     def test_artifacts_of_a_submitted_job_come_from_its_log(self):
         jobs.JobRecord.create(job_id="run-1",
@@ -4196,7 +2624,7 @@ class TestGkeJobSmallFiles(unittest.TestCase):
                                   True
                               })
         fake = FakeKubectl({"logs": (0, "done\n" + _framed(0, b"42"), "")})
-        with patch.object(gke_job.subprocess, "run", fake):
+        with patch.object(subprocess, "run", fake):
             written = make_driver().fetch_artifacts("run-1", self.tmp / "out")
         self.assertEqual((self.tmp / "out" / "run-1.log").read_text(),
                          "done\n")
@@ -4209,7 +2637,7 @@ class TestGkeJobSmallFiles(unittest.TestCase):
                               extra={"outputs": [{
                                   "remote": "r.json"
                               }]})
-        with patch.object(gke_job.subprocess, "run", fake), \
+        with patch.object(subprocess, "run", fake), \
                 self.assertRaises(ComputeConfigError) as ctx:
             make_driver().fetch_artifacts("run-2", self.tmp / "out")
         self.assertEqual((ctx.exception.error_code, ctx.exception.missing),
@@ -4232,141 +2660,6 @@ class TestGkeJobSmallFiles(unittest.TestCase):
         kept, found = gcs_staging.split_logged_outputs(
             good.split("\n", 1)[1], "run-1")
         self.assertIn("log rotated", found[0])
-
-    def test_a_copy_sent_while_running_survives_what_follows_it(self):
-        """Review on #817 (Sandeep): a later copy cut off by a lost node, or
-        too large for the log, leaves the last whole one standing; and the
-        workload's own short lines (`ok`, `/workspace/out`), printed in the
-        middle of a copy, stay in the log and leave the copy whole."""
-        marker = gcs_staging.output_frame("run-1")
-        whole = b'{"cells": 1}'
-        body = base64.b64encode(whole).decode()
-        digest = hashlib.sha256(whole).hexdigest()
-        sent = (f"\n{marker} begin 0 {digest}\n\n{marker} {body[:8]}\n"
-                f"ok\n/workspace/out\n\n{marker} {body[8:]}\n"
-                f"\n{marker} end 0\n")
-        self.assertEqual(gcs_staging.split_logged_outputs(sent, "run-1"),
-                         ("ok\n/workspace/out\n", {
-                             0: whole
-                         }))
-        cut = sent + f"\n{marker} begin 0 {'0' * 64}\n\n{marker} QUJD\n"
-        later_too_large = sent + f"{marker} too-large 0 9999999\n"
-        for log in (cut, later_too_large):
-            self.assertEqual(
-                gcs_staging.split_logged_outputs(log, "run-1")[1], {0: whole})
-
-    def test_nothing_else_in_the_log_can_break_a_frame(self):
-        good = _framed(0, b"payload")
-        # Another run's log, printed by this workload: its frames, and one
-        # left open, are the workload's output, not this Job's frames.
-        other = (_framed(0, b"old", "run-0") +
-                 _framed(1, b"old", "run-0").rsplit("\n", 2)[0])
-        log = other + "\n" + good
-        self.assertEqual(gcs_staging.split_logged_outputs(log, "run-1"),
-                         (other + "\n", {
-                             0: b"payload"
-                         }))
-        # A line written meanwhile, off the frame's stream: kept, not decoded.
-        body = good.splitlines(keepends=True)
-        stray = "".join(body[:2] + ["curl: (7) refused\n"] + body[2:])
-        self.assertEqual(gcs_staging.split_logged_outputs(stray, "run-1"),
-                         ("curl: (7) refused\n", {
-                             0: b"payload"
-                         }))
-        # Output that ends without a newline keeps its last line as it was.
-        self.assertEqual(
-            gcs_staging.split_logged_outputs("done" + good, "run-1"),
-            ("done", {
-                0: b"payload"
-            }))
-
-    @unittest.skipUnless(
-        all(shutil.which(t) for t in ("bash", "base64", "sha256sum")),
-        "needs bash, base64 and sha256sum")
-    def test_bootstrap_round_trips_files_in_bash(self):
-        """What the pod runs, run for real: copy in, frame out, parse back."""
-        mount = self.tmp / "mount"
-        mount.mkdir()
-        (mount / "tpu-agent-suite-input-0").write_bytes(b"\x00\xffcfg")
-        # Output that ends with a newline or without one comes back as the
-        # workload printed it, with no line added before the frames.
-        for printed in ("line\n", "no newline"):
-            with self.subTest(printed=printed):
-                (mount / "job.py").write_text(
-                    "import os\n"
-                    "os.makedirs('eval')\n"
-                    "open('eval/r.bin', 'wb').write("
-                    "open('c/in', 'rb').read() * 2)\n"
-                    "open('big', 'wb').write(b'x' * (2 << 20))\n"
-                    f"print({printed!r}, end='')\n"
-                    "raise SystemExit(3)\n")
-                work = self.tmp / "w"
-                shutil.rmtree(work, ignore_errors=True)
-                # No copies while it runs: one would end the unfinished line.
-                with patch.object(gcs_staging, "POD_WORK_DIR", str(work)), \
-                        patch.object(gcs_staging, "LIVE_OUTPUT_BUDGET_BYTES", 0):
-                    command = gcs_staging.build_pod_bootstrap_command(
-                        script_mount=str(mount),
-                        script_name="job.py",
-                        interpreter=sys.executable,
-                        mounted_inputs=[("c/in", "tpu-agent-suite-input-0")],
-                        logged_outputs=["eval/r.bin", "big"],
-                        job="run-1",
-                    )
-                proc = subprocess.run(command, capture_output=True, text=True)
-                self.assertEqual(proc.returncode, 3)
-                log, found = gcs_staging.split_logged_outputs(
-                    proc.stdout, "run-1")
-                self.assertEqual(log, printed)
-                self.assertEqual(found[0], b"\x00\xffcfg" * 2)
-                self.assertIn("more than the pod's log carries", found[1])
-
-    @unittest.skipUnless(
-        all(shutil.which(t) for t in ("bash", "base64", "sha256sum", "stat")),
-        "needs bash, base64, sha256sum and stat")
-    def test_bootstrap_sends_outputs_while_the_workload_runs(self):
-        """A pod lost mid-run (its node reset: everything killed at once)
-        still leaves the output as it last was in its log, even with the
-        workload printing half lines all the while."""
-        mount = self.tmp / "mount"
-        mount.mkdir()
-        (mount / "job.py").write_text(
-            "import os, sys, time\n"
-            "def save(text):\n"
-            "    open('s.tmp', 'w').write(text)\n"
-            "    os.replace('s.tmp', 'summary.json')\n"
-            "save('{\"cells\": 1}')\n"
-            "end = time.time() + 2.5\n"
-            "while time.time() < end:\n"
-            "    sys.stderr.write('\\r 10%|##')\n"
-            "    print('ok', flush=True)\n"
-            "    sys.stderr.flush()\n"
-            "    time.sleep(0.01)\n"
-            "save('{\"cells\": 2}')\n"
-            "time.sleep(60)\n")
-        with patch.object(gcs_staging, "POD_WORK_DIR", str(self.tmp / "w")), \
-                patch.object(gcs_staging, "LIVE_OUTPUT_INTERVAL_SEC", 1):
-            command = gcs_staging.build_pod_bootstrap_command(
-                script_mount=str(mount),
-                script_name="job.py",
-                interpreter=sys.executable,
-                logged_outputs=["summary.json"],
-                log_url="http://127.0.0.1:9/log",
-                job="run-1",
-            )
-        proc = subprocess.Popen(command,
-                                stdout=subprocess.PIPE,
-                                text=True,
-                                start_new_session=True)
-        try:
-            out, _ = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            out, _ = proc.communicate()
-        log, found = gcs_staging.split_logged_outputs(out, "run-1")
-        self.assertEqual(found, {0: b'{"cells": 2}'})
-        self.assertIn(" 10%|##", log)
-        self.assertIn("ok\n", log)
 
     @unittest.skipUnless(
         all(shutil.which(t) for t in ("bash", "base64", "sha256sum")),
@@ -4440,75 +2733,8 @@ class TestGkeJobSmallFiles(unittest.TestCase):
                     gcs_staging.split_logged_outputs(log_copy, "run-1")[1],
                     {0: b"res"})
 
-    @unittest.skipUnless(shutil.which("curl"), "needs curl")
-    def test_bootstrap_explains_a_transfer_gcs_refuses(self):
-        """A token GCS refuses: name the object and the missing grant."""
-
-        class Gcs(http.server.BaseHTTPRequestHandler):
-
-            def log_message(self, *args):
-                del args
-
-            def do_GET(self):
-                token = self.path == "/token"
-                self.send_response(200 if token else 403)
-                self.end_headers()
-                if token:
-                    self.wfile.write(b'{"access_token": "t"}')
-
-            do_PUT = do_GET
-
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Gcs)
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        endpoint = f"http://127.0.0.1:{server.server_address[1]}"
-        mount = self.tmp / "mount"
-        mount.mkdir()
-        (mount / "job.py").write_text("open('r.bin', 'w').write('res')\n")
-        for what, urls, code in (
-            ("download", {
-                "input_urls": [("in", f"{endpoint}/b/in")]
-            }, 22),
-            ("upload", {
-                "output_urls": [("r.bin", f"{endpoint}/b/r.bin")]
-            }, 0),
-        ):
-            with self.subTest(what=what), \
-                    patch.object(gcs_staging, "POD_WORK_DIR",
-                                 str(self.tmp / what)), \
-                    patch.object(gcs_staging, "POD_TOKEN_URL",
-                                 f"{endpoint}/token"), \
-                    patch.object(gcs_staging, "GCS_OBJECT_ENDPOINT", endpoint):
-                command = gcs_staging.build_pod_bootstrap_command(
-                    script_mount=str(mount),
-                    script_name="job.py",
-                    interpreter=sys.executable,
-                    job="j",
-                    pod_token=True,
-                    service_account="ksa",
-                    namespace="ns",
-                    bucket="b",
-                    **urls)
-                proc = subprocess.run(command, capture_output=True, text=True)
-                self.assertEqual(proc.returncode, code, proc.stdout)
-                self.assertIn(f"GCS refused to {what} gs://b/", proc.stdout)
-                self.assertIn(
-                    "Grant roles/storage.objectAdmin on gs://b to Kubernetes "
-                    "service account 'ksa' in namespace 'ns'", proc.stdout)
-
 
 class TestGcsStagingBucket(unittest.TestCase):
-
-    def test_a_bucket_may_name_a_folder_in_it(self):
-        client = MagicMock()
-        with tempfile.NamedTemporaryFile() as f:
-            gcs_staging.upload_file_to_gcs(f.name,
-                                           "gs://b/runs/",
-                                           "j/in/x",
-                                           client=client)
-        client.bucket.assert_called_once_with("b")
-        client.bucket.return_value.blob.assert_called_once_with("runs/j/in/x")
 
     def test_a_refused_request_is_a_config_error(self):
 
@@ -4547,7 +2773,7 @@ class TestGkeJobWorkloadIdentity(unittest.TestCase):
         fake = FakeKubectl()
         driver = make_driver(staging_bucket="gs://b/runs",
                              pod_service_account="ksa")
-        with patch.object(gke_job.subprocess, "run", fake), \
+        with patch.object(subprocess, "run", fake), \
                 patch.object(gcs_staging, "upload_file_to_gcs") as upload, \
                 patch.object(gcs_staging, "generate_v4_signed_url",
                              side_effect=AssertionError("signed")):
@@ -4556,10 +2782,11 @@ class TestGkeJobWorkloadIdentity(unittest.TestCase):
                 inputs=[base.StagedFile(str(data), "a b.bin")],
                 outputs=[base.StagedFile(str(tmp / "o.bin"), "o.bin")])
         upload.assert_called_once()
-        spec = fake.applied_manifest()["spec"]["template"]["spec"]
+        spec = fake.applied_pod_spec()
         self.assertEqual(spec["serviceAccountName"], "ksa")
-        self.assertEqual(spec["nodeSelector"][gke_job.WORKLOAD_IDENTITY_LABEL],
-                         "true")
+        self.assertEqual(
+            spec["nodeSelector"][gke_job.gke_common.WORKLOAD_IDENTITY_LABEL],
+            "true")
         pod_script = workload_command(spec["containers"][0])[2]
         # Plain object URLs under the bucket's folder, names URL-encoded.
         prefix = f"https://storage.googleapis.com/b/runs/{job}"
@@ -4574,24 +2801,26 @@ class TestGkeJobWorkloadIdentity(unittest.TestCase):
 
 class TestGkeJobPodToken(unittest.TestCase):
     """With a staging bucket and no pod_service_account, the pod gets a GCS
-    token limited to the staging bucket, in a Secret the Job owns."""
+    token limited to its own folder and the bucket's checkpoints, in a Secret
+    the Job owns."""
 
     TOKEN = "fake-pod-token-value"
 
     def setUp(self):
         self.enterContext(_job_store())
 
-    def submit(self, **params):
+    def submit(self, job_name=None, **params):
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         script = tmp / "job.py"
         script.write_text("print('x')\n")
         fake = FakeKubectl()
-        with patch.object(gke_job.subprocess, "run", fake), \
-                patch.object(gke_job.gcs_staging, "mint_bucket_token",
+        driver = make_driver(**params)
+        with patch.object(subprocess, "run", fake), \
+                patch.object(gcs_staging, "mint_bucket_token",
                              return_value=(self.TOKEN, time.time() + 3600)
                              ) as mint, \
                 contextlib.redirect_stderr(io.StringIO()):
-            job = make_driver(**params).submit(str(script))
+            job = driver.submit(str(script), job_name=job_name)
         applied = {
             o["kind"]: o
             for o in (json.loads(s) for c, s in zip(fake.calls, fake.stdins)
@@ -4599,11 +2828,15 @@ class TestGkeJobPodToken(unittest.TestCase):
         }
         return job, applied, mint
 
-    def test_the_pod_gets_a_token_scoped_to_the_whole_bucket(self):
-        # The whole bucket, not just the staging folder: fetch_weights.py
-        # reads checkpoints staged elsewhere in it.
-        _, applied, mint = self.submit(staging_bucket="gs://b/runs")
-        mint.assert_called_once_with("b")
+    def test_the_pod_token_reaches_its_folder_and_reads_checkpoints(self):
+        # Its own folder, where `stage_files` puts its files; checkpoints beside
+        # it, read-only; both under the staging folder when there is one.
+        for bucket, folder in (("gs://b", ""), ("gs://b/runs", "runs/")):
+            with self.subTest(staging_bucket=bucket):
+                job, applied, mint = self.submit(staging_bucket=bucket)
+                mint.assert_called_once_with(
+                    "b", f"{folder}{job}/",
+                    (f"{folder}{gke_job.manifest.CHECKPOINTS_PREFIX}", ))
         self.assertEqual(applied["Secret"]["stringData"],
                          {"token": self.TOKEN})
         self.assertNotIn(self.TOKEN, json.dumps(applied["Job"]))
@@ -4611,11 +2844,212 @@ class TestGkeJobPodToken(unittest.TestCase):
         self.assertIn(
             {
                 "name": "GCS_TOKEN_FILE",
-                "value": f"{gke_job.TOKEN_MOUNT}/token"
+                "value": f"{gke_job.manifest.TOKEN_MOUNT}/token"
             }, c["env"])
         # subPath mounts don't pick up renewed tokens.
         mount = next(m for m in c["volumeMounts"] if m["name"] == "gcs-token")
         self.assertNotIn("subPath", mount)
+
+    def test_a_job_named_after_the_checkpoints_folder_is_refused(self):
+        # Its folder would be writable, so its pod could rewrite checkpoints.
+        with self.assertRaises(ComputeConfigError) as cm:
+            self.submit(staging_bucket="gs://b", job_name="checkpoints")
+        self.assertEqual(cm.exception.error_code, "INVALID_FIELD")
+
+
+class TestPodTokenRules(unittest.TestCase):
+    """What a pod token may reach: read/write under one folder, read-only
+    under others, nothing else."""
+
+    def test_the_minted_token_carries_those_rules(self):
+        # A prefix without its slash would let job-1 reach job-10/; an empty
+        # one would be the whole bucket.
+        for prefix in ("", "runs/job-1"):
+            with self.subTest(prefix=prefix), self.assertRaises(ValueError):
+                _REAL_MINT_BUCKET_TOKEN("b", prefix)
+        try:
+            from google.auth import \
+                downscoped  # pylint: disable=import-outside-toplevel
+        except ImportError:
+            self.skipTest("google-auth is not installed")
+        with patch("google.auth.default", return_value=(MagicMock(), "p")), \
+                patch.object(downscoped, "Credentials") as credentials:
+            credentials.return_value.expiry = None
+            _REAL_MINT_BUCKET_TOKEN("b", "runs/job-1/", ("checkpoints/", ))
+        boundary = credentials.call_args.kwargs["credential_access_boundary"]
+
+        def rule(role, prefix):
+            return {
+                "availableResource":
+                "//storage.googleapis.com/projects/_/buckets/b",
+                "availablePermissions": [f"inRole:roles/storage.{role}"],
+                "availabilityCondition": {
+                    "expression":
+                    "resource.name.startsWith('projects/_/buckets/b/objects/"
+                    f"{prefix}') || api.getAttribute('storage.googleapis.com/"
+                    f"objectListPrefix', '').startsWith('{prefix}')"
+                },
+            }
+
+        self.assertEqual(
+            boundary.to_json()["accessBoundary"]["accessBoundaryRules"], [
+                rule("objectUser", "runs/job-1/"),
+                rule("objectViewer", "checkpoints/")
+            ])
+
+
+def _indexed_pod(index: int,
+                 phase: str = "Running",
+                 node: str | None = "node",
+                 exit_code: int | None = None,
+                 finished: str = "") -> dict[str, Any]:
+    """A pod of an Indexed Job, as `kubectl get pods -o json` lists it."""
+    status: dict[str, Any] = {"phase": phase}
+    if exit_code is not None:
+        terminated = dict(exitCode=exit_code, finishedAt=finished)
+        status["containerStatuses"] = [dict(state=dict(terminated=terminated))]
+    labels = {gke_job.gke_common.COMPLETION_INDEX_KEY: str(index)}
+    return dict(metadata=dict(name=f"run-1-{index}", labels=labels),
+                status=status,
+                spec=dict(nodeName=node) if node else {})
+
+
+class TestGkeJobMultiHost(unittest.TestCase):
+    """A slice larger than one node: one pod per node, the leader read."""
+
+    def test_hosts_from_the_topology(self):
+        for accelerator, total, want in (
+            ("tpu7x", 4, (1, 4)),
+            ("tpu7x", 8, (2, 4)),
+            ("tpu-v6e-slice", 16, (4, 4)),
+            ("tpu-v99", 8, (1, 8)),  # unknown: as before
+        ):
+            self.assertEqual(gke_job.manifest.hosts_for(accelerator, total),
+                             want)
+        details: dict[str, Any] = {}
+        gke_job.manifest.job_sizing(
+            make_driver(tpu_topology="2x2x2").config, "unknown", details)
+        self.assertEqual((details["job_chips"], details["job_hosts"]), (8, 2))
+        for overrides, want in (({}, (4, 2)), ({"tpu_chips": 8}, (8, 1))):
+            d = make_driver(tpu_accelerator="tpu-v6e-slice",
+                            tpu_topology="2x4",
+                            **overrides)
+            with patch.object(
+                    subprocess, "run",
+                    FakeKubectl({"get nodes": (0, node_json(chips=4), "")})):
+                gke_job.manifest.fit_to_nodes(d.kube, d.config)
+            self.assertEqual((d.config.tpu_chips, d.config.tpu_hosts), want)
+
+    def test_submit_builds_an_indexed_job_behind_a_service(self):
+        fake = FakeKubectl({"apply": (0, "uid-1", "")})
+        script = hello_script(self)
+        with _job_store(), patch.object(subprocess, "run", fake):
+            make_driver(tpu_topology="2x2x2",
+                        namespace="ns").submit(str(script),
+                                               job_name="run-1",
+                                               serve=True)
+            self.assertEqual(jobs.JobRecord.load("run-1").extra["hosts"], 2)
+        spec = fake.applied_manifest()["spec"]
+        pod_spec = spec["template"]["spec"]
+        container = pod_spec["containers"][0]
+        env = {
+            e["name"]: e.get("value", e.get("valueFrom"))
+            for e in container["env"]
+        }
+        self.assertEqual(
+            (spec["completionMode"], spec["completions"], spec["parallelism"],
+             spec["backoffLimit"], pod_spec["restartPolicy"],
+             pod_spec["subdomain"], container["resources"]["limits"]),
+            ("Indexed", 2, 2, 0, "Never", "run-1", {
+                base.TPU_RESOURCE: 4
+            }))
+        self.assertEqual((env["TPU_NUM_HOSTS"], env["TPU_WORKER_HOSTNAMES"]),
+                         ("2", "run-1-0.run-1.ns.svc,run-1-1.run-1.ns.svc"))
+        service = next(
+            json.loads(s) for s in fake.stdins
+            if s and json.loads(s)["kind"] == "Service")
+        self.assertIs(service["spec"]["publishNotReadyAddresses"], True)
+        anti = pod_spec["affinity"]["podAntiAffinity"][
+            "requiredDuringSchedulingIgnoredDuringExecution"][0]
+        self.assertEqual(anti["topologyKey"],
+                         gke_job.gke_common.NODEPOOL_LABEL)
+        # For hosts > 1, a refused Service fails submit and cleans up the Job.
+        refuse = FakeKubectl({
+            "apply -f - -o jsonpath": (0, "uid-1", ""),
+            "apply -f -": (1, "", "Error from server (Forbidden): services"),
+        })
+        with _job_store(), patch.object(subprocess, "run", refuse), \
+                patch.object(auth_utils, "adc_token",
+                             return_value=("", "no ADC")):
+            with self.assertRaises(base.ComputeConfigError):
+                make_driver(tpu_topology="2x2x2").submit(str(script),
+                                                         job_name="run-2")
+            self.assertIsNone(jobs.JobRecord.load("run-2"))
+        self.assertIsNotNone(refuse.find("delete job run-2"))
+        self.assertIsNotNone(refuse.find("delete configmap run-2"))
+
+    def test_status_reads_every_host(self):
+
+        def check(job_st: dict[str, Any], pods: list[dict[str, Any]]):
+            job = dict(spec=dict(completionMode="Indexed", completions=2),
+                       status=job_st)
+            fake = FakeKubectl({
+                "get job": (0, json.dumps(job), ""),
+                "get pods": (0, json.dumps({"items": pods}), ""),
+            })
+            with _job_store(), patch.object(subprocess, "run", fake):
+                return make_driver(tpu_topology="2x2x2").get_status("run-1")
+
+        waiting = check(
+            {"active": 2},
+            [_indexed_pod(0),
+             _indexed_pod(1, "Pending", node=None)])
+        self.assertEqual((waiting.status, waiting.details["lagging_host"],
+                          waiting.details["pending_reason"]),
+                         ("PENDING", 1, base.PENDING_UNSCHEDULED))
+        running = check({"active": 2}, [_indexed_pod(0), _indexed_pod(1)])
+        self.assertEqual((running.status, running.details["pod_name"]),
+                         ("RUNNING", "run-1-0"))
+        self.assertEqual(
+            check({
+                "active": 1,
+                "succeeded": 1
+            }, [_indexed_pod(0, "Succeeded", exit_code=0),
+                _indexed_pod(1)]).status, "RUNNING")
+        failed = check({"failed": 1}, [
+            _indexed_pod(0, "Failed", exit_code=143, finished="t9"),
+            _indexed_pod(1, "Failed", exit_code=1, finished="t1"),
+        ])
+        self.assertEqual((failed.status, failed.exit_code), ("FAILED", 1))
+        self.assertTrue(failed.error.startswith("host 1 of 2: "), failed.error)
+
+    def test_leader_owns_logs_port_forward_and_outputs(self):
+        pods = json.dumps({"items": [_indexed_pod(1), _indexed_pod(0)]})
+        fake = FakeKubectl({"get pods": (0, pods, "")})
+        driver = make_driver(tpu_topology="2x2x2")
+        with _job_store(), patch.object(subprocess, "run", fake), \
+                patch.object(auth_utils, "resolve_credentials"):
+            jobs.JobRecord.create(job_id="run-1",
+                                  backend="gke_job",
+                                  extra={"hosts": 2})
+            gke_job.log_retrieval.pod_logs(driver.kube, "run-1")
+            gke_job.log_retrieval.pod_logs(driver.kube, "run-1", [
+                _indexed_pod(0, "Failed", exit_code=143, finished="t9"),
+                _indexed_pod(1, "Failed", exit_code=1, finished="t1"),
+            ])
+            cmd, _ = driver._port_forward_command(8000, 8000, "run-1")
+        self.assertIn("pod/run-1-0", fake.find(" logs "))
+        self.assertIn("pod/run-1-1", fake.calls[-2])
+        self.assertIn("pod/run-1-0", cmd)
+        bootstrap = gcs_staging.build_pod_bootstrap_command(
+            script_mount="/m",
+            script_name="w.sh",
+            interpreter="bash",
+            logged_outputs=["out.txt"],
+            job="run-1")[2]
+        self.assertIn(
+            f"! {gcs_staging.NOT_LEADER} || exit $WORKLOAD_EXIT_CODE",
+            bootstrap)
 
 
 if __name__ == "__main__":

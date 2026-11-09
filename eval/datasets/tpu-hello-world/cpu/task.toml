@@ -1,0 +1,48 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Hand-written, like the baseline it mirrors: the whole check is two numbers
+# read out of one table, which is less than a rewardkit criteria file costs.
+schema_version = "1.4"
+
+[task]
+name = "torchtpu/tpu-hello-world-cpu"
+version = "1.0.0"
+description = "tpu-hello-world with the hardware taken out: one PyTorch matmul on the CPU of the container the agent is already in, verified against a CPU reference. No cluster, no TPU, no Kubernetes. It exists so the path from prompt to reported table can be exercised -- in the sandbox, in CI, on a laptop -- where no accelerator is available. A pass says the plumbing works and says nothing about TPU readiness, which is why device_type must be cpu-simulated and native-tpu is not a passing answer here."
+authors = [{ name = "TorchTPU Team" }]
+keywords = ["hello_world", "torchtpu", "cpu", "smoke", "no-accelerator"]
+
+[environment]
+os = "linux"
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+workdir = "/workspace"
+# No `docker_image`: `environment/Dockerfile` layers CPU-only PyTorch on top of
+# the pinned `nexus-host` base image.
+
+[agent]
+# Minutes, not hours. The baseline's two-hour budget pays for image pulls on a
+# cold TPU node and for a control arm working out a Kubernetes manifest by
+# trial and error; neither happens here. A run that takes longer than this is
+# stuck looking for a cluster that does not exist, and the timeout is the
+# fastest way to say so.
+timeout_sec = 900.0
+network_mode = "no-network"
+
+[verifier]
+timeout_sec = 60.0
+
+[metadata]
+category = "evaluation"

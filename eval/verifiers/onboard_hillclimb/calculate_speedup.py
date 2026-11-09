@@ -22,6 +22,7 @@ used and considered across concurrency sweeps and regimes.
 import fnmatch
 import json
 import math
+import os
 import pathlib
 import re
 from collections.abc import Iterable
@@ -33,7 +34,15 @@ from rewardkit import criterion
 Path = pathlib.Path
 
 BENCHMARK_MANIFEST_FILENAME = "benchmark_results.json"
-VALID_REGIMES = {"1k/1k", "8k/1k", "1k/8k"}
+_CONTAINER_ARTIFACTS_DIR = Path("/logs/artifacts")
+PRIMARY_REGIME = "1k/1k"
+VALID_REGIMES = {PRIMARY_REGIME, "8k/1k", "1k/8k"}
+
+_DEFAULT_SKIP_DIRS: frozenset[str] = frozenset(
+    {"tests", "agent", "verifier", "skills", "venv", "__pycache__"})
+_BENCHMARK_SKIP_DIRS: frozenset[str] = frozenset(
+    {"profile", "xprof", "tpu-diagnostics", "discarded"})
+_WORKSPACE_FALLBACK_MAX_DEPTH = 4
 
 _REGIME_PATTERNS = {
     "8k/1k":
@@ -50,6 +59,57 @@ _REGIME_PATTERNS = {
 _VALID_TABLE_CONCURRENCIES = {
     1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 1024, 2048
 }
+
+OUTPUT_TPS_KEYS: tuple[str, ...] = (
+    "output_tps",
+    "output_tokens_per_s",
+    "output_tok_s",
+    "output_throughput_tok_s",
+    "throughput_tok_per_s",
+    "throughput_tokens_per_s",
+    "output_throughput_tok_per_sec",
+    "throughput_tok_s",
+    "output_throughput",
+    "throughput",
+    "tps",
+    "throughput_tps",
+    "tput",
+)
+
+TOTAL_TPS_KEYS: tuple[str, ...] = (
+    "total_tps",
+    "total_tokens_per_s",
+    "total_throughput_tok_per_sec",
+    "total_token_throughput",
+    "total_throughput",
+)
+
+COMPLETED_REQUESTS_KEYS: tuple[str, ...] = (
+    "num_successful",
+    "completed_requests",
+    "completed",
+    "completed_prompts",
+    "successful_requests",
+    "successful",
+    "num_prompts_completed",
+)
+
+FAILED_REQUESTS_KEYS: tuple[str, ...] = (
+    "failed",
+    "failed_requests",
+    "failed_prompts",
+    "num_failed",
+    "errors",
+)
+
+TOTAL_REQUESTS_KEYS: tuple[str, ...] = (
+    "num_prompts",
+    "total_requests",
+    "requests",
+    "count",
+    "num_requests",
+    "total_prompts",
+)
 
 
 def safe_div(
@@ -127,6 +187,51 @@ def infer_concurrency_from_filename(filename: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _extract_json_sources(raw: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Unpacks nested summary, first replicate, and mean metrics into a priority search tuple."""
+    summary = raw.get("summary") if isinstance(raw.get("summary"),
+                                               dict) else raw
+    replicates = raw.get("replicates")
+    rep0 = (replicates[0] if isinstance(replicates, list) and replicates
+            and isinstance(replicates[0], dict) else {})
+    metrics_flat: dict[str, Any] = {}
+    if isinstance(raw.get("metrics"), dict):
+        for mk, mv in raw["metrics"].items():
+            if isinstance(mv, dict) and "mean" in mv:
+                metrics_flat[mk] = mv["mean"]
+            elif isinstance(mv, (int, float)):
+                metrics_flat[mk] = mv
+    return (summary, rep0, metrics_flat, raw)
+
+
+def _infer_regime_from_sources(
+    sources: tuple[dict[str, Any], ...],
+    completed: int = 0,
+) -> str | None:
+    """Infers canonical regime from explicit keys, ISL/OSL lengths, or token totals."""
+    raw_reg = _first(sources, ("regime", ))
+    if raw_reg:
+        norm = normalize_regime_name(str(raw_reg))
+        if norm in VALID_REGIMES:
+            return norm
+
+    isl = _first(sources, ("isl", "random_input_len", "input_len"))
+    osl = _first(sources, ("osl", "random_output_len", "output_len"))
+    if (by_len := infer_regime_from_isl_osl(isl, osl)) is not None:
+        return by_len
+
+    if completed > 0:
+        tot_in = _first(sources, ("total_input", "total_input_tokens"))
+        tot_out = _first(sources, ("total_output", "total_output_tokens"))
+        if tot_in is not None and tot_out is not None:
+            return infer_regime_from_isl_osl(
+                float(tot_in) / completed,
+                float(tot_out) / completed,
+            )
+
+    return None
+
+
 @dataclass
 class BenchmarkRunMetrics:
     """Telemetry metrics extracted from a single benchmark run."""
@@ -153,16 +258,10 @@ class BenchmarkRunMetrics:
         self.duration_s = float(self.duration_s)
         self.completed = int(self.completed)
         self.failed = int(self.failed)
-        self.total_tps = float(
-            self.total_tps) if self.total_tps is not None else None
-        self.req_per_s = float(
-            self.req_per_s) if self.req_per_s is not None else None
-        self.ttft_p50 = float(
-            self.ttft_p50) if self.ttft_p50 is not None else None
-        self.itl_p50 = float(
-            self.itl_p50) if self.itl_p50 is not None else None
-        self.e2e_p50 = float(
-            self.e2e_p50) if self.e2e_p50 is not None else None
+        for attr in ("total_tps", "req_per_s", "ttft_p50", "itl_p50",
+                     "e2e_p50"):
+            val = getattr(self, attr)
+            setattr(self, attr, float(val) if val is not None else None)
         self.source = str(self.source)
         self.is_queued = bool(self.is_queued)
         self.notes = str(self.notes)
@@ -171,38 +270,28 @@ class BenchmarkRunMetrics:
     def from_dict(
         cls,
         raw: dict[str, Any],
-        default_regime: str = "1k/1k",
+        default_regime: str = PRIMARY_REGIME,
         source: str = "",
     ) -> "BenchmarkRunMetrics":
         """Parses a benchmark result dictionary from vllm bench serve, summary, or raw JSON."""
-        s = raw.get("summary") if isinstance(raw.get("summary"), dict) else raw
-        sources = (s, raw)
+        sources = _extract_json_sources(raw)
 
         completed = (_to_int(
-            _first(sources,
-                   ("num_successful", "completed_requests", "completed")),
+            _first(sources, COMPLETED_REQUESTS_KEYS),
             0,
         ) or 0)
         failed = (_to_int(
-            _first(sources, ("num_failed", "failed_requests", "failed")),
+            _first(sources, FAILED_REQUESTS_KEYS),
             0,
         ) or 0)
         num_prompts = (_to_int(
-            _first(sources, ("num_prompts", "total_requests", "num_requests")),
+            _first(sources, TOTAL_REQUESTS_KEYS),
             0,
         ) or 0)
         if failed == 0 and 0 < completed < num_prompts:
             failed = num_prompts - completed
 
-        isl = _first(sources, ("isl", "random_input_len", "input_len"))
-        osl = _first(sources, ("osl", "random_output_len", "output_len"))
-        tot_in = _first(sources, ("total_input", "total_input_tokens"))
-        tot_out = _first(sources, ("total_output", "total_output_tokens"))
-        regime = (infer_regime_from_isl_osl(isl, osl)
-                  or (infer_regime_from_isl_osl(
-                      float(tot_in) / completed,
-                      float(tot_out) / completed) if completed > 0
-                      and tot_in is not None and tot_out is not None else None)
+        regime = (_infer_regime_from_sources(sources, completed)
                   or _first(sources, ("regime", ), default_regime))
         concurrency = (_to_int(
             _first(
@@ -218,41 +307,23 @@ class BenchmarkRunMetrics:
         ) or 0.0)
 
         output_tps = (_to_float(
-            _first(
-                sources,
-                (
-                    "output_throughput_tok_s",
-                    "throughput_tok_per_s",
-                    "throughput_tokens_per_s",
-                    "output_throughput_tok_per_sec",
-                    "throughput_tok_s",
-                    "output_throughput",
-                    "output_tokens_per_s",
-                    "throughput",
-                ),
-            ),
+            _first(sources, OUTPUT_TPS_KEYS),
             0.0,
         ) or 0.0)
-        total_tps = _to_float(
-            _first(
-                sources,
-                (
-                    "total_throughput_tok_per_sec",
-                    "total_token_throughput",
-                    "total_tokens_per_s",
-                ),
-            ))
+        total_tps = _to_float(_first(sources, TOTAL_TPS_KEYS))
         req_per_s = _to_float(
             _first(sources, ("request_throughput", "requests_per_s")))
         ttft_p50 = _to_float(
             _first(
                 sources,
-                ("ttft_ms_median", "median_ttft_ms", "p50_ttft_ms", "ttft_ms"),
+                ("ttft_ms_median", "median_ttft_ms", "p50_ttft_ms", "ttft_ms",
+                 "ttft_p50_ms", "ttft_mean_ms"),
             ))
         itl_p50 = _to_float(
             _first(
                 sources,
-                ("itl_ms_median", "median_itl_ms", "p50_itl_ms", "itl_ms"),
+                ("itl_ms_median", "median_itl_ms", "p50_itl_ms", "itl_ms",
+                 "itl_p50_ms", "itl_mean_ms"),
             ))
         e2e_p50 = _to_float(
             _first(sources, ("p50_e2el_ms", "median_e2el_ms", "e2el_p50_ms")))
@@ -314,6 +385,7 @@ class RunDiscoveryResult:
     summary: str = ""
     inferred: bool = False
     verification_errors: list[str] = field(default_factory=list)
+    claimed_optimized: int = 0
 
 
 def parse_markdown_tables(
@@ -322,7 +394,7 @@ def parse_markdown_tables(
 ) -> list[BenchmarkRunMetrics]:
     """Parses benchmark sweep tables from markdown reports with header-aware column mapping."""
     runs: list[BenchmarkRunMetrics] = []
-    current_regime = "1k/1k"
+    current_regime = PRIMARY_REGIME
     header_map: dict[str, int] = {}
     seen_table_row = False
     non_benchmark_table = False
@@ -479,9 +551,58 @@ def parse_markdown_tables(
     return runs
 
 
+def _walk_paths(
+    root: Path,
+    *,
+    skip_dirs: set[str] | frozenset[str] = _DEFAULT_SKIP_DIRS,
+    max_depth: int | None = None,
+    walked_dirs: set[Path] | None = None,
+) -> list[Path]:
+    """Walks root top-down, skipping hidden, excluded, or already-walked directories."""
+    if not root.is_dir():
+        return []
+    if walked_dirs is None:
+        walked_dirs = set()
+
+    root_resolved = root.resolve()
+    if root_resolved in walked_dirs:
+        return []
+    walked_dirs.add(root_resolved)
+
+    paths: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(
+            root,
+            topdown=True,
+            onerror=lambda _err: None,
+            followlinks=False,
+    ):
+        base = Path(dirpath)
+        if max_depth is not None and len(
+                base.relative_to(root).parts) >= max_depth:
+            # Clear dirnames in-place to stop os.walk from descending deeper.
+            dirnames[:] = []
+
+        kept_dirs: list[str] = []
+        for d in sorted(dirnames):
+            if d.startswith(".") or d.lower() in skip_dirs:
+                continue
+            cand_resolved = (base / d).resolve()
+            if cand_resolved in walked_dirs:
+                continue
+            walked_dirs.add(cand_resolved)
+            kept_dirs.append(d)
+            paths.append(base / d)
+        # Prune dirnames in-place so os.walk only visits kept subdirectories.
+        dirnames[:] = kept_dirs
+
+        for f in sorted(filenames):
+            paths.append(base / f)
+    return paths
+
+
 def load_runs_from_path(
     path: Path,
-    default_regime: str = "1k/1k",
+    default_regime: str = PRIMARY_REGIME,
     tag: str = "",
 ) -> list[BenchmarkRunMetrics]:
     """Recursively loads benchmark runs from files (JSON, Markdown) or directories."""
@@ -489,28 +610,19 @@ def load_runs_from_path(
         return []
 
     if path.is_dir():
-        skip_dirs = {
-            "profile",
-            "xprof",
-            "tpu-diagnostics",
-            "discarded",
-        }
         json_runs: list[BenchmarkRunMetrics] = []
         md_runs: list[BenchmarkRunMetrics] = []
-        for subfile in sorted(path.rglob("*")):
+        for subfile in _walk_paths(path, skip_dirs=_BENCHMARK_SKIP_DIRS):
             if (subfile.is_file() and subfile.suffix in (".json", ".md")
                     and "backup" not in subfile.name.lower()
                     and "discarded" not in str(subfile).lower()):
-                rel_parts = {
-                    p.lower()
-                    for p in subfile.relative_to(path).parts[:-1]
-                }
-                if not (rel_parts & skip_dirs):
-                    loaded = load_runs_from_path(subfile,
-                                                 default_regime=default_regime,
-                                                 tag=tag)
-                    (json_runs
-                     if subfile.suffix == ".json" else md_runs).extend(loaded)
+                loaded = load_runs_from_path(subfile,
+                                             default_regime=default_regime,
+                                             tag=tag)
+                if subfile.suffix == ".json":
+                    json_runs.extend(loaded)
+                else:
+                    md_runs.extend(loaded)
         return json_runs or md_runs
 
     inferred_regime = (infer_regime_from_filename(path.name)
@@ -593,14 +705,73 @@ def load_runs_from_path(
     return []
 
 
+def _safe_is_file(path: Path) -> bool:
+    """Safely checks if path is a regular file, returning False on PermissionError/OSError."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _partition_search_roots(root: Path) -> tuple[list[Path], list[Path]]:
+    """Returns deduplicated (artifact_roots, workspace_fallback_roots) without climbing above root."""
+    artifact_candidates: list[Path] = []
+    # Inside the container, artifacts live in /logs/artifacts alongside /workspace.
+    if str(root) == "/workspace":
+        artifact_candidates.append(_CONTAINER_ARTIFACTS_DIR)
+    artifact_candidates.extend([
+        root / "artifacts" / "logs" / "artifacts",
+        root / "artifacts",
+        root / "logs" / "artifacts",
+    ])
+    fallback_candidates = [root / "workspace", root]
+
+    seen: set[Path] = set()
+
+    def _dedup(cands: list[Path]) -> list[Path]:
+        out: list[Path] = []
+        for d in cands:
+            if d.is_dir() and (resolved := d.resolve()) not in seen:
+                seen.add(resolved)
+                out.append(d)
+        return out
+
+    return _dedup(artifact_candidates), _dedup(fallback_candidates)
+
+
 def auto_discover_runs(
     root: Path,
 ) -> tuple[list[BenchmarkRunMetrics], list[BenchmarkRunMetrics], str]:
     """Automatically locates baseline and optimized runs within a trial or artifact directory."""
-    all_paths = [
-        p for p in root.rglob("*")
-        if ".git" not in p.parts and "tests" not in p.parts
-    ]
+    artifact_roots, fallback_roots = _partition_search_roots(root)
+    walked_dirs: set[Path] = set()
+    all_paths: list[Path] = []
+
+    # Search dedicated artifact directories first.
+    for s_root in artifact_roots:
+        all_paths.extend(_walk_paths(s_root, walked_dirs=walked_dirs))
+
+    if all_paths:
+        base_runs, opt_runs, msg = _discover_runs_from_paths(all_paths)
+        if base_runs and opt_runs:
+            return base_runs, opt_runs, msg
+
+    # Fall back to workspace directories with bounded depth to avoid deep repo trees.
+    for s_root in fallback_roots:
+        all_paths.extend(
+            _walk_paths(
+                s_root,
+                max_depth=_WORKSPACE_FALLBACK_MAX_DEPTH,
+                walked_dirs=walked_dirs,
+            ))
+
+    return _discover_runs_from_paths(all_paths)
+
+
+def _discover_runs_from_paths(
+    all_paths: list[Path],
+) -> tuple[list[BenchmarkRunMetrics], list[BenchmarkRunMetrics], str]:
+    """Matches discovered directories and files against known benchmark output conventions."""
     all_dirs = [p for p in all_paths if p.is_dir()]
     all_files = [p for p in all_paths if p.is_file()]
 
@@ -616,7 +787,7 @@ def auto_discover_runs(
     # Priority 1: raw_benchmarks/ or benchmarks/ subdirectories
     raw_bench_dirs = _find_dirs("raw_benchmarks", "benchmarks")
     for b_dir in raw_bench_dirs:
-        if (b_dir / "baseline").exists() and (b_dir / "optimized").exists():
+        if (b_dir / "baseline").is_dir() and (b_dir / "optimized").is_dir():
             base = load_runs_from_path(b_dir / "baseline", tag="baseline")
             opt = load_runs_from_path(b_dir / "optimized", tag="optimized")
             if base and opt:
@@ -735,15 +906,14 @@ def auto_discover_runs(
 
     # Priority 6: Campaign directory structure
     for c_dir in _find_dirs("campaign"):
+        entries = sorted(c_dir.iterdir())
         base_stages = [
-            d for d in c_dir.iterdir()
-            if d.is_dir() and "baseline" in d.name.lower()
+            d for d in entries if d.is_dir() and "baseline" in d.name.lower()
         ]
         if base_stages:
             base = load_runs_from_path(base_stages[0], tag="baseline")
             opt = [
-                r for d in sorted(c_dir.iterdir())
-                if d.is_dir() and d != base_stages[0]
+                r for d in entries if d.is_dir() and d != base_stages[0]
                 for r in load_runs_from_path(d, tag=d.name)
             ]
             if base and opt:
@@ -762,7 +932,7 @@ def auto_discover_runs(
             f"Discovered baseline in {base_bench_dirs[0].name}, but no optimized benchmark runs were produced",
         )
     for b_dir in raw_bench_dirs:
-        if (b_dir / "baseline").exists() and (base := load_runs_from_path(
+        if (b_dir / "baseline").is_dir() and (base := load_runs_from_path(
                 b_dir / "baseline", tag="baseline")):
             return (
                 base,
@@ -784,7 +954,7 @@ def auto_discover_runs(
     base_runs: list[BenchmarkRunMetrics] = []
     opt_runs: list[BenchmarkRunMetrics] = []
     for jf in direct_jsons:
-        p_low = str(jf.relative_to(root)).lower()
+        p_low = str(jf).lower()
         if any(k in p_low for k in ("optimized", "06_opt", "05_opt",
                                     "opt_bench", "/opt/", "opt_")):
             opt_runs.extend(load_runs_from_path(jf, tag="optimized"))
@@ -799,8 +969,10 @@ def auto_discover_runs(
             base_runs.extend(load_runs_from_path(jf, tag="baseline"))
         else:
             for r in load_runs_from_path(jf, tag=jf.stem):
-                (opt_runs
-                 if "opt" in r.source.lower() else base_runs).append(r)
+                if "opt" in r.source.lower():
+                    opt_runs.append(r)
+                else:
+                    base_runs.append(r)
 
     if base_runs:
         if opt_runs:
@@ -818,30 +990,54 @@ def auto_discover_runs(
     return [], [], "No structured benchmark runs discovered"
 
 
+def find_manifest_candidates(root: Path) -> list[Path]:
+    """Finds all candidate benchmark_results.json files ranked by completeness."""
+    artifact_roots, fallback_roots = _partition_search_roots(root)
+    candidates: list[Path] = []
+    seen_files: set[Path] = set()
+
+    for d in (*artifact_roots, *fallback_roots):
+        for pattern in (
+                BENCHMARK_MANIFEST_FILENAME,
+                f"*/{BENCHMARK_MANIFEST_FILENAME}",
+                f"*/*/{BENCHMARK_MANIFEST_FILENAME}",
+        ):
+            for sub in sorted(d.glob(pattern)):
+                if sub.is_file() and (resolved :=
+                                      sub.resolve()) not in seen_files:
+                    seen_files.add(resolved)
+                    candidates.append(sub)
+
+    def manifest_score(p: Path) -> int:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(data, dict):
+                has_base = bool(data.get("baseline"))
+                has_opt = bool(data.get("optimized"))
+                if not has_base and not has_opt and (data.get("results")
+                                                     or data.get("runs")):
+                    runs = data.get("results") or data.get("runs") or []
+                    has_base = any(
+                        str(r.get("stage", "")).lower() == "baseline"
+                        for r in runs if isinstance(r, dict))
+                    has_opt = any(
+                        str(r.get("stage", "")).lower() == "optimized"
+                        for r in runs if isinstance(r, dict))
+                if has_base and has_opt:
+                    return 2
+                if has_base or has_opt:
+                    return 1
+        except Exception:
+            pass
+        return 0
+
+    return sorted(candidates, key=manifest_score, reverse=True)
+
+
 def find_manifest_file(root: Path) -> Path | None:
-    """Locates benchmark_results.json, preferring specialist artifact subdirectories over top-level fallback paths."""
-    search_dirs = [
-        root / "artifacts",
-        root / "logs" / "artifacts",
-        root,
-    ]
-    if root.name == "workspace":
-        search_dirs.append(root.parent / "artifacts")
-    if str(root) == "/workspace":
-        search_dirs.insert(0, Path("/logs/artifacts"))
-    # Prefer specialist artifact subdirectories (<artifacts>/<specialist>/benchmark_results.json)
-    for d in search_dirs:
-        if d.is_dir():
-            for sub_manifest in sorted(
-                    d.glob(f"*/{BENCHMARK_MANIFEST_FILENAME}")):
-                if sub_manifest.is_file():
-                    return sub_manifest
-    # Fall back to top-level /logs/artifacts or workspace root only when no specialist directory has it
-    for d in search_dirs:
-        candidate = d / BENCHMARK_MANIFEST_FILENAME
-        if candidate.is_file():
-            return candidate
-    return None
+    """Locates the primary benchmark_results.json manifest file."""
+    candidates = find_manifest_candidates(root)
+    return candidates[0] if candidates else None
 
 
 def resolve_raw_output_path(
@@ -852,139 +1048,115 @@ def resolve_raw_output_path(
     """Resolves a raw_output_path from benchmark_results.json across container and host layouts."""
     cleaned = str(raw_path_str).strip()
     manifest_dir = manifest_path.parent
+    artifact_roots, fallback_roots = _partition_search_roots(workspace)
+
     if cleaned.startswith("/logs/artifacts/"):
-        rel = cleaned[len("/logs/artifacts/"):]
-        candidates = [
-            manifest_dir / rel,
-            workspace / "artifacts" / rel,
-            workspace / rel,
-            Path(cleaned),
-        ]
+        rel = cleaned.removeprefix("/logs/artifacts/")
     elif cleaned.startswith("/workspace/"):
-        rel = cleaned[len("/workspace/"):]
-        candidates = [workspace / rel, manifest_dir / rel, Path(cleaned)]
+        rel = cleaned.removeprefix("/workspace/")
+    elif ".tpu-agent-suite" in cleaned and "/artifacts/" in cleaned:
+        rel = cleaned.split("/artifacts/", 1)[1]
     else:
-        candidates = [
-            manifest_dir / cleaned,
-            workspace / cleaned,
-            workspace / "artifacts" / cleaned,
-            Path(cleaned),
-        ]
-    return next((c for c in candidates if c.is_file()), candidates[0])
+        rel = cleaned.lstrip("/")
+
+    candidates = [
+        manifest_dir / rel,
+        *[s_root / rel for s_root in (*artifact_roots, *fallback_roots)],
+        Path(cleaned),
+    ]
+    # Container /workspace/ paths resolve relative to the workspace root first.
+    if cleaned.startswith("/workspace/"):
+        candidates.insert(0, workspace / rel)
+    return next((c for c in candidates if _safe_is_file(c)), candidates[0])
 
 
-def parse_raw_benchmark_file(
+def _parse_raw_json(
     raw_path: Path,
-    expected_regime: str = "1k/1k",
+    expected_regime: str = PRIMARY_REGIME,
     expected_concurrency: int = 1,
 ) -> RawBenchmarkParseResult:
-    """Parses a raw benchmark output file (.json or plain-text log) and extracts metadata for verification."""
-    if not raw_path.is_file():
+    """Parses and validates a JSON raw benchmark file."""
+    try:
+        data = json.loads(raw_path.read_text(encoding="utf-8",
+                                             errors="ignore"))
+    except Exception as exc:
         return RawBenchmarkParseResult(
-            error=f"Raw output file not found: {raw_path}")
-    if raw_path.suffix.lower() == ".md":
-        return RawBenchmarkParseResult(
-            error=f"Raw output cannot be a markdown file: {raw_path.name}")
+            error=f"Failed to parse JSON raw output '{raw_path.name}': {exc}")
 
-    if raw_path.suffix.lower() == ".json":
-        try:
-            data = json.loads(
-                raw_path.read_text(encoding="utf-8", errors="ignore"))
-        except Exception as exc:
-            return RawBenchmarkParseResult(
-                error=
-                f"Failed to parse JSON raw output '{raw_path.name}': {exc}")
-
-        if isinstance(data, list):
-            if len(data) == 1 and isinstance(data[0], dict):
-                data = data[0]
-            else:
-                return RawBenchmarkParseResult(error=(
-                    f"Raw output '{raw_path.name}' must be a single benchmark run object, "
-                    "not a multi-run list"))
-        if not isinstance(data, dict):
-            return RawBenchmarkParseResult(
-                error=f"Raw output '{raw_path.name}' is not a JSON object")
-        if "comparison" in data or ("baseline" in data
-                                    and "optimized" in data):
+    if isinstance(data, list):
+        if len(data) == 1 and isinstance(data[0], dict):
+            data = data[0]
+        else:
             return RawBenchmarkParseResult(error=(
-                f"Raw output '{raw_path.name}' is a summary/comparison file, "
-                "not a raw benchmark output"))
+                f"Raw output '{raw_path.name}' must be a single benchmark run object, "
+                "not a multi-run list"))
+    if not isinstance(data, dict):
+        return RawBenchmarkParseResult(
+            error=f"Raw output '{raw_path.name}' is not a JSON object")
+    if "comparison" in data or ("baseline" in data and "optimized" in data):
+        return RawBenchmarkParseResult(error=(
+            f"Raw output '{raw_path.name}' is a summary/comparison file, "
+            "not a raw benchmark output"))
 
-        s = data.get("summary") if isinstance(data.get("summary"),
-                                              dict) else data
-        sources = (s, data)
+    sources = _extract_json_sources(data)
 
-        raw_reg = _first(sources, ("regime", ))
-        detected_regime = (
-            normalize_regime_name(str(raw_reg)) if raw_reg
-            and normalize_regime_name(str(raw_reg)) in VALID_REGIMES else None)
-        if not detected_regime:
-            detected_regime = infer_regime_from_isl_osl(
-                _first(sources, ("isl", "random_input_len", "input_len")),
-                _first(sources, ("osl", "random_output_len", "output_len")),
-            )
-
-        completed_raw = _first(
-            sources, ("num_successful", "completed_requests", "completed"))
-        if completed_raw is not None:
-            comp_count = _to_int(completed_raw, 0) or 0
-            if comp_count <= 0:
-                return RawBenchmarkParseResult(
-                    detected_regime=detected_regime,
-                    error=
-                    f"Raw output '{raw_path.name}' recorded 0 completed requests",
-                )
-            if not detected_regime:
-                tot_in = _first(sources, ("total_input", "total_input_tokens"))
-                tot_out = _first(sources,
-                                 ("total_output", "total_output_tokens"))
-                if tot_in is not None and tot_out is not None:
-                    detected_regime = infer_regime_from_isl_osl(
-                        float(tot_in) / comp_count,
-                        float(tot_out) / comp_count)
-
-        detected_regime = detected_regime or infer_regime_from_filename(
-            raw_path.name)
-        detected_conc = _to_int(
-            _first(
-                sources,
-                ("concurrency", "max_concurrency", "num_concurrent_requests"),
-            ))
-        if detected_conc is None:
-            detected_conc = infer_concurrency_from_filename(raw_path.name)
-
-        metrics = BenchmarkRunMetrics.from_dict(
-            data,
-            default_regime=detected_regime or expected_regime,
-            source=raw_path.name,
+    completed_raw = _first(sources, COMPLETED_REQUESTS_KEYS)
+    comp_count = (_to_int(completed_raw, 0)
+                  or 0) if completed_raw is not None else 0
+    if completed_raw is not None and comp_count <= 0:
+        detected_regime = _infer_regime_from_sources(
+            sources, 0) or infer_regime_from_filename(raw_path.name)
+        return RawBenchmarkParseResult(
+            detected_regime=detected_regime,
+            error=f"Raw output '{raw_path.name}' recorded 0 completed requests",
         )
-        if detected_conc is None:
-            metrics.concurrency = expected_concurrency
-        if metrics.failed > 0:
-            return RawBenchmarkParseResult(
-                metrics=metrics,
-                detected_regime=detected_regime,
-                detected_concurrency=detected_conc,
-                error=
-                f"Raw output '{raw_path.name}' had {metrics.failed} failed requests",
-            )
-        if metrics.output_tps <= 0.0:
-            return RawBenchmarkParseResult(
-                metrics=metrics,
-                detected_regime=detected_regime,
-                detected_concurrency=detected_conc,
-                error=(
-                    f"Raw output '{raw_path.name}' has non-positive throughput "
-                    f"({metrics.output_tps})"),
-            )
+
+    detected_regime = (_infer_regime_from_sources(sources, comp_count)
+                       or infer_regime_from_filename(raw_path.name))
+    detected_conc = _to_int(
+        _first(
+            sources,
+            ("concurrency", "max_concurrency", "num_concurrent_requests"),
+        ))
+    if detected_conc is None:
+        detected_conc = infer_concurrency_from_filename(raw_path.name)
+
+    metrics = BenchmarkRunMetrics.from_dict(
+        data,
+        default_regime=detected_regime or expected_regime,
+        source=raw_path.name,
+    )
+    if detected_conc is None:
+        metrics.concurrency = expected_concurrency
+    if metrics.failed > 0:
         return RawBenchmarkParseResult(
             metrics=metrics,
             detected_regime=detected_regime,
             detected_concurrency=detected_conc,
+            error=
+            f"Raw output '{raw_path.name}' had {metrics.failed} failed requests",
         )
+    if metrics.output_tps <= 0.0:
+        return RawBenchmarkParseResult(
+            metrics=metrics,
+            detected_regime=detected_regime,
+            detected_concurrency=detected_conc,
+            error=(f"Raw output '{raw_path.name}' has non-positive throughput "
+                   f"({metrics.output_tps})"),
+        )
+    return RawBenchmarkParseResult(
+        metrics=metrics,
+        detected_regime=detected_regime,
+        detected_concurrency=detected_conc,
+    )
 
-    # Plain-text benchmark output log (e.g. vllm bench serve stdout)
+
+def _parse_raw_text_log(
+    raw_path: Path,
+    expected_regime: str = PRIMARY_REGIME,
+    expected_concurrency: int = 1,
+) -> RawBenchmarkParseResult:
+    """Parses and validates a plain-text stdout log from vllm bench serve."""
     try:
         text = raw_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
@@ -1071,6 +1243,24 @@ def parse_raw_benchmark_file(
     )
 
 
+def parse_raw_benchmark_file(
+    raw_path: Path,
+    expected_regime: str = PRIMARY_REGIME,
+    expected_concurrency: int = 1,
+) -> RawBenchmarkParseResult:
+    """Parses a raw benchmark output file (.json or plain-text log) and extracts metadata for verification."""
+    if not _safe_is_file(raw_path):
+        return RawBenchmarkParseResult(
+            error=f"Raw output file not found: {raw_path}")
+    if raw_path.suffix.lower() == ".md":
+        return RawBenchmarkParseResult(
+            error=f"Raw output cannot be a markdown file: {raw_path.name}")
+
+    if raw_path.suffix.lower() == ".json":
+        return _parse_raw_json(raw_path, expected_regime, expected_concurrency)
+    return _parse_raw_text_log(raw_path, expected_regime, expected_concurrency)
+
+
 def verify_and_load_manifest(
     manifest_path: Path,
     workspace: Path,
@@ -1140,15 +1330,15 @@ def verify_and_load_manifest(
             )
             continue
 
-        if entry.get("failed", 0) or str(entry.get("status",
-                                                   "")).lower() == "failed":
+        failed_val = _first((entry, ), FAILED_REQUESTS_KEYS)
+        if (failed_val is not None and _to_int(failed_val, 0) > 0) or str(
+                entry.get("status", "")).lower() == "failed":
             errors.append(
                 f"Rejected {stage} {regime} c={concurrency}: marked as failed in manifest"
             )
             continue
 
-        raw_tps = _first((entry, ),
-                         ("output_tps", "tps", "throughput", "throughput_tps"))
+        raw_tps = _first((entry, ), OUTPUT_TPS_KEYS)
         claimed_tps = _to_float(raw_tps)
         if claimed_tps is None or claimed_tps <= 0.0:
             errors.append(
@@ -1157,7 +1347,10 @@ def verify_and_load_manifest(
             continue
 
         raw_path_str = _first(
-            (entry, ), ("raw_output_path", "raw_path", "raw_output", "file"))
+            (entry, ),
+            ("raw_output_path", "raw_path", "raw_output", "file",
+             "output_file", "path"),
+        )
         if not raw_path_str or not str(raw_path_str).strip():
             errors.append(
                 f"Rejected {stage} {regime} c={concurrency}: missing 'raw_output_path'"
@@ -1207,9 +1400,13 @@ def verify_and_load_manifest(
         raw_metrics.regime = regime
         raw_metrics.concurrency = concurrency
         raw_metrics.source = f"{manifest_path.name} -> {raw_file.name}"
-        (baseline_runs
-         if stage == "baseline" else optimized_runs).append(raw_metrics)
+        if stage == "baseline":
+            baseline_runs.append(raw_metrics)
+        else:
+            optimized_runs.append(raw_metrics)
 
+    claimed_optimized = sum(1 for stage, _ in staged_entries
+                            if stage == "optimized")
     summary = (
         f"Verified {len(baseline_runs)} baseline and {len(optimized_runs)} optimized runs "
         f"from {manifest_path.name} ({len(errors)} rejected)")
@@ -1219,21 +1416,67 @@ def verify_and_load_manifest(
         summary=summary,
         inferred=False,
         verification_errors=errors,
+        claimed_optimized=claimed_optimized,
     )
 
 
 def discover_or_verify_runs(root: Path) -> RunDiscoveryResult:
     """Loads verified runs from benchmark_results.json if present, else falls back to legacy discovery (marked as inferred)."""
-    manifest_path = find_manifest_file(root)
-    if manifest_path is not None:
-        return verify_and_load_manifest(manifest_path, root)
+    candidates = find_manifest_candidates(root)
+    best_manifest_result: RunDiscoveryResult | None = None
+    first_manifest_result: RunDiscoveryResult | None = None
+    all_verification_errors: list[str] = []
 
+    for manifest_path in candidates:
+        manifest_result = verify_and_load_manifest(manifest_path, root)
+        if first_manifest_result is None:
+            first_manifest_result = manifest_result
+        if manifest_result.verification_errors:
+            all_verification_errors.extend(manifest_result.verification_errors)
+        if manifest_result.baseline_runs and manifest_result.optimized_runs:
+            return manifest_result
+        if best_manifest_result is None and (manifest_result.baseline_runs or
+                                             manifest_result.optimized_runs):
+            best_manifest_result = manifest_result
+
+    # If a manifest explicitly claimed optimized runs and they were all rejected
+    # (e.g. mistyped TPS, failed runs, wrong regime), treat that manifest verification as
+    # authoritative (inferred=False, 0 verified optimized runs -> 0 speedup) rather than
+    # falling back to auto-discovery to reward rejected runs.
+    if (best_manifest_result is not None
+            and best_manifest_result.claimed_optimized > 0
+            and best_manifest_result.baseline_runs):
+        return best_manifest_result
+
+    # Otherwise (e.g. onboarding-only manifest with no optimized runs claimed,
+    # or zero verified runs across all manifests), fall back or supplement via auto_discover_runs.
     base_runs, opt_runs, discovery_msg = auto_discover_runs(root)
-    return RunDiscoveryResult(
-        baseline_runs=base_runs,
-        optimized_runs=opt_runs,
-        summary=f"[INFERRED] {discovery_msg}",
-        inferred=True,
+    effective_base = (best_manifest_result.baseline_runs if
+                      (best_manifest_result
+                       and best_manifest_result.baseline_runs) else base_runs)
+    effective_opt = (best_manifest_result.optimized_runs if
+                     (best_manifest_result
+                      and best_manifest_result.optimized_runs) else opt_runs)
+
+    if effective_base or effective_opt or not candidates:
+        summary = f"[INFERRED] {discovery_msg}"
+        if best_manifest_result is not None:
+            summary = (
+                f"[INFERRED (manifest verified {len(best_manifest_result.baseline_runs)} base, "
+                f"{len(best_manifest_result.optimized_runs)} opt runs)] {discovery_msg}"
+            )
+        elif candidates:
+            summary = f"[INFERRED (manifest verified 0 runs)] {discovery_msg}"
+        return RunDiscoveryResult(
+            baseline_runs=effective_base,
+            optimized_runs=effective_opt,
+            summary=summary,
+            inferred=True,
+            verification_errors=best_manifest_result.verification_errors
+            if best_manifest_result else all_verification_errors,
+        )
+
+    return best_manifest_result or first_manifest_result or RunDiscoveryResult(
     )
 
 
@@ -1312,6 +1555,7 @@ class DeterministicSpeedupEvaluator:
                                            peak_base.output_tps)
                                   if matched_opt else None)
 
+            # TODO: Research best practice for TPS comparison: matched concurrency at baseline peak vs peak-to-peak TPS.
             if peak_opt is None:
                 selected_opt, selected_speedup = None, 1.0
             elif self.prefer_matched_concurrency and matched_opt is not None:
@@ -1421,15 +1665,16 @@ class DeterministicSpeedupEvaluator:
                 },
             }
 
-        # Select target regime result (defaults to 1k/1k)
+        # Select target regime result (defaults to PRIMARY_REGIME)
         if evaluated_regimes:
             primary_regime = next(
                 (r for r in evaluated_regimes if r in regime_results),
                 evaluated_regimes[0],
             )
         else:
-            primary_regime = ("1k/1k" if "1k/1k" in regime_results else next(
-                iter(regime_results), "1k/1k"))
+            primary_regime = (PRIMARY_REGIME
+                              if PRIMARY_REGIME in regime_results else next(
+                                  iter(regime_results), PRIMARY_REGIME))
 
         primary_eval = regime_results.get(primary_regime)
         final_speedup = (primary_eval["values_used"]["speedup_ratio"]
@@ -1565,42 +1810,49 @@ def format_debug_trace(results: dict[str, Any]) -> str:
 ))
 def tpu_speedup(workspace: Path) -> float:
     """Calculates deterministic throughput speedup from verified manifest or legacy fallback."""
-    if not workspace or not workspace.exists():
-        print(f"[!] tpu_speedup: Workspace does not exist: {workspace}")
-        return 0.0
+    try:
+        if not workspace or not workspace.exists():
+            print(f"[!] tpu_speedup: Workspace does not exist: {workspace}")
+            return 0.0
 
-    discovery = discover_or_verify_runs(workspace)
-    if not discovery.baseline_runs:
+        discovery = discover_or_verify_runs(workspace)
+        if not discovery.baseline_runs:
+            print(
+                f"[!] tpu_speedup: No valid baseline benchmark runs found in workspace: "
+                f"{workspace} ({discovery.summary})")
+            for err in discovery.verification_errors:
+                print(f"    - {err}")
+            return 0.0
+
+        evaluator = DeterministicSpeedupEvaluator(
+            discovery.baseline_runs,
+            discovery.optimized_runs,
+            inferred=discovery.inferred,
+            verification_errors=discovery.verification_errors,
+        )
+        res = evaluator.evaluate(target_regimes=[PRIMARY_REGIME])
+        res["discovery_source"] = discovery.summary
+        if trace := format_debug_trace(res):
+            print(trace)
+
+        speedup = round(float(res.get("final_speedup", 1.0)), 4)
+        reg_data = res.get("regimes", {}).get(PRIMARY_REGIME, {})
+        used = reg_data.get("values_used", {})
+        base_tps = used.get("baseline_peak_tps") or 0.0
+        opt_tps = used.get("optimized_peak_tps")
+        opt_str = (f"{opt_tps:,.2f} tok/s"
+                   if opt_tps is not None else "(no opt runs)")
+
         print(
-            f"[!] tpu_speedup: No valid baseline benchmark runs found in workspace: "
-            f"{workspace} ({discovery.summary})")
-        for err in discovery.verification_errors:
-            print(f"    - {err}")
+            f"tpu_speedup: calculated raw ratio = {speedup:.4f}x "
+            f"(base={base_tps:,.2f} tok/s, opt={opt_str}, inferred={discovery.inferred})"
+        )
+        return speedup
+    except Exception as exc:
+        print(
+            f"[!] tpu_speedup: Unexpected error evaluating speedup in {workspace}: {exc}"
+        )
         return 0.0
-
-    evaluator = DeterministicSpeedupEvaluator(
-        discovery.baseline_runs,
-        discovery.optimized_runs,
-        inferred=discovery.inferred,
-        verification_errors=discovery.verification_errors,
-    )
-    res = evaluator.evaluate(target_regimes=["1k/1k"])
-    res["discovery_source"] = discovery.summary
-    if trace := format_debug_trace(res):
-        print(trace)
-
-    speedup = round(float(res.get("final_speedup", 1.0)), 4)
-    reg_data = res.get("regimes", {}).get("1k/1k", {})
-    used = reg_data.get("values_used", {})
-    base_tps = used.get("baseline_peak_tps") or 0.0
-    opt_tps = used.get("optimized_peak_tps")
-    opt_str = f"{opt_tps:,.2f} tok/s" if opt_tps is not None else "(no opt runs)"
-
-    print(
-        f"tpu_speedup: calculated raw ratio = {speedup:.4f}x "
-        f"(base={base_tps:,.2f} tok/s, opt={opt_str}, inferred={discovery.inferred})"
-    )
-    return speedup
 
 
 if __name__ == "__main__":

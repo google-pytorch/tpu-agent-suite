@@ -77,8 +77,7 @@ ZONE_PATTERN = re.compile(r"^[a-z]+-[a-z]+\d+-[a-z]$")
 REGION_PATTERN = re.compile(r"^[a-z]+-[a-z]+\d+$")
 TOPOLOGY_PATTERN = re.compile(r"^[1-9]\d*x[1-9]\d*(?:x[1-9]\d*)?$")
 
-BUCKET_FIELDS = frozenset(
-    {"gcs_bucket", "staging_bucket", "trajectory_bucket"})
+BUCKET_FIELDS = frozenset({"staging_bucket", "trajectory_bucket"})
 
 
 def validate_field_format(name: str, value: Any) -> dict[str, Any] | None:

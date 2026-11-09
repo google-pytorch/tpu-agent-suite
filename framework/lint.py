@@ -13,7 +13,7 @@
 # limitations under the License.
 """Content checks for TPU agent suite packages.
 
-`compiler.verify` shows a package is structurally sound: every declared file
+`compiler.py verify` shows a package is structurally sound: every declared file
 exists, the delegation graph is acyclic and reachable, tokens resolve. It says
 nothing about the prose inside instruction files, which is where a migrated
 package tends to rot -- links that pointed somewhere in the source tree, paths
@@ -29,13 +29,12 @@ from __future__ import annotations
 
 import ast
 import dataclasses
-import json
 import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from framework import frontmatter, utils
+from framework import frontmatter, jsonio, utils
 
 TpuAgentSuiteError = utils.TpuAgentSuiteError
 parse_frontmatter_document = frontmatter.parse_frontmatter_document
@@ -364,6 +363,39 @@ def _is_runtime_path(target: str) -> bool:
     return root in _RUNTIME_PATH_ROOTS or bool(_PLACEHOLDER_ROOT.match(root))
 
 
+def _file_link_targets(line: str) -> Iterable[str]:
+    """The package paths `line` links to, anchors dropped.
+
+    Skips external URLs, bare anchors, and run-time paths, none of which name
+    a file the build bundles.
+    """
+    for raw in _LINK.findall(line):
+        if raw.startswith(_NON_FILE_SCHEMES):
+            continue
+        target = raw.split("#", 1)[0]
+        if target and not _is_runtime_path(target):
+            yield target
+
+
+def _declared_owners(manifest: dict[str, Any],
+                     keys: tuple[str, ...] = ("references", ),
+                     suffix: str = "") -> list[tuple[str, str]]:
+    """Each file declared under `keys` ending in `suffix`, with its owner.
+
+    A file several units declare is one file in the build, so it is paired
+    with the first unit that declares it.
+
+    Returns: (package-relative path, owning unit name), sorted by path.
+    """
+    owners: dict[str, str] = {}
+    for agent in _skills_and_agents(manifest):
+        for key in keys:
+            for rel in agent.get(key, []):
+                if rel.endswith(suffix):
+                    owners.setdefault(rel, agent["name"])
+    return sorted(owners.items())
+
+
 def check_instruction_links(package_dir: Path,
                             manifest: dict[str, Any]) -> list[Finding]:
     """Checks that every markdown link in a prompt names a declared file.
@@ -376,19 +408,12 @@ def check_instruction_links(package_dir: Path,
 
     Returns: a list of `Finding` (check `"instruction-links"`), one per bad
     link, whose detail distinguishes a file that exists but is undeclared from
-    one that does not resolve at all. Enforced by `compiler.verify_package`.
+    one that does not resolve at all. Enforced by `verify.verify_package`.
     """
     findings: list[Finding] = []
     for prompt in _prompts(manifest):
         for lineno, line in _iter_lines(package_dir / prompt.rel):
-            for target in _LINK.findall(line):
-                if target.startswith(_NON_FILE_SCHEMES):
-                    continue
-                path = target.split("#", 1)[0]
-                if not path:
-                    continue
-                if _is_runtime_path(path):
-                    continue
+            for path in _file_link_targets(line):
                 if path in prompt.declared:
                     continue
                 if _is_asset_path(path, package_dir, manifest):
@@ -472,7 +497,7 @@ def check_reference_links(package_dir: Path,
     resolves to a bundled file or it dangles.
 
     Returns: a list of `Finding` (check `"reference-links"`), reported against
-    the doc's first declaring agent. Enforced by `compiler.verify_package`.
+    the doc's first declaring agent. Enforced by `verify.verify_package`.
     """
     findings: list[Finding] = []
     declared_all = {
@@ -480,25 +505,12 @@ def check_reference_links(package_dir: Path,
         for agent in _skills_and_agents(manifest)
         for rel in agent.get("scripts", []) + agent.get("references", [])
     }
-    owners: dict[str, str] = {}
-    for agent in _skills_and_agents(manifest):
-        for rel in agent.get("references", []):
-            if rel.endswith(".md"):
-                owners.setdefault(rel, agent["name"])
-
-    for rel in sorted(owners):
+    for rel, owner in _declared_owners(manifest, suffix=".md"):
         doc = package_dir / rel
         if doc.suffix != ".md" or not doc.is_file():
             continue
         for lineno, line in _iter_lines(doc):
-            for raw in _LINK.findall(line):
-                if raw.startswith(_NON_FILE_SCHEMES):
-                    continue
-                target = raw.split("#", 1)[0]
-                if not target:
-                    continue
-                if _is_runtime_path(target):
-                    continue
+            for target in _file_link_targets(line):
                 # Both spellings survive a build, provided the target is itself
                 # declared: sibling-relative (the docs sit together) and
                 # package-root-relative (what the README recommends).
@@ -511,7 +523,7 @@ def check_reference_links(package_dir: Path,
                     continue
                 findings.append(
                     Finding(
-                        "reference-links", owners[rel], rel, lineno,
+                        "reference-links", owner, rel, lineno,
                         f"links to {target!r}, which is not a declared script"
                         f" or reference -- it will not be bundled"))
     return findings
@@ -659,16 +671,43 @@ def check_legacy_paths(package_dir: Path,
 
     # Declared assets, deduped by path: a file several agents declare is one
     # file in the build, so it should be reported once, against its first owner.
-    owners: dict[str, str] = {}
-    for agent in _skills_and_agents(manifest):
-        for rel in agent.get("references", []) + agent.get("scripts", []):
-            owners.setdefault(rel, agent["name"])
-    for rel, agent_name in sorted(owners.items()):
+    for rel, agent_name in _declared_owners(manifest,
+                                            ("references", "scripts")):
         if (package_dir / rel).is_file():
             labels = (_REFERENCE_LABELS
                       if rel.endswith(".md") else _ORIGIN_LEAK_LABELS)
             scan(agent_name, rel, labels)
     return findings
+
+
+def _python_script_trees(
+    package_dir: Path, manifest: dict[str, Any]
+) -> Iterable[tuple[str, str, ast.Module | SyntaxError]]:
+    """Parses every declared `.py` script and the `*_test.py` beside it.
+
+    A file several agents reach is parsed once, for its first owner.
+
+    Returns: (owning agent, package-relative path, syntax tree) in path
+    order, with the `SyntaxError` in place of the tree for a file that does
+    not parse.
+    """
+    owners: dict[Path, str] = {}
+    for agent in _skills_and_agents(manifest):
+        for script_rel in agent.get("scripts", []):
+            script = package_dir / script_rel
+            if script.suffix != ".py" or not script.is_file():
+                continue
+            owners.setdefault(script, agent["name"])
+            for sibling in sorted(script.parent.glob("*_test.py")):
+                owners.setdefault(sibling, agent["name"])
+
+    for path, agent_name in sorted(owners.items()):
+        tree: ast.Module | SyntaxError
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError as exc:
+            tree = exc
+        yield agent_name, path.relative_to(package_dir).as_posix(), tree
 
 
 def check_legacy_imports(package_dir: Path,
@@ -690,24 +729,11 @@ def check_legacy_imports(package_dir: Path,
     import, plus one per file that cannot be parsed at all.
     """
     findings: list[Finding] = []
-    owners: dict[Path, str] = {}
-    for agent in _skills_and_agents(manifest):
-        for script_rel in agent.get("scripts", []):
-            script = package_dir / script_rel
-            if script.suffix != ".py" or not script.is_file():
-                continue
-            owners.setdefault(script, agent["name"])
-            for sibling in sorted(script.parent.glob("*_test.py")):
-                owners.setdefault(sibling, agent["name"])
-
-    for path, agent_name in sorted(owners.items()):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError as exc:
+    for agent_name, rel, tree in _python_script_trees(package_dir, manifest):
+        if isinstance(tree, SyntaxError):
             findings.append(
-                Finding("legacy-imports", agent_name,
-                        path.relative_to(package_dir).as_posix(), exc.lineno
-                        or 0, f"cannot be parsed: {exc.msg}"))
+                Finding("legacy-imports", agent_name, rel, tree.lineno or 0,
+                        f"cannot be parsed: {tree.msg}"))
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -720,9 +746,7 @@ def check_legacy_imports(package_dir: Path,
                 if name.split(".")[0] in _ORIGIN_MODULE_ROOTS:
                     findings.append(
                         Finding(
-                            "legacy-imports", agent_name,
-                            path.relative_to(package_dir).as_posix(),
-                            node.lineno,
+                            "legacy-imports", agent_name, rel, node.lineno,
                             f"imports {name!r}, which only exists in the origin"
                             f" build tree and cannot resolve here"))
     return findings
@@ -820,20 +844,8 @@ def check_xplane_access(package_dir: Path,
     import.
     """
     findings: list[Finding] = []
-    owners: dict[Path, str] = {}
-    for agent in _skills_and_agents(manifest):
-        for script_rel in agent.get("scripts", []):
-            script = package_dir / script_rel
-            if script.suffix != ".py" or not script.is_file():
-                continue
-            owners.setdefault(script, agent["name"])
-            for sibling in sorted(script.parent.glob("*_test.py")):
-                owners.setdefault(sibling, agent["name"])
-
-    for path, agent_name in sorted(owners.items()):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:
+    for agent_name, rel, tree in _python_script_trees(package_dir, manifest):
+        if isinstance(tree, SyntaxError):
             continue  # reported by legacy-imports
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -849,9 +861,7 @@ def check_xplane_access(package_dir: Path,
                 if _XPLANE_IMPORT.search(name):
                     findings.append(
                         Finding(
-                            "xplane-access", agent_name,
-                            path.relative_to(package_dir).as_posix(),
-                            node.lineno,
+                            "xplane-access", agent_name, rel, node.lineno,
                             f"imports {name!r} to read XPlane traces directly"
                             " -- delegate to tpu-diagnostics, which runs the"
                             " xprof CLI, instead of parsing the proto"))
@@ -1136,19 +1146,17 @@ def check_compute_contract(package_dir: Path,
     for prompt in _prompts(manifest):
         scan(prompt.agent, prompt.rel)
 
-    owners: dict[str, str] = {}
-    for agent in _skills_and_agents(manifest):
-        for rel in agent.get("references", []) + agent.get("scripts", []):
-            owners.setdefault(rel, agent["name"])
-    for rel, agent_name in sorted(owners.items()):
+    for rel, agent_name in _declared_owners(manifest,
+                                            ("references", "scripts")):
         scan(agent_name, rel)
     return findings
 
 
-# Generic compute prose patterns. The compiled accelerator contract in
-# compiler.py injects compute instructions (commands, flags, backends, run/submit
-# semantics, artifact handling, interpreter setup). Authored package prompts
-# should not duplicate generic explanations of these mechanisms.
+# Generic compute prose patterns. The compiled compute contract
+# (compute_contract_section in builder/prompt_contracts.py) injects compute
+# instructions (commands, flags, backends, run/submit semantics, artifact
+# handling, interpreter setup). Authored package prompts should not duplicate
+# generic explanations of these mechanisms.
 _GENERIC_COMPUTE_PATTERNS = {
     "generic-run-vs-submit": (
         re.compile(
@@ -1156,15 +1164,15 @@ _GENERIC_COMPUTE_PATTERNS = {
             r"|synchronously\s+via\s+`?run`?\s+or\s+asynchronously\s+via\s+`?submit`?"
             r"|\b(?:synchronous\s+execution\s*\(`?run`?\)|asynchronous\s+batch\s+workload\s*\(`?submit`?\)))"
         ),
-        "generic run vs submit explanation; the compiled accelerator compute "
-        "contract injected by compiler.py owns compute run/submit semantics",
+        "generic run vs submit explanation; the compiled compute contract "
+        "owns compute run/submit semantics",
     ),
     "generic-compute-header": (
         re.compile(
             r"(?i)\b(?:unified\s+compute\s+access|universal\s+compute\s+operations)\b"
         ),
-        "generic compute section or guideline heading; the compiled accelerator "
-        "compute contract injected by compiler.py owns compute access guidelines",
+        "generic compute section or guideline heading; the compiled compute "
+        "contract owns compute access guidelines",
     ),
     "generic-backend-list": (
         re.compile(
@@ -1219,11 +1227,7 @@ def check_generic_compute_prose(package_dir: Path,
 
     for prompt in _prompts(manifest):
         scan(prompt.agent, prompt.rel)
-    owners: dict[str, str] = {}
-    for agent in _skills_and_agents(manifest):
-        for rel in agent.get("references", []):
-            owners.setdefault(rel, agent["name"])
-    for rel, agent_name in sorted(owners.items()):
+    for rel, agent_name in _declared_owners(manifest):
         scan(agent_name, rel)
     return findings
 
@@ -1241,7 +1245,7 @@ def check_environment_contract(package_dir: Path,
 
     Returns: a list of `Finding` (check `"environment-contract"`), deduplicated
     per (script, key), with schema mismatches at line 0. Empty when the manifest
-    declares no environment. Enforced by `compiler.verify_package`.
+    declares no environment. Enforced by `verify.verify_package`.
     """
     findings: list[Finding] = []
     env = manifest.get("environment") or {}
@@ -1249,9 +1253,8 @@ def check_environment_contract(package_dir: Path,
     if not questions_rel or not schema_rel:
         return findings
 
-    questions = json.loads(
-        (package_dir / questions_rel).read_text(encoding="utf-8"))
-    schema = json.loads((package_dir / schema_rel).read_text(encoding="utf-8"))
+    questions = jsonio.load_json(package_dir / questions_rel)
+    schema = jsonio.load_json(package_dir / schema_rel)
     answerable = {q["name"] for q in questions.get("questions", [])}
     permitted = set(schema.get("properties", {}) or {})
     closed = schema.get("additionalProperties") is False
@@ -1324,6 +1327,57 @@ def check_environment_contract(package_dir: Path,
     return findings
 
 
+def _read_contract(path: Path, rel: str, owner: str,
+                   findings: list[Finding]) -> dict[str, Any] | None:
+    """Reads the frontmatter contract an instruction file opens with.
+
+    Returns: the frontmatter, or None after appending to `findings` the
+    reason there is none -- no leading `---`, or frontmatter that does not
+    parse. Either way there is nothing left to check in the file.
+    """
+    text = path.read_text(encoding="utf-8")
+    if not text.lstrip().startswith("---"):
+        findings.append(
+            Finding("frontmatter-contracts", owner, rel, 1,
+                    "missing leading '---' YAML frontmatter contract"))
+        return None
+    try:
+        fm, _ = parse_frontmatter_document(text, rel)
+    except TpuAgentSuiteError as exc:
+        findings.append(
+            Finding("frontmatter-contracts", owner, rel, 1, str(exc)))
+        return None
+    return fm
+
+
+def _list_field_findings(
+        fm: dict[str, Any],
+        key: str,
+        owner: str,
+        rel: str,
+        allowed_tools: set[str] | None = None) -> list[Finding]:
+    """Reports a frontmatter `key` that is not a list, or grants a tool
+    outside `allowed_tools` when that is given."""
+    if key not in fm:
+        return []
+    if not isinstance(fm[key], list):
+        return [
+            Finding("frontmatter-contracts", owner, rel, 1,
+                    f"'{key}' in frontmatter must be a list")
+        ]
+    if allowed_tools is None:
+        return []
+    invalid = set(fm[key]) - allowed_tools
+    if invalid:
+        return [
+            Finding(
+                "frontmatter-contracts", owner, rel, 1,
+                "frontmatter contains invalid tool grants: "
+                f"{sorted(invalid)}")
+        ]
+    return []
+
+
 def check_frontmatter_contracts(package_dir: Path,
                                 manifest: dict[str, Any]) -> list[Finding]:
     """Check that instruction markdown files define valid YAML contracts.
@@ -1348,36 +1402,24 @@ def check_frontmatter_contracts(package_dir: Path,
         # check runs, so a missing key is a bug worth raising, not skipping.
         rel = skill["instructions"]
         doc_path = package_dir / rel
+        owner = skill.get("name", doc_path.stem)
         if not doc_path.is_file():
             # Nothing else catches this before a build: load_package verifies
             # that agent documents exist but has no equivalent for skills.
             findings.append(
-                Finding("frontmatter-contracts",
-                        skill.get("name", doc_path.stem), rel, 1,
+                Finding("frontmatter-contracts", owner, rel, 1,
                         "skill instructions file does not exist"))
             continue
         if doc_path.resolve() in checked_files:
             continue
         checked_files.add(doc_path.resolve())
-        text = doc_path.read_text(encoding="utf-8")
-        if not text.lstrip().startswith("---"):
-            findings.append(
-                Finding("frontmatter-contracts",
-                        skill.get("name", doc_path.stem), rel, 1,
-                        "missing leading '---' YAML frontmatter contract"))
-            continue
-        try:
-            fm, _ = parse_frontmatter_document(text, rel)
-        except TpuAgentSuiteError as exc:
-            findings.append(
-                Finding("frontmatter-contracts",
-                        skill.get("name", doc_path.stem), rel, 1, str(exc)))
+        fm = _read_contract(doc_path, rel, owner, findings)
+        if fm is None:
             continue
         for req in ("name", "description"):
             if not fm.get(req):
                 findings.append(
-                    Finding("frontmatter-contracts",
-                            skill.get("name", doc_path.stem), rel, 1,
+                    Finding("frontmatter-contracts", owner, rel, 1,
                             f"frontmatter missing required field {req!r}"))
         # Manifest and document must agree, or the harness advertises a skill
         # under one name while its body describes another.
@@ -1387,26 +1429,9 @@ def check_frontmatter_contracts(package_dir: Path,
                     "frontmatter-contracts", skill["name"], rel, 1,
                     f"frontmatter name {fm['name']!r} does not match skill "
                     f"name {skill['name']!r}"))
-        if "delegates" in fm and not isinstance(fm["delegates"], list):
-            findings.append(
-                Finding("frontmatter-contracts",
-                        skill.get("name", doc_path.stem), rel, 1,
-                        "'delegates' in frontmatter must be a list"))
-        if "tools" in fm:
-            if not isinstance(fm["tools"], list):
-                findings.append(
-                    Finding("frontmatter-contracts",
-                            skill.get("name", doc_path.stem), rel, 1,
-                            "'tools' in frontmatter must be a list"))
-            else:
-                invalid = set(fm["tools"]) - skill_tools
-                if invalid:
-                    findings.append(
-                        Finding(
-                            "frontmatter-contracts",
-                            skill.get("name", doc_path.stem), rel, 1,
-                            "frontmatter contains invalid tool grants: "
-                            f"{sorted(invalid)}"))
+        findings.extend(_list_field_findings(fm, "delegates", owner, rel))
+        findings.extend(
+            _list_field_findings(fm, "tools", owner, rel, skill_tools))
 
     # 2. Agent frontmatter contracts
     agents = manifest.get("agents", [])
@@ -1421,27 +1446,16 @@ def check_frontmatter_contracts(package_dir: Path,
         if doc_path.resolve() in checked_files:
             continue
         checked_files.add(doc_path.resolve())
-        text = doc_path.read_text(encoding="utf-8")
-        if not text.lstrip().startswith("---"):
-            findings.append(
-                Finding("frontmatter-contracts",
-                        agent.get("name", doc_path.stem), rel, 1,
-                        "missing leading '---' YAML frontmatter contract"))
-            continue
-        try:
-            fm, _ = parse_frontmatter_document(text, rel)
-        except TpuAgentSuiteError as exc:
-            findings.append(
-                Finding("frontmatter-contracts",
-                        agent.get("name", doc_path.stem), rel, 1, str(exc)))
+        owner = agent.get("name", doc_path.stem)
+        fm = _read_contract(doc_path, rel, owner, findings)
+        if fm is None:
             continue
 
         for req in ("name", "description"):
             if req not in fm:
                 findings.append(
                     Finding(
-                        "frontmatter-contracts",
-                        agent.get("name", doc_path.stem), rel, 1,
+                        "frontmatter-contracts", owner, rel, 1,
                         f"frontmatter missing required contract field {req!r}")
                 )
         if "name" in fm and "name" in agent and fm["name"] != agent["name"]:
@@ -1450,26 +1464,9 @@ def check_frontmatter_contracts(package_dir: Path,
                     "frontmatter-contracts", agent["name"], rel, 1,
                     f"frontmatter name {fm['name']!r} does not match agent "
                     f"name {agent['name']!r}"))
-        if "tools" in fm:
-            if not isinstance(fm["tools"], list):
-                findings.append(
-                    Finding("frontmatter-contracts",
-                            agent.get("name", doc_path.stem), rel, 1,
-                            "'tools' in frontmatter must be a list"))
-            else:
-                invalid = set(fm["tools"]) - valid_tools
-                if invalid:
-                    findings.append(
-                        Finding(
-                            "frontmatter-contracts",
-                            agent.get("name", doc_path.stem), rel, 1,
-                            "frontmatter contains invalid tool grants: "
-                            f"{sorted(invalid)}"))
-        if "delegates" in fm and not isinstance(fm["delegates"], list):
-            findings.append(
-                Finding("frontmatter-contracts",
-                        agent.get("name", doc_path.stem), rel, 1,
-                        "'delegates' in frontmatter must be a list"))
+        findings.extend(
+            _list_field_findings(fm, "tools", owner, rel, valid_tools))
+        findings.extend(_list_field_findings(fm, "delegates", owner, rel))
 
     # 3. Check any authored instruction files in package
     authored = sorted({
@@ -1480,18 +1477,8 @@ def check_frontmatter_contracts(package_dir: Path,
         if inst_file.resolve() in checked_files:
             continue
         rel = str(inst_file.relative_to(package_dir))
-        text = inst_file.read_text(encoding="utf-8")
-        if not text.lstrip().startswith("---"):
-            findings.append(
-                Finding("frontmatter-contracts", inst_file.stem, rel, 1,
-                        "missing leading '---' YAML frontmatter contract"))
-            continue
-        try:
-            fm, _ = parse_frontmatter_document(text, rel)
-        except TpuAgentSuiteError as exc:
-            findings.append(
-                Finding("frontmatter-contracts", inst_file.stem, rel, 1,
-                        str(exc)))
+        fm = _read_contract(inst_file, rel, inst_file.stem, findings)
+        if fm is None:
             continue
         for req in ("name", "description"):
             if not fm.get(req):

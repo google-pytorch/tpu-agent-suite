@@ -159,9 +159,16 @@ them; `vllm bench serve --profile` does. A server started with the profiler
 configured but never asked to profile costs one `None` check per scheduler
 step, so arm every server you might want to profile.
 
+On vLLM 0.29.0 and 0.31.0 (the version vllm-torchtpu pins at `9725110e`)
 `/start_profile` takes no arguments, so every capture lands in the same
-directory. To keep one profile per benchmark point, move each capture out
-before starting the next:
+directory. vllm-torchtpu's `docs/developers_guide/profiling/server.md`
+(`index.py get vllm-torchtpu-server-profiling`) shows a JSON body with
+`profile_prefix` and profiler options; the plugin's workers accept them, but
+vLLM's router passes a body on only from v0.32.0, and then only
+`profile_prefix`, `delay_iterations` and `max_iterations` (other keys are
+dropped). Offline, `LLM.start_profile(profile_prefix=...)` works on 0.31.0.
+Until the image's vLLM passes the body, keep one profile per benchmark point
+by moving each capture out before starting the next:
 
 ```
 for each point:

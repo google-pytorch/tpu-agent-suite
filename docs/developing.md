@@ -34,11 +34,19 @@ pip install pre-commit
 pre-commit install
 ```
 
-`.pre-commit-config.yaml` at the repo root declares both `pre-commit` and
-`commit-msg` hook types, so a plain `pre-commit install` sets up everything.
+`.pre-commit-config.yaml` at the repo root declares `pre-commit`, `pre-push`,
+and `commit-msg` hook types, so a plain `pre-commit install` sets up everything.
 Among other things the hooks add a `Signed-off-by:` trailer to each commit, run
-`ruff`/`yapf`/`isort`, fix markdown, and validate the knowledge base. Agent
-instruction files (`package/**/*.md`), knowledge base `raw/` sources and
+`ruff`/`yapf`/`isort`, fix markdown, validate the knowledge base, and run
+`scripts/check_denylist.py` on both `git commit` and `git push`. In checkouts
+where the repository denylist is not present on disk, place your local copy at
+`~/.cache/tpu-agent-suite/denylist.yaml` before committing:
+
+```bash
+mkdir -p ~/.cache/tpu-agent-suite && cp <path-to-denylist.yaml> ~/.cache/tpu-agent-suite/denylist.yaml
+```
+
+Agent instruction files (`package/**/*.md`), knowledge base `raw/` sources and
 the generated codebase symbol catalogs are excluded from formatting, since they
 are consumed byte-for-byte.
 
@@ -91,21 +99,60 @@ The first session there sets compute up, or see
 [Headless installs](install.md#headless-installs-ci-containers) to create a
 profile from the command line.
 
+### Building a package
+
+To build the distribution for a specific harness, run:
+
+```bash
+python3 framework/compiler.py translate package --harness <harness> --output dist/<harness>/tpu-agent-suite
+```
+
+*(Replace `<harness>` with `claude-code`, `codex`, `antigravity`, or `cursor`).*
+
+The compiled distribution directory bundles translated skills, compiled agent prompts, harness configuration, lifecycle hooks, the runtime and installer (in `framework/`), dependency manifests, and a README.
+
+If you also want to package that single distribution into an archive (`.tar.gz`):
+
+```bash
+python3 framework/compiler.py archive --dist-dir dist --output dist/archives --harness <harness>
+```
+
+To install the result, follow [install.md](install.md#2-install-the-distribution).
+
+#### The experimental package (`tpu-agent-suite-experimental`)
+
+`package/package.experimental.json` builds `tpu-agent-suite-experimental`, a package for testing. It releases everything `tpu-agent-suite` releases, plus the vLLM optimization skills (`close-gaps`, `decompose-optimization`, `write-tpu-kernels` and others).
+
+It is a complete package, not an add-on. It has its own runtime, compute environment and hooks, and it builds every agent its skills use. A workspace holds one package at a time, so **install either `tpu-agent-suite` or `tpu-agent-suite-experimental`, not both**. To switch, uninstall the installed package first.
+
+```bash
+make build-experimental
+python3 dist/<harness>/tpu-agent-suite-experimental/framework/installer.py install --destination /path/to/project
+```
+
+Both packages are built from the same files in `package/`. `--manifest` selects the manifest file, and works with `compose`, `verify`, `lint` and `translate`. It defaults to `package.release.json`.
+
+`package.experimental.json` declares `"extends": "package.release.json"`. It takes every field of `package.release.json`, replaces `name`, `display_name` and `description`, and lists only the skills it adds under `add_skills`. A change to `package.release.json`, such as a new hook or a version bump, therefore reaches both packages. Only one level of `extends` is supported.
+
 ---
 
 ## 3. What CI runs
 
-Every pull request runs the workflows under `.github/workflows/`:
+Every pull request runs the following checks:
 
-| Workflow | Runs | Required? |
+| Gate | Runs | Required? |
 | :--- | :--- | :--- |
-| `ci.yml` | `make verify`, `make validate-kb KB_BASE=origin/<base>`, `make test-framework`, `make test-package`, `make build`, `compiler.py lint` (annotations), `make coverage`, `make coverage-diff` | yes, except lint |
-| `pre-commit.yml` | The full pre-commit hook set | yes |
-| `dataset-naming.yml` | Eval dataset folder naming (`^[a-z0-9-]+$`) | yes, when `eval/**` changes |
-| `eval-smoke-check.yml` | The `smoke-check` evaluation, when agent packages or eval datasets change | reported |
-| `approval-gate.yml` | Core-maintainer approval for the onboarding files under `package` (`agents/tpu-model-onboarding.md`, `agents/tpu-unwiring.md`, `references/tpu-model-onboarding`, `scripts/tpu-model-onboarding`) and `eval/tpu-model-onboarding`; at least 1 approval from anyone outside those directories (including docs) | yes |
-| `nightly-release.yml` | Nightly (and on changes to `Makefile` or the workflow): stamps `<version>.dev<YYYYMMDDHHMM>` into `package/package.release.json`, `make test`, `make archives`, installs the claude-code archive into a scratch workspace, and publishes `dist/archives/*.tar.gz` to `gs://gh_zips/releases/nightly/<version>/` and `.../nightly/latest/` (scheduled and manual runs only; PR runs just keep a run artifact) | no |
-| `stable-release.yml` | Manual only (PR runs on changes to `Makefile` or the workflow build but never publish): takes the version as-is from `package/package.release.json` (must be `X.Y.Z`), refuses if tag `v<version>` exists at another commit or the GitHub Release exists, then `make test`, `make archives`, installs the claude-code archive into a scratch workspace, and a separate `publish` job (write token; needs the repo's Actions workflow permissions to allow it) ships `dist/archives/*.tar.gz` plus `SHA256SUMS` to `gs://gh_zips/releases/v<version>/` and a GitHub Release `v<version>`, creating the tag at the dispatched commit if missing. Recovery for a half-published run is in the workflow header | no |
+| **Package & unit tests** | `make verify`, `make verify-experimental`, `make validate-kb KB_BASE=origin/<base>`, `make test`, `make test-eval`, `make build`, `compiler.py lint`, `make coverage`, `make coverage-diff` | yes (`coverage-diff` advisory) |
+| **Formatting & denylist** | The `pre-commit` hook set plus `scripts/check_denylist.py` on PR diffs and commit messages | yes |
+| **Dataset naming** | Eval dataset and task folder naming (`^[a-z0-9-]+$`) | yes, when `eval/**` changes |
+| **Code owners** | Code-owner approval on protected onboarding, framework, documentation, and infrastructure paths | yes |
+| **Smoke evaluation** | The `smoke-check` Harbor evaluation when package, framework, or evaluation files change | reported |
+
+Release builds compile standalone per-harness archives without internal
+overlays, scan the compiled `dist/` and curated `release-notes/v<version>.md`
+(copied from `release-notes/TEMPLATE.md`) with `scripts/check_denylist.py`,
+smoke-test installing the `claude-code` archive in a clean workspace, and emit
+`SHA256SUMS`.
 
 Run the same commands locally before pushing; CI adds nothing you cannot
 reproduce with the loop above plus `pre-commit run --all-files`.
@@ -267,7 +314,7 @@ compiles and stages the package for you; see
   (`test.sh` plus `reward.toml` or expectation files). Configs go in
   `eval/configs/<config>.yaml`.
 - **Naming**: dataset and task directory names must match `^[a-z0-9-]+$`
-  (`dataset-naming.yml` enforces it). Directories starting with `_` or `.`
+  (enforced in CI). Directories starting with `_` or `.`
   are ignored, so `_template` is fine.
 - **Validate** before running anything: `./eval/verify.sh <dataset>`
   checks the config YAML and every `task.toml` against their schemas.

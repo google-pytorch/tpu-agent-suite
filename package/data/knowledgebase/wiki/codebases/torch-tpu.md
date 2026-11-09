@@ -6,7 +6,7 @@ created: 2026-08-08
 updated: 2026-10-13
 sources: 4
 human_reviewed: false
-aliases: [torch_tpu_runtime, torch_xla_backend, torch_tpu]
+aliases: [torch_tpu_runtime, torch_tpu]
 ---
 
 # TorchTPU Runtime & OpenXLA Backend

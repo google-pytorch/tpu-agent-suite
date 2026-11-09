@@ -4,7 +4,7 @@ scripts:
   - scripts/tpu-model-onboarding/stage_checkpoint.py
 references:
   - references/tpu-model-onboarding/preflight-check.md
-  - references/common/vllm-engine-compatibility.md
+  - references/common/engine-compatibility.md
   - references/tpu-model-onboarding/torch-inference-coder.md
   - references/tpu-model-onboarding/numerical-parity.md
   - references/common/inference-serving-benchmark.md
@@ -24,7 +24,8 @@ these steps yourself; only CUDA unwiring is delegated.
 -   `engine` (Optional): The inference engine to use. When omitted, defaults to
     `vllm` for supported LLM / CausalLM architectures, and automatically falls
     back to `custom_fastapi` for non-LLMs (vision/audio/embeddings), unwired
-    models, or unsupported architectures. Supported: `vllm`, `custom_fastapi`.
+    models, or unsupported architectures. Supported: `vllm`, `sglang`,
+    `custom_fastapi`.
 
 ## Paths
 
@@ -64,22 +65,11 @@ next.
     request asks for numbers at more than one `isl:osl` shape, the mode is
     serving mode and the session has a `gke_job` profile, do Step 0.1b first: it picks the TPU this
     deployment runs on, and everything below sizes for that TPU. Read the
-    configured backend with `{{runtime}} compute inspect --package {{package_tag}} --json`.
-    If nothing is configured, ask the user. Record `details.job_devices` and
-    `details.hbm_gb_per_device` for sizing in Step 0.2, and `available_chips`
-    and `held_by` for its image-probe gate.
-
-    **Gate on the backend before going further.** Serving needs a port forward,
-    and one backend cannot provide it:
-
-    | Backend | Serving |
-    | :--- | :--- |
-    | `local`, `gce_tpu_vm`, `gke_pod`, `gke_job` | supported |
-    | `gke_xpk` | **not supported** |
-
-    `gke_xpk` has no synchronous `run` and no port forwarding; its workloads are
-    multi-host and expect the code packaged into a container image. Report that
-    as the blocker and stop. Do not switch the backend to work around it.
+    active profile's `backend` and `params` with
+    `{{runtime}} config show --json --package {{package_tag}}`; do not run
+    `compute inspect`. Work out `<JOB_DEVICES>` and `<HBM_GB_PER_DEVICE>` for
+    Step 0.2 as tpu-model-onboarding's sizing says: per-chip specs from the
+    knowledge base, chips from the profile.
 
 -   [ ] **Step 0.1b: Pick the TPU and book its slot (only for a sweep of
     several shapes on `gke_job` in serving mode; before the rest of Step
@@ -99,7 +89,7 @@ next.
     It prints the `resource`, its `profile`, its `hardware` key and
     `free_like_this`, the slots of that kind still free for the sweep's other
     servers. Keep all four. Point this run at that profile, so Step 0.1's
-    inspect and every job after it land there:
+    sizing and every job after it use it:
 
     ```bash
     {{runtime}} config use <profile> --package {{package_tag}}
@@ -111,37 +101,57 @@ next.
     Step 5b then measures the shapes one after another in one client. Skip
     this step for one shape, verification mode, or another backend: Step 5b
     measures those with one client, one shape after another.
--   [ ] **Step 0.2: Pre-flight Compatibility Check**: Read
-    `{{reference:tpu-model-onboarding/preflight-check.md}}` and
-    `{{reference:common/vllm-engine-compatibility.md}}`
+-   [ ] **Step 0.2: Pre-flight Compatibility Check**:
+    **Execution order between Step 0.2 and Step 0.2b depends on `model`:**
+
+    | `model` input | Execution Order | Why |
+    | :--- | :--- | :--- |
+    | **Not a local checkpoint directory** (Hugging Face Hub ID or `gs://` folder) | **Step 0.2 first, then Step 0.2b** | Preflight runs first; if compatible, Step 0.2b stages Hub weights to GCS before serving jobs run. |
+    | **Local checkpoint directory** (and backend is not `local`) | **Step 0.2b first, then Step 0.2** | Remote preflight jobs cannot read the host disk; stage the local directory to GCS in Step 0.2b first, then run Step 0.2 on the staged `gs://` folder. |
+
+    Read `{{reference:tpu-model-onboarding/preflight-check.md}}` and
+    `{{reference:common/engine-compatibility.md}}`
     and follow them to complete preflight compatibility checks on the
-    model with `--allow_gpu_imports --cuda_report_json=<artifacts>/cuda_kernels_report.<model_slug>.json --mode=inference`.
--   [ ] **Step 0.2b: Stage the checkpoint (Hugging Face models, when a bucket is known)**:
+    model (or on the staged `gs://` checkpoint folder if Step 0.2b ran first)
+    with `--allow_gpu_imports --cuda_report_json=<artifacts>/cuda_kernels_report.<model_slug>.json --mode=inference`.
+-   [ ] **Step 0.2b: Stage the checkpoint (Hugging Face models or local checkpoint directories, when a bucket is known)**:
+    **Ordering:** Run **after Step 0.2** when `model` is a Hugging Face Hub ID (skip for an already-staged `gs://` folder), or **before Step 0.2** when `model` is a local checkpoint directory on a remote backend (if you already ran Step 0.2b before Step 0.2, check this off and move to Step 0.3).
+
     Put the weights in a bucket once, or reuse the copy already there, so no
-    job after this downloads the model from the Hub again. The bucket must be
+    job after this downloads the model from the Hub again (and so remote jobs
+    can read a local checkpoint directory). The bucket must be
     one the serving jobs can read. On `gke_job`, read the params of the
     profile this run uses (`{{runtime}} config show --json --package
     {{package_tag}}`): its pods reach GCS through the profile's
     `pod_service_account` when it has one, and otherwise only through a token
-    limited to its `staging_bucket`. Take the first that applies:
+    that reads the `checkpoints/` folder under its `staging_bucket` (and writes
+    only the job's own folder). Take the first that applies:
 
     1. The request's `checkpoint_bucket`, when the jobs can read it: any
        backend other than `gke_job`, a `gke_job` profile with a
        `pod_service_account`, or the same bucket as its `staging_bucket`.
-    2. On `gke_job`, the profile's `staging_bucket` (only the bucket is used;
-       copies go under `checkpoints/`). When it replaces a `checkpoint_bucket`
-       the pods could not read, say so in your result.
-    3. Neither: skip this step and use the Hub id as before.
+    2. On `gke_job`, the profile's `staging_bucket`. When it names a folder
+       (`gs://<bucket>/<folder>`), pass `--folder <folder>/checkpoints`; the
+       script uses only the bucket from `--bucket`. When it replaces a
+       `checkpoint_bucket` the pods could not read, say so in your result.
+    3. Neither: for a Hugging Face model, skip this step and use the Hub id as
+       before. For a local checkpoint directory on a remote backend, **stop and
+       return `needs_input`**: remote jobs cannot read the host disk without a
+       GCS bucket. In `summary`, explain that staging the local checkpoint
+       requires a `gs://` bucket and give `{{runtime}} compute setup plan --fields staging_bucket`
+       (on `gke_job`) or ask for a `gs://` `checkpoint_bucket` the TPU target
+       can read (on other remote backends). Do not run the setup command
+       yourself; setup is done with the user in the main session.
 
     ```bash
     python3 {{script:tpu-model-onboarding/stage_checkpoint.py}} <model_id> \
-      --bucket <bucket> [--revision <revision>] \
+      --bucket <bucket> [--folder <folder>/checkpoints] [--revision <revision>] \
       --out <artifacts>/checkpoint.json
     ```
 
     Its `checkpoint` (a `gs://` folder) is **the model from here on**: pass it
     wherever these steps say model, model path or model id, and keep the Hub
-    id as `--served-model-name`. A sweep's followers then read it too,
+    id (or local directory's base name) as `--served-model-name`. A sweep's followers then read it too,
     instead of each downloading the model again. Say in your result which
     bucket you used and whether the copy was `reused` or staged now.
 
@@ -171,16 +181,16 @@ next.
     and, following it, create a declarative service manifest at
     `<inference_work>/deployments.json` defining the model ID, target engine,
     sequence lengths, and port. Resolve the engine using the 3-tier hierarchy:
-    1. *vLLM Supported*: When `engine` is omitted and the model is a CausalLM supported
-       by vLLM (verified in Step 0.2), set `engine: "vllm"`.
+    1. *vLLM / SGLang Supported*: When `engine` is omitted and the model is a CausalLM supported
+       by vLLM (verified in Step 0.2), set `engine: "vllm"` (or `engine: "sglang"` when the user requested SGLang).
     2. *Golden Model / Patchable*: If minor gaps have an available playbook,
-       proceed with `engine: "vllm"`.
+       proceed with `engine: "vllm"` (or `engine: "sglang"`).
     3. *Automated Fallback to Native PyTorch*: If the model is a non-LLM, unwired
-       (Step 0.3), or rejected by vLLM compatibility, automatically set
+       (Step 0.3), or rejected by engine compatibility, automatically set
        `engine: "custom_fastapi"` without asking the user.
 -   [ ] **Step 2: Inference Code Generation**: Generate the required serving
     wrapper under `<inference_work>/` as per the torch-inference-coder
-    instructions -- `fastapi_server.py` or `launch_vllm.sh`. If Step 0.3 ran,
+    instructions -- `fastapi_server.py`, `launch_vllm.sh`, or `launch_sglang.sh`. If Step 0.3 ran,
     the server imports the module at `patches_path`. The
     manifest is not baked into the script; it travels beside it as an
     `--input` when the job is submitted.
@@ -233,9 +243,12 @@ next.
     One client takes every shape the request names in one run, with the
     flags "The measurement's flags" gives for the request: the
     single-measurement flags for one measurement, the onboarding sweep's for
-    several shapes or concurrencies (`--max-concurrency-limit` =
-    `max_num_seqs` x `dp` from `deployments.json`, and the request's
-    `--avoid` when it states one). It measures the shapes one after another,
+    several shapes or concurrencies (`--max-concurrency-limit` = requests
+    per replica x DP from `deployments.json`: `max_num_seqs` x
+    `data_parallel_size` for `vllm`, `max_running_requests` x `dp_size` for
+    `sglang`, with DP 1 when the DP key is absent; left out when the
+    manifest has no requests-per-replica key; and the request's `--avoid` when it
+    states one). It measures the shapes one after another,
     each stopped early on its own, so the result is the same measurement as a
     sweep on several servers, only slower; say in your result which route ran
     and, for one client, that the shapes ran one after another.
@@ -244,7 +257,8 @@ next.
     serving mode) is its `--leader`, and the recipe, `--input`s, image and
     other flags Step 3 submitted it with are the sweep's server recipe. Pass
     it, after `--`, the same client flags one client would get, and
-    `--max-model-len` from `deployments.json`. When the
+    `--max-model-len` from the context-length key in `deployments.json`
+    (`max_model_len` for `vllm`, `context_length` for `sglang`). When the
     request lists `servers` that an earlier onboarding in this session left
     serving, add each whose `deployments_json` and `launch_recipe` files have
     the same contents as yours as another `--leader <job_id>@<profile>`;
@@ -253,6 +267,21 @@ next.
     measurement. If the sweep ends `invalid_input` or `refused` before any
     server took a shape, measure with one client instead, by the routes
     above.
+
+    Measure with the recipe Step 3 deployed; do not relaunch with higher
+    requests per replica (`--max-num-seqs`, `--max-running-requests`) or
+    another TP or DP. The preflight check sized requests per replica for
+    the sweep's top point, and a new server re-measures every point from
+    the start. The limit stops a sweep short of its top point only when
+    requests per replica x DP in `deployments.json` is below the highest
+    `--points` concurrency. Then report it as the result: the concurrency
+    the sweep stopped at, and what set the value: the KV cache (the plan's
+    or the layout's value below that concurrency), Step 3e lowering it for
+    a memory error, SGLang lowering it at startup (torch-inference-coder's
+    Step 3d), or the user or
+    the patch registry. A
+    higher limit or another layout is the user's call, and a separate
+    measurement.
 -   [ ] **Step 5c: Record the benchmark (only if Step 5b ran)**: Write
     `<inference_work>/bench_request.json` as
     `{{schema:bench-request.json}}` describes, so a later stage can measure a

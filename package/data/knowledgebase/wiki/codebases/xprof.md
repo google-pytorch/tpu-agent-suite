@@ -3,9 +3,9 @@ title: "xprof (JAX / TensorBoard TPU profiler)"
 type: codebase
 tags: [performance, framework]
 created: 2026-09-04
-updated: 2026-09-04
+updated: 2026-11-05
 sources: 1
-human_reviewed: true
+human_reviewed: false
 aliases: ["JAX profiler", "TensorBoard profiler", "Trace Viewer", "Graph Viewer"]
 ---
 
@@ -25,7 +25,8 @@ with jax.profiler.trace("/tmp/tensorboard"):
 ```
 
 ([scaling-book, Part 9](../sources/2025-scaling-book-profiling.md).) Traces can also be shared as Perfetto
-links (Trace Viewer only). PyTorch/XLA capture is *not yet ingested*.
+links (Trace Viewer only). For PyTorch on TPU, capture goes through `torch_tpu`'s profiler, not
+`jax.profiler`: see the torch_tpu subwiki's [profiler](torch_tpu/concepts/profiler.md) page.
 
 ## Tabs
 

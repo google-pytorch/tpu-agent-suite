@@ -1,0 +1,51 @@
+{
+  "task": "a2_roofline",
+  "title": "Read the roofline, and prove the model closes",
+  "answer_file": "answer.json",
+  "pass_threshold": 9,
+  "valid_for": {
+    "xprof": ">=2.24.1a20260827"
+  },
+  "fields": {
+    "bound_by": {
+      "type": "enum",
+      "values": [
+        "HBM",
+        "Compute",
+        "Unknown"
+      ],
+      "weight": 2
+    },
+    "operational_intensity": {
+      "type": "number",
+      "tol_rel": 0.01,
+      "weight": 1
+    },
+    "peak_flop_rate_gflops": {
+      "type": "number",
+      "tol_rel": 0.001,
+      "weight": 1
+    },
+    "peak_hbm_bw_gibs": {
+      "type": "number",
+      "tol_rel": 0.001,
+      "weight": 1
+    },
+    "ridge_point_published": {
+      "type": "number",
+      "tol_rel": 0.001,
+      "weight": 1
+    },
+    "ridge_point_recomputed": {
+      "type": "number",
+      "tol_rel": 0.002,
+      "weight": 3,
+      "grounded": false
+    },
+    "is_above_ridge": {
+      "type": "bool",
+      "weight": 2,
+      "grounded": false
+    }
+  }
+}

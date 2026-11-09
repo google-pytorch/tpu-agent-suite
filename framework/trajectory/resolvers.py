@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import json
+import os
 import pathlib
 import re
 from typing import Any, Callable, Iterable
 
-from framework import utils
+from framework import harnesses, jsonio, utils
 
 Path = pathlib.Path
 TpuAgentSuiteError = utils.TpuAgentSuiteError
@@ -82,21 +82,15 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     """Parse a JSONL transcript, skipping lines that do not parse.
 
     A session killed mid-write leaves a truncated final line, so a bad line is
-    expected rather than exceptional.
+    expected rather than exceptional. Laxer than jsonio.read_jsonl, which it
+    wraps: undecodable bytes are dropped, and a transcript that cannot be read
+    at all reads as empty rather than raising, since every caller here reports
+    what it could not find instead of failing.
     """
-    records: list[dict[str, Any]] = []
     try:
-        with path.open(encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except (json.JSONDecodeError, ValueError):
-                    continue
+        return jsonio.read_jsonl(path, errors="ignore")
     except OSError:
         return []
-    return records
 
 
 def _tool_uses(record: dict[str, Any]) -> Iterable[dict[str, Any]]:
@@ -127,8 +121,12 @@ def _claude_root_transcript(session_id: str) -> Path | None:
 
     Globbed rather than derived from the workspace path: the project slug
     encoding is the harness's business, and a glob stays correct if it changes.
+
+    `CLAUDE_CONFIG_DIR` moves the whole config tree, which the eval harness
+    does so transcripts land under /logs; `~/.claude` then holds nothing.
     """
-    projects = Path.home() / ".claude" / "projects"
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    projects = Path(config or Path.home() / ".claude") / "projects"
     matches = sorted(projects.glob(f"*/{session_id}.jsonl"))
     return matches[0] if matches else None
 
@@ -200,9 +198,8 @@ def _claude_collect_agents(subagent_dir: Path) -> dict[str, dict[str, Any]]:
                                          ".jsonl")
         if not transcript.is_file():
             continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
+        meta = jsonio.load_json_or_empty(meta_path)
+        if not meta:
             continue
         agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
         agents[agent_id] = {"meta": meta, "path": transcript}
@@ -266,10 +263,8 @@ def _claude_included_agents(
     return included
 
 
-def resolve_claude_code(session_id: str, workspace: Path,
-                        entrypoint: str) -> SessionBundle:
+def resolve_claude_code(session_id: str, entrypoint: str) -> SessionBundle:
     """Resolve root and subagent transcripts for a Claude Code session."""
-    del workspace  # Transcripts are keyed by session id, not by workspace.
     missing: list[str] = []
     root_path = _claude_root_transcript(session_id)
     if root_path is None:
@@ -340,7 +335,7 @@ def resolve_claude_code(session_id: str, workspace: Path,
 # Google harness resolver
 # --------------------------------------------------------------------------
 #
-# Every harness in utils.GOOGLE_HARNESSES stores conversations the same way,
+# Every harness in harnesses.GOOGLE_HARNESSES stores conversations the same way,
 # so one resolver serves the family. The harness name selects which brain
 # roots are searched and labels the bundle; nothing else branches on it.
 
@@ -351,7 +346,7 @@ def _google_brain_dir(harness: str, conversation_id: str) -> Path | None:
     A brain root belongs to `harness` when its directory name under ~/.gemini
     contains the harness name, so conversations from another family member
     are never picked up. Globbed rather than read from
-    utils.GOOGLE_HARNESS_BRAIN_DIRS, which registers one root per harness:
+    harnesses.GOOGLE_HARNESS_BRAIN_DIRS, which registers one root per harness:
     a harness can keep conversations under several roots, and the registered
     one alone would not find the others.
     """
@@ -449,10 +444,8 @@ def _google_descendants(
     descriptors = sorted(
         (brain_dir / ".system_generated" / "subagents").glob("*.json"))
     for descriptor_path in descriptors:
-        try:
-            descriptor = json.loads(
-                descriptor_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
+        descriptor = jsonio.load_json_or_empty(descriptor_path)
+        if not descriptor:
             continue
         spawn_step = int(descriptor.get("spawnStepIndex") or 0)
         if spawn_step < cut_step:
@@ -480,7 +473,7 @@ def _google_descendants(
     return found
 
 
-def resolve_google_harness(harness: str, session_id: str, workspace: Path,
+def resolve_google_harness(harness: str, session_id: str,
                            entrypoint: str) -> SessionBundle:
     """Resolve root and subagent transcripts for a Google harness conversation.
 
@@ -488,11 +481,10 @@ def resolve_google_harness(harness: str, session_id: str, workspace: Path,
     recorded on the bundle so the manifest names the harness the session
     actually ran on rather than the family it belongs to.
     """
-    del workspace  # Conversations are keyed by id under ~/.gemini.
     missing: list[str] = []
     brain_dir = _google_brain_dir(harness, session_id)
     if brain_dir is None:
-        display_name = utils.HARNESS_DISPLAY_NAMES.get(harness, harness)
+        display_name = harnesses.HARNESS_DISPLAY_NAMES.get(harness, harness)
         raise TpuAgentSuiteError(
             f"no {display_name} brain directory found for conversation"
             f" {session_id}")
@@ -559,13 +551,13 @@ def resolve_google_harness(harness: str, session_id: str, workspace: Path,
 
 # A missing entry here is what produces the "not supported" refusal, so adding
 # a harness is a resolver plus one line, with no change to any skill document.
-# Google harnesses need neither: each member of utils.GOOGLE_HARNESSES is
+# Google harnesses need neither: each member of harnesses.GOOGLE_HARNESSES is
 # registered with the shared resolver, bound to its own name.
 RESOLVERS: dict[str, Callable[[str, Path, str], SessionBundle]] = {
     "claude-code": resolve_claude_code,
     **{
         harness: functools.partial(resolve_google_harness, harness)
-        for harness in sorted(utils.GOOGLE_HARNESSES)
+        for harness in sorted(harnesses.GOOGLE_HARNESSES)
     },
 }
 
@@ -580,10 +572,10 @@ def unsupported_message(harness: str) -> str:
     return f"exporting trajectories is not supported on {harness} at this time"
 
 
-def resolve_session(harness: str, session_id: str, workspace: Path,
+def resolve_session(harness: str, session_id: str,
                     entrypoint: str) -> SessionBundle:
     """Dispatch to the resolver for `harness`, or refuse if there is none."""
     resolver = RESOLVERS.get(harness)
     if resolver is None:
         raise TpuAgentSuiteError(unsupported_message(harness))
-    return resolver(session_id, workspace, entrypoint)
+    return resolver(session_id, entrypoint)

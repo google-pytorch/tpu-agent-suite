@@ -19,13 +19,18 @@ shaped this way, is in [`docs/design/`](../docs/design/README.md).
 
 The framework is organized into distinct, specialized tools and modules:
 
-1. **`compiler.py`** *(CI / Build)*: Package verification, graph checks, and harness translation.
+1. **`compiler.py`** *(CI / Build)*: The CLI that verifies a package and builds it for each harness. The build code lives in **`builder/`** (`package_loader`, `package_discovery`, `package_checks`, `tokens`, `prompt_contracts`, `harness_rules`, `hook_config`, `translators`, `dist_assets`, `verify`). Other code should use its public API (`load_package`, `verify_package`, `translate`, ...), exported from `builder/__init__.py`.
 2. **`installer.py`** *(User Host)*: Distribution installation, environment setup, and uninstallation rollback.
-3. **`runtime.py`** *(Target Workspace)*: Embedded runner for run namespaces and message validation. Also hosts the `runtime.py compute` CLI entrypoint.
-4. **`compute/`** *(Unified Compute)*: Standardized compute interface for the framework, centralizing workload execution and hardware inspection across backends (local host, Cloud TPU VMs, GKE pods/jobs/clusters) so packages do not need to re-implement this. See [compute/README.md](compute/README.md).
-5. **`study.py`** *(Target Workspace)*: The study store and its `study` CLI verbs. A study outlives the session that opens it, so its state, lifecycle events and command surface live apart from the runtime that spends runs on it.
-6. **`journal.py`** *(Target Workspace)*: The session journal and its `journal` CLI verbs: one experiment timeline per run that every agent with a shell writes, rendered to `experiment.md`. The compiler injects the rule for using it into those agents' contracts.
-7. **`utils.py`** *(Shared)*: Common semver, JSON schema validation, safe path resolution, and configuration merging.
+3. **`runtime.py`** *(Target Workspace)*: CLI entry point invoked by installed hooks and agents. Implementation is split across `hooks/`, `agent_contracts.py`, and `run_state.py`.
+4. **`hooks/`** *(Target Workspace)*: What `runtime.py hook-dispatch` runs for each harness event: `events.py` turns the harness payload into a canonical event, `stop_filter.py` decides whether a SubagentStop is a finished subagent or a turn boundary, halt, or post-hand-back stop, `dispatch.py` filters it and translates the reply, and `actions.py` runs the hook script, command or builtin.
+5. **`compute/`** *(Unified Compute)*: Standardized compute interface for the framework, centralizing workload execution and hardware inspection across backends (local host, Cloud TPU VMs, GKE pods/jobs/clusters) so packages do not need to re-implement this. See [compute/README.md](compute/README.md).
+6. **`study.py`** *(Target Workspace)*: The study store and its `study` CLI verbs. A study outlives the session that opens it, so its state, lifecycle events and command surface live apart from the runtime that spends runs on it.
+7. **`journal.py`** *(Target Workspace)*: The session journal and its `journal` CLI verbs: one experiment timeline per run that every agent with a shell writes, rendered to `experiment.md`. The compiler injects the rule for using it into those agents' contracts.
+8. **`bg_ledger.py`** *(Target Workspace)*: The per-agent ledger of background work and the idle gate built on it: records each launch, tells a stop made with the agent's own work live from a finished one, and refuses it on a run the harness will not resume. Wired in by `hooks/`.
+9. **`harnesses/`** *(Shared)*: One adaptor module per harness (`google.py` holds what the Google family shares) and their registry. An adaptor holds a harness's identity -- name, display name, config directory -- which block of the mapping tables it reads, and the native shape of a hook reply (`render_reply`); the harness-keyed lookups (`harness_mapping`, `to_harness_event`, ...) live here too. Per-harness compile, install and runtime logic still sits in `builder/`, `installer.py`, `hooks/` and `trajectory/`, and is being moved into the adaptors.
+10. **`utils.py`** *(Shared)*: Common semver, JSON schema validation, safe path resolution, and configuration merging.
+11. **`jsonio.py`** *(Shared)*: Reading JSON and JSONL files, and atomic file writes.
+12. **`paths.py`** *(Shared)*: Locating the enclosing git repository and the `~/.tpu-agent-suite` store (runs, sessions, studies, packages, `environment.json`), including the installed version of a package.
 
 ---
 
@@ -162,7 +167,7 @@ python3 framework/compiler.py lint path/to/package [--output-format github]
 ```
 
 Checks live in `lint.CHECKS`; each returns `Finding`s and the caller decides
-what is fatal. `compiler.verify_package` gates on the decidable ones
+what is fatal. `verify_package` gates on the decidable ones
 (`instruction-links`, `reference-links`, `environment-contract`,
 `workspace-config-paths`); the rest are reported, since several are heuristics
 that can fire on legitimate content. CI runs the full set as annotations.
@@ -287,6 +292,8 @@ Every hook receives this unified JSON payload defined by `schemas/hook-input.sch
 
 > **Note on hand-back tools**: Claude Code delivers a subagent's result by one of two roads. Outside auto mode, the subagent's last message is the result (native `SubagentStop`). In auto mode, Claude Code gives every locally run subagent, foreground or background, the `SubagentHandback` tool, and only that call reaches the caller. A harness declares such a tool as a `handback` entry on its `SubagentStop` mapping in `schemas/event-mappings.json`, and the compiler registers every `SubagentStop` hook on it too (for Claude Code, a `PreToolUse` hook on `SubagentHandback`). Hook bodies see the same canonical event on both roads (`args.handback` is `true` on the tool road), and a refusal comes back to the subagent as a tool denial. The hand-back command also carries `--handback-event PreToolUse`, so a dispatch that fails before reading the payload still answers in the tool event's shape. To check each result once, the native stops of a run that hands back are let through unchecked. A native stop is let through if the stopping run was given the tool in auto mode (`requires_mode`), where Claude Code does not deliver plain text and re-prompts the subagent to call the tool, or if the stopping run's hand-back call was accepted. Auto mode alone is not enough: Claude Code 2.1.241 gives the tool to no subagent and delivers its plain final message, so an auto-mode run whose transcript shows no offer of the tool (`transcript_offer`) is checked; when the transcript cannot be read, the mode decides, and the hook reports the skip on stderr, since a run without the tool goes unchecked then. Only that run's transcript records count (`transcript_prompt_id`), so a resumed subagent is judged on its current run. Outside auto mode, a stop whose run cannot be located, like one whose transcript cannot be read, is checked. A run started outside auto mode and switched into it mid-run never gets the tool, so its plain result goes unchecked.
 
+> **Note on background work**: A subagent that stops while a background child or command it launched is still running is not finished. Antigravity says so on the stop (`fullyIdle`) and resumes the agent when the work completes, so the stop is skipped. Claude Code reports no flag, so the runtime derives one: the `track-background` builtin records each launch a `PostToolUse` reports (`tool_response.status == "async_launched"` for `Agent`, `tool_response.backgroundTaskId` for `Bash`) under the launching `agent_id`, and the stop intersects that ledger with the payload's `background_tasks` -- the list alone has no owner, the ledger alone goes stale. Hook bodies see `args.fully_idle`, `args.fully_idle_source` (`harness` or `ledger`) and, when not idle, `args.outstanding_work`. Whether a not-idle stop is a pause depends on the run (measured on Claude Code 2.1.312–2.1.314): an interactive session resumes the agent on each completion, so the stop is skipped; a headless run (`claude -p`) does not -- the pause text becomes the caller's result and the work is orphaned -- so the stop is **refused**, naming the live tasks. The refusal tells the agent to run `sleep 20` and try again, because headless a child's result reaches the agent only with a tool result; Claude Code blocks a bare `sleep` of 25 s or more. An agent with no shell has no such call to make, so its compiled contract says to launch in the foreground and the `track-background` builtin refuses a background delegation from it at `PreToolUse` (the build file's `agent_tools` says which agents have a shell). The gate runs before the hand-back skip. The regime comes from the hook's environment (`pause_resumes` in the mapping's `idle` block): `CLAUDE_CODE_ENTRYPOINT` is `cli` interactive and `sdk-cli` headless; anything else refuses, since a wrong refusal costs a wait and a wrong skip loses the result. A payload without the live list is checked as before, with a line on stderr. The ledger is one file per launch under the sessions directory, cleared at `SessionEnd`.
+
 #### Universal Outbound Schema (`sys.stdout`)
 Every hook emitting output uses this unified JSON payload defined by `schemas/hook-output.schema.json`:
 
@@ -335,7 +342,7 @@ if __name__ == "__main__":
 
 What each kind of unit is, what its frontmatter declares, how the compiler
 discovers units from the released skills, and where each one lives before
-and after install: [Package](../../docs/design/package.md).
+and after install: [Package](../docs/design/package.md).
 
 ---
 
@@ -380,9 +387,29 @@ python3 framework/installer.py install dist/claude-code/<package-name> \
 
 A package may declare `workspace_memory` entries in its manifest, each naming a
 markdown file whose contents are installed as a marker-delimited block in the
-workspace memory file (`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex and
-Antigravity). This is how package-wide instructions reach every session rather
-than only the sessions that invoke a skill.
+harness's memory file. This is how package-wide instructions reach every
+session rather than only the sessions that invoke a skill. Because of that
+reach, the compiler opens every block with one shared preamble saying it
+applies only inside the package's skills (each one named) and their agents, so
+a block does not state its own scope. The preamble names skills, not the
+package: a harness lists skills to the model, but has no notion of a package.
+
+| Harness | `--scope project` | `--scope user` |
+| :--- | :--- | :--- |
+| `claude-code` | `<destination>/CLAUDE.md` | `~/.claude/CLAUDE.md` |
+| `codex` | `<destination>/AGENTS.md` | `$CODEX_HOME/AGENTS.md`, default `~/.codex/AGENTS.md` |
+| `antigravity` | `<destination>/AGENTS.md` | `~/.gemini/AGENTS.md` |
+
+A user-scope install's destination is `$HOME`, but no harness reads
+`~/CLAUDE.md` or `~/AGENTS.md` as user memory: those are project memory, read
+only by a session started in `$HOME` itself. The user-scope paths live in
+`installer.USER_SCOPE_MEMORY_PATHS`. For Codex, a `CODEX_HOME` under `$HOME`
+relocates the memory block, `agents/`, `hooks.json` and `config.toml` together.
+One outside `$HOME`, or `$HOME` itself, fails the install before anything is removed or
+written: the ownership ledger records destination-relative paths, and
+`~/.codex` in its place would be an install Codex never reads. The ledger
+records each block where it was written, so an upgrade strips a block that an
+older install left in `~/AGENTS.md` before writing the new one.
 
 The file is created if absent and otherwise appended to. Blocks render
 through the compile-time resource registry (the same tokens as instructions)
@@ -414,7 +441,7 @@ python3 framework/installer.py uninstall --scope user
 ## Embedded Runtime Architecture
 
 Every generated distribution ships `framework/` as is, minus the build tools
-(`compiler.py`, `lint.py`, `frontmatter.py`, `definitions/`, `templates/`), so
+(`compiler.py`, `builder/`, `lint.py`, `frontmatter.py`, `definitions/`, `templates/`), so
 the runtime has the same paths and imports as here. Installed agent entrypoints invoke
 this local runtime to manage execution sessions and artifact lifecycles without
 relying on external framework installations.
@@ -427,7 +454,7 @@ for tests only; the installer refuses it, because installed hooks always run
 from `~/.tpu-agent-suite`.)
 
 ```bash
-python3 .tpu-agent-suite/framework/runtime.py start-run
+python3 ~/.tpu-agent-suite/packages/tpu-agent-suite@<version>/framework/runtime.py start-run
 ```
 
 Output:
@@ -447,8 +474,8 @@ Validates input and output instances against package schemas using the
 deterministic JSON Schema validator:
 
 ```bash
-python3 .tpu-agent-suite/framework/runtime.py validate \
-    --schema schemas/analysis-request.json \
+python3 ~/.tpu-agent-suite/packages/tpu-agent-suite@<version>/framework/runtime.py validate \
+    --schema ~/.tpu-agent-suite/packages/tpu-agent-suite@<version>/schemas/analysis-request.json \
     instance.json
 ```
 
@@ -460,10 +487,10 @@ Packages define Python dependencies centrally to eliminate scattered requirement
 
 1. **Central Catalogs (`requirements-client.txt` and `requirements-tpu.txt`)**:
    - `requirements-client.txt`: Declares all host-side dependencies with explicit version constraints (e.g. `pydantic>=2.0.0`).
-   - `requirements-tpu.txt`: Declares remote TPU workload dependencies with explicit version constraints (e.g. `torch>=2.13.0`, `libtpu>=0.0.44`).
+   - `requirements-tpu.txt`: Declares remote TPU workload dependencies with explicit version constraints (e.g. `torch>=2.11.0,<2.14`, `libtpu>=0.0.44`).
    - Package entries in central catalogs must specify version constraints; unpinned entries fail `compiler.py verify`.
    - Pip options (such as `-f` or `--extra-index-url`) and comments are preserved when emitting distributions.
-   - `compute/env_check.py` checks the installed versions against them: `requirements-client.txt` on the installing machine at install, `requirements-tpu.txt` on the compute target in `compute setup verify` (see `compute/README.md`).
+   - `compute/env_check.py` checks the installed versions against them, and fails a requirement when a distribution listed for it in `CONFLICTS` is installed too: `requirements-client.txt` on the installing machine at install, `requirements-tpu.txt` on the compute target in `compute setup verify` (see `compute/README.md`).
 
 2. **Frontmatter Declarations**:
    - A skill, agent or reference declares only unpinned canonical package names in its `host_dependencies` and `tpu_dependencies` frontmatter arrays (e.g. `["google-cloud-aiplatform", "vertexai"]`); the compiler unions them across the package.

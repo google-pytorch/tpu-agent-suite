@@ -11,8 +11,7 @@ This guide details the physical failure modes observed during active TPU trainin
 <aside class="note">
 <b>Navigating Precision &amp; Parity Documentation:</b>
 <ul>
-  <li><b>Offline Model Parity:</b> To verify that TPU outputs match CPU reference implementations within numerical tolerances during model porting or unit testing, see <a href="./numerical_parity.md">Numerical Parity: Comparing TPU vs CPU</a>.</li>
-  <li><b>Compiler Precision Modes:</b> To configure compiler excess precision flags, control Float32 matrix multiplication algorithms (1-pass, 3-pass, 6-pass), and understand MXU accumulation mechanics, see <a href="./precision_management.md">Precision Management</a>.</li>
+  <li><b>Offline Model Parity and Compiler Precision Modes:</b> To verify that TPU outputs match CPU reference implementations within numerical tolerances, configure compiler excess precision flags, control Float32 matrix multiplication algorithms (1-pass, 3-pass, 6-pass), and understand MXU accumulation mechanics, see Numerical Precision (<code>index.py get torch-tpu-precision-management</code>).</li>
   <li><b>Format Selection:</b> To choose optimal data formats (FP32, BF16, FP8) based on compute throughput and memory bandwidth rooflines, see <a href="./precision_ladder.md">The Precision Ladder: FP32, BF16, and FP8</a>.</li>
   <li><b>This Guide:</b> Focuses strictly on preventing runtime training crashes, loss explosion, gradient corruption, and host synchronization penalties during active execution on TPU hardware.</li>
 </ul>
@@ -191,7 +190,7 @@ if torch.isnan(loss).any().item():  # <-- FORCES HOST SYNCHRONIZATION BARRIER!
 ```
 
 <aside class="note">
-<b>Runtime Diagnostics vs. Offline Parity:</b> If you are validating numerical equivalence between TPU and CPU references during development or unit testing, use the tools documented in <a href="./numerical_parity.md">Numerical Parity: Comparing TPU vs CPU</a>. Those assertions (such as <code>torch.testing.assert_close</code>) require synchronizing and transferring tensors to the host CPU (<code>out_tpu.cpu()</code>), which is suitable for offline tests but must never run inside the hot training loop.
+<b>Runtime Diagnostics vs. Offline Parity:</b> If you are validating numerical equivalence between TPU and CPU references during development or unit testing, use the tools documented in Numerical Precision (<code>index.py get torch-tpu-precision-management</code>). Those assertions (such as <code>torch.testing.assert_close</code>) require synchronizing and transferring tensors to the host CPU (<code>out_tpu.cpu()</code>), which is suitable for offline tests but must never run inside the hot training loop.
 </aside>
 
 ### Empirical Silicon Benchmark (Cloud TPU v7)

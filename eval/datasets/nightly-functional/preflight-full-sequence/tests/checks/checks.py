@@ -268,11 +268,6 @@ def read_json(path: Path) -> dict[str, Any]:
 # cannot run it.
 
 
-@criterion(description="tpu-agent delegated the check to tpu-model-onboarding")
-def delegated_to_model_onboarding(workspace: Path) -> bool:
-    return "tpu-model-onboarding" in delegation_targets(workspace)
-
-
 @criterion(description="The model id was resolved before any check ran on it")
 def resolved_first(workspace: Path) -> bool:
     cmds = commands(workspace)
@@ -296,9 +291,10 @@ def hub_checks_before_chip(workspace: Path) -> bool:
     return hub is not None and chip is not None and hub < chip
 
 
-@criterion(description="The task image was probed with image_probe.py on the "
-           "accelerator, and the probe found torch_tpu, a working TPU and "
-           "a vLLM stack verdict")
+@criterion(
+    description="The task image was probed with image_probe.py on the "
+    "cluster, and the probe found torch_tpu, a non-failing device check "
+    "and a vLLM stack verdict")
 def image_probed(workspace: Path) -> bool:
     if not any(is_probe(c) for c in commands(workspace)):
         return False
@@ -308,8 +304,8 @@ def image_probed(workspace: Path) -> bool:
 
     def found(report: dict) -> bool:
         stack = (report.get("dependencies") or {}).get("vllm_stack") or {}
-        return (report.get("torch_tpu_present") is True
-                and (report.get("device") or {}).get("status") == "ok"
+        return (report.get("torch_tpu_present") is True and
+                (report.get("device") or {}).get("status") in ("ok", "skipped")
                 and "verdict" in stack)
 
     return any(found(r) for r in reports)

@@ -29,8 +29,6 @@ context, with your own tools.
 *   `state.primary.context_path` — `<work>/torch_context.md`. Present only
     when the primary is not `jax`.
 *   `state.primary.source_path` — the user's untouched input.
-*   `state.jaxpr_path`, `state.hlo_path`, `state.jaxpr_facts_path` — present
-    only when `state.reference_mode == "torchax"`; `null` otherwise.
 *   `state.ideas_ledger_path` and `state.reference_alignment_path` — present
     only when the user supplied a reference kernel; `null` otherwise.
 *   `state.library_check` — what tpu-kernel-development found when it checked Tokamax
@@ -128,24 +126,7 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
     A PyTorch brief reads the same way, with Section 7 naming the fusion
     boundaries XLA will leave behind and Section 9 naming the intermediates
     that get materialized to HBM for no reason.
-1c. **In `torchax` reference mode, read both IRs — they answer different
-    questions.** When `state.jaxpr_path` is set:
-
-    *   **`state.jaxpr_path`** is the jaxpr: pre-optimization, and the precise
-        statement of what is computed. It makes explicit what `base.py` and the
-        PyTorch source both leave implicit — the reduction axis as `axes=(2,)`,
-        `.mean()` decomposed into `reduce_sum` + `div N`, the epsilon at its
-        real fp32 value, and the full dtype ladder.
-    *   **`state.hlo_path`** is the optimized HLO: post-XLA, and the only place
-        the *opportunity* is visible. Each fusion region is work XLA already
-        keeps out of HBM. **The round trips a Pallas kernel can remove are the
-        boundaries BETWEEN fusions, not the fusions themselves.**
-
-    Planning from the jaxpr alone is the classic error here: it produces
-    proposals to fuse operations XLA has already fused, which cost effort and
-    buy nothing. Read `state.jaxpr_facts_path` for the fusion count and kinds,
-    then look at where those boundaries fall relative to the jaxpr's operations.
-1d. **Read `state.fusion_context` when it is set — it is the served graph, not
+1c. **Read `state.fusion_context` when it is set — it is the served graph, not
     this harness.** The caller's profile of the real workload recorded which
     fusion the target sits in there (`fusion`) and what XLA fused with it
     (`fused_with`). Your kernel is one custom call, and a custom call is a
@@ -159,7 +140,7 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
     production time of the target op: when the harness times the base kernel
     far from it, say so in the plan, because the harness is then not measuring
     the op the profile ranked.
-1e. **Read `state.served_calls` and `<work>/input_provenance.md` when they
+1d. **Read `state.served_calls` and `<work>/input_provenance.md` when they
     exist.** The harness configs
     labelled with a served-call case are the calls the server makes, under the
     configuration `state.serving_config` names; the others are coverage. Weigh the cases by their

@@ -3,6 +3,34 @@
 Append-only event log. Newest entries at the top.
 Parse recent entries: `grep "^## \[" log.md | head -10`
 
+## [2026-11-06] manual | update TorchTpu warning prefix in hardware-introspection
+
+**Operation**: manual
+**Pages created**: none
+**Pages updated**: `wiki/codebases/torch_tpu/concepts/hardware-introspection.md` (`<TorchTpu/ApiStage/` -> `//TorchTpu/ApiStage/`)
+**Notes**: Aligns warning filter prefix with `torch_tpu` `//TorchTpu/...//` warning category format.
+
+## [2026-11-05] manual | removed stale torch_xla wording
+
+**Operation**: manual
+**Pages created**: none
+**Pages updated**: `wiki/playbooks/static-shapes-and-tracing.md` (`mark_step` -> step synchronization barriers, tag `mark-step` -> `synchronization`), `wiki/codebases/xprof.md` (PyTorch/XLA capture line -> pointer to `torch_tpu`'s profiler), `wiki/codebases/torch-tpu.md` (dropped the `torch_xla_backend` alias), `index.md` (Static Shapes entry)
+**Notes**: `torch_tpu` has no `mark_step`, and `torch_xla` is banned. `human_reviewed` reset to false on the playbook and on `xprof.md`, whose claims changed. The alias removal is metadata only, so `torch-tpu.md` stays `human_reviewed: false`. OpenXLA wording stays: `torch_tpu` compiles through it.
+
+## [2026-11-03] manual | remove legacy private issue links for tpu-agent-suite public cutover
+
+**Operation**: manual (human-directed: remove private issue links from shipped wiki pages and update `to_be_released.jsonl` URLs to `google-pytorch/tpu-agent-suite`)
+**Pages created**: none
+**Pages updated**: `wiki/kernel/pallas-validation-and-xprof.md`, `wiki/kernel/pallas-core-mental-model.md`, shipped copies in `tpu-knowledge-base/pages/` (`pallas-validation-and-xprof.md`, `pallas-core-mental-model.md`, `hardware_alignment_and_vmem.md`, `moe_serving_and_decode.md`, `vllm-tp-dp-plan.md`), `tpu-knowledge-base/index/README.md`, and `tpu-knowledge-base/index/to_be_released.jsonl`.
+**Notes**: Citation scrub only; no technical claim changed, `human_reviewed` unchanged.
+
+## [2026-10-27] ingest | tpu_info chip table; HBM capacities in GiB
+
+**Operation**: ingest (code file, human-directed: state per-chip HBM in one unit, since onboarding now sizes from the knowledge base)
+**Pages created**: `wiki/sources/2026-10-tpu-info-chip-table.md` (cites `tpu_info/device.py` by permalink at the pin; code is not snapshotted under `raw/`)
+**Pages updated**: `wiki/hardware/tpu-v5e.md` (16 GB -> 16 GiB), `wiki/hardware/tpu-v6e.md` (32 GB -> 32 GiB), `wiki/hardware/tpu-7x.md` (96 GB -> 96 GiB per chiplet); per-chip HBM in GiB on `wiki/concepts/megacore.md`, `wiki/concepts/data-parallelism.md` (v5p 95 GiB, so `HBM / 10` is ~10 B parameters, not ~9 B), `wiki/concepts/prefill-vs-decode.md` (16 GiB / 8.2e11 B/s is ~21 ms; the book's ~19 ms takes 16 GB as 1.6e10 B), `wiki/playbooks/size-serving-topology.md` and `wiki/kernel/pallas-core-mental-model.md`; `index.md`
+**Notes**: the Cloud TPU pages mix GB and GiB for HBM capacity; tpu_info's table names the unit (`hbm_gib`) and agrees with the GiB figures (v4 32, v5e 16, v5p 95, v6e 32, 7x 192 per chip). The shipped `tpu-knowledge-base/pages/hw/` overviews for v5e, v6e and v7x were corrected the same way. The Cloud TPU7x page now writes GiB throughout (updated 2026-10-22), so only the v5e and v6e pages still say GB. `human_reviewed` reset to false on `concepts/data-parallelism`, `concepts/prefill-vs-decode`, `playbooks/size-serving-topology`, `hardware/tpu-v5e`, `hardware/tpu-v6e`, `hardware/tpu-7x` (claims changed).
+
 ## [2026-10-16] ingest | torch_tpu re-ingested at release/0.1.2 (6d2a4575)
 
 **Operation**: ingest (code repo via wikify-repo 0.4.1; human-directed: re-ingest torch_tpu at the head of `release/0.1.2`, keep the diff small where possible, ingest all project docs, and keep internal identifiers out)

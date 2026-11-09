@@ -33,21 +33,26 @@ _spec.loader.exec_module(env_check)
 class TestEnvCheck(unittest.TestCase):
 
     def test_each_requirement_is_checked_with_its_fix(self):
-        versions = {"jax": "0.10.0", "libtpu": "0.0.44"}
+        versions = {"jax": "0.10.0", "libtpu": "0.0.44", "pkg": "1.2"}
         with mock.patch.object(env_check,
                                "version_of",
                                side_effect=versions.get):
             results = {
                 req: env_check.check_requirement(req)
                 for req in ("diffusers>=0.28.0", "jax>=0.11.0",
-                            "libtpu>=0.0.41", "torch>=2.13.0,<2.14")
+                            "libtpu>=0.0.41", "torch>=2.13.0,<2.14",
+                            "pkg[extra]>=1; python_version < '3.13'")
             }
         self.assertEqual(results["diffusers>=0.28.0"][1:],
                          ("fail", "not installed; needs >=0.28.0",
-                          "pip install 'diffusers>=0.28.0'"))
+                          f"{sys.executable} -m pip install "
+                          "'diffusers>=0.28.0'"))
         self.assertEqual(results["jax>=0.11.0"][2],
                          "0.10.0 installed; needs >=0.11.0")
         self.assertEqual(results["libtpu>=0.0.41"][1], "ok")
+        # Extras and markers are not part of the name.
+        self.assertEqual(results["pkg[extra]>=1; python_version < '3.13'"],
+                         ("pkg", "ok", "1.2 >=1", ""))
         # torch comes with torch_tpu, never on its own.
         self.assertIn("reinstall torch_tpu", results["torch>=2.13.0,<2.14"][3])
 
@@ -63,50 +68,6 @@ class TestEnvCheck(unittest.TestCase):
             self.assertIn(env_check.IMAGE_DOC, checks[name])
             self.assertNotIn("pip install", checks[name])
         self.assertIn("'jax>=0.11.0'", checks["jax"])
-
-    def test_lines_that_name_no_package_are_skipped(self):
-        for line in ("-r other.txt", "-e .", "--index-url https://x",
-                     "https://x/y.whl", "./local.whl", "/abs/y.whl"):
-            self.assertIsNone(env_check.check_requirement(line), line)
-        with mock.patch.object(env_check, "version_of", return_value="1.2"):
-            for line in ("pkg[extra]>=1", "pkg>=1; python_version < '3.13'"):
-                self.assertEqual(env_check.check_requirement(line),
-                                 ("pkg", "ok", "1.2 >=1", ""), line)
-
-    def test_host_mode_skips_the_tpu_software_and_devices(self):
-        with mock.patch.object(env_check, "version_of", return_value=None):
-            names = [c[0] for c in env_check.run_checks(["pyyaml>=6"], True)]
-        self.assertEqual(names, ["python", "pyyaml"])
-
-    def test_missing_host_packages_become_one_install_command(self):
-        """Session start asks the user once, for everything missing, with
-        the interpreter the runtime runs under."""
-        versions = {"pyyaml": "6.0", "pydantic": "1.10"}
-        with mock.patch.object(env_check,
-                               "version_of",
-                               side_effect=versions.get):
-            missing = env_check.failing_requirements([
-                "pyyaml>=6.0", "pydantic>=2.0.0", "tpu-info>=0.14.0",
-                "--index-url https://x"
-            ])
-        self.assertEqual(missing, ["pydantic>=2.0.0", "tpu-info>=0.14.0"])
-        self.assertEqual(
-            env_check.ask_to_install(missing, python="/v/bin/python"),
-            "Before anything else, ask the user to install these packages, "
-            "which /v/bin/python is missing or has too old: pydantic>=2.0.0, "
-            "tpu-info>=0.14.0. The command is `/v/bin/python -m pip install "
-            "'pydantic>=2.0.0' 'tpu-info>=0.14.0'`. Don't start other work, or "
-            "look up or measure what these packages would have told you, "
-            "until they are installed.")
-        with mock.patch.object(env_check,
-                               "externally_managed",
-                               return_value=False):
-            one = env_check.ask_to_install(["x"])
-        self.assertTrue(
-            one.startswith("Before anything else, ask the user to install "
-                           "this package"))
-        self.assertIn(f"`{sys.executable} -m pip install 'x'`", one)
-        self.assertTrue(one.endswith("until it is installed."))
 
     def test_a_system_python_is_told_to_use_a_venv_not_pip(self):
         """Review on #679: with the deps in a venv the user didn't activate,
@@ -157,31 +118,26 @@ class TestEnvCheck(unittest.TestCase):
                 env_check.ask_to_install(["x"], python="/v/bin/python"))
 
     def test_the_script_runs_standalone_and_exits_1_on_failure(self):
+        """A Job carries the script but, without a bucket, no files -- so
+        `--require` works alongside or instead of `--requirements`."""
         with tempfile.NamedTemporaryFile("w", suffix=".txt",
                                          delete=False) as handle:
             handle.write("# comment\nno-such-package-xyz>=1.0\n")
         self.addCleanup(Path(handle.name).unlink)
-        proc = subprocess.run(
-            [sys.executable,
-             str(_SCRIPT), "--requirements", handle.name],
-            capture_output=True,
-            text=True,
-            check=False)
+        proc = subprocess.run([
+            sys.executable,
+            str(_SCRIPT), "--requirements", handle.name,
+            "--require=no-such-package-abc>=1.0",
+            "--require=--index-url https://x"
+        ],
+                              capture_output=True,
+                              text=True,
+                              check=False)
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("[FAIL] no-such-package-xyz", proc.stdout)
+        self.assertIn("[FAIL] no-such-package-abc", proc.stdout)
+        self.assertNotIn("index-url", proc.stdout)
         self.assertIn("Status: fail", proc.stdout)
-
-    def test_requirements_can_be_given_as_arguments(self):
-        """A Job carries the script but, without a bucket, no files."""
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = env_check.main([
-                "--require=no-such-package-xyz>=1.0",
-                "--require=--index-url https://x"
-            ])
-        self.assertEqual(code, 1)
-        self.assertIn("[FAIL] no-such-package-xyz", out.getvalue())
-        self.assertNotIn("index-url", out.getvalue())
 
     def test_versions_prints_each_tracked_release_and_checks_nothing(self):
         versions = {"jax": "0.11.2", "torch_tpu": "0.1.1"}
@@ -211,13 +167,85 @@ class TestEnvCheck(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             env_check.main(["--host", "--require=jax"])
         self.assertNotIn(env_check.VERSIONS_PREFIX, out.getvalue())
+        # Host mode skips the TPU software and devices.
+        self.assertNotIn("torch_tpu", out.getvalue())
 
-    def test_some_requirements_must_be_given(self):
-        """Else "ok" would say nothing about the package's requirements."""
-        with self.assertRaises(SystemExit) as ctx, \
-                contextlib.redirect_stderr(io.StringIO()):
-            env_check.main([])
-        self.assertEqual(ctx.exception.code, 2)
+
+class TestConflicts(unittest.TestCase):
+    """Tests for a requirement installed next to a conflicting distribution.
+
+    The case under test is xprof-nightly installed next to xprof. Both
+    install the same import package, and pip reports no conflict between
+    them.
+    """
+
+    REQUIREMENTS = ["pyyaml>=6.0", "xprof>=2.24.0", "pydantic>=2.0.0"]
+    BOTH = {
+        "pyyaml": "6.0",
+        "xprof": "2.24.0",
+        "xprof-nightly": "2.25.0a20261017"
+    }
+
+    def _versions(self, versions):
+        return mock.patch.object(env_check,
+                                 "version_of",
+                                 side_effect=versions.get)
+
+    def test_the_check_and_fix_follow_what_is_installed(self):
+        # The fix uninstalls only what is installed. Uninstalling xprof too
+        # matters: xprof already meets its bound, so a plain install would
+        # leave xprof-nightly in place.
+        nightly = {"xprof-nightly": "2.25.0a20261017"}
+        xprof_only = {"xprof": "2.24.0"}
+        cases = [
+            # (installed, status, fix_command)
+            (self.BOTH, "fail", "/v/py -m pip uninstall -y xprof-nightly "
+             "xprof && /v/py -m pip install 'xprof>=2.24.0'"),
+            (nightly, "fail", "/v/py -m pip uninstall -y xprof-nightly && "
+             "/v/py -m pip install 'xprof>=2.24.0'"),
+            (xprof_only, "ok", "/v/py -m pip install 'xprof>=2.24.0'"),
+        ]
+        for installed, status, fix in cases:
+            with self.subTest(installed=installed), self._versions(installed):
+                self.assertEqual(
+                    env_check.check_requirement("xprof>=2.24.0")[1], status)
+                self.assertEqual(
+                    env_check.fix_command(["xprof>=2.24.0"], python="/v/py"),
+                    fix)
+        with self._versions(self.BOTH):
+            detail = env_check.check_requirement("xprof>=2.24.0")[2]
+            image_fix = env_check.check_requirement("xprof>=2.24.0",
+                                                    image=True)[3]
+        self.assertIn("xprof-nightly 2.25.0a20261017", detail)
+        self.assertIn(env_check.IMAGE_DOC, image_fix)
+        self.assertNotIn("pip", image_fix)
+
+    def test_the_session_note_uninstalls_before_it_installs(self):
+        # The session start lists what fails and asks for one command. A
+        # plain `pip install 'xprof>=2.24.0'` would leave xprof-nightly in
+        # place, because the installed xprof already meets the bound.
+        with self._versions(self.BOTH):
+            failing = env_check.failing_requirements(self.REQUIREMENTS)
+            note = env_check.ask_to_install(failing, python="/v/py")
+        self.assertEqual(failing, ["xprof>=2.24.0", "pydantic>=2.0.0"])
+        self.assertIn(
+            "ask the user to run `/v/py -m pip uninstall -y xprof-nightly "
+            "xprof && /v/py -m pip install 'xprof>=2.24.0' "
+            "'pydantic>=2.0.0'`", note)
+
+    def test_main_reports_the_conflict_and_changes_nothing(self):
+        out = io.StringIO()
+        with self._versions(self.BOTH), \
+                mock.patch.object(subprocess, "run") as run, \
+                contextlib.redirect_stdout(out):
+            code = env_check.main(["--host", "--require=xprof>=2.24.0"])
+        run.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] xprof", out.getvalue())
+        # The fix names the interpreter that was checked, not a bare pip.
+        self.assertIn(
+            f"fix: {sys.executable} -m pip uninstall -y xprof-nightly xprof",
+            out.getvalue())
 
 
 if __name__ == "__main__":

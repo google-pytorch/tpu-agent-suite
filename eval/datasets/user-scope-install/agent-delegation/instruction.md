@@ -1,0 +1,1 @@
+What is the HBM capacity per chip of TPU v6e? For scoring, write a JSON with keys `answer` and `reference` to `/logs/artifacts/answer.json`; if you have no tool that writes files, give that JSON in your reply instead.

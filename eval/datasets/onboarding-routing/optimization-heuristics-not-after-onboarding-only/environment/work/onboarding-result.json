@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "summary": "google/gemma-4-31B-it served with vLLM on tpu7x 2x2x1 at TP 4 x DP 2 (serving mode) and benchmarked at 1024:1024:32 and 8192:1024:128.",
+  "run_id": "seeded-onboarding",
+  "job_id": "golden-gemma4-seeded-server",
+  "output_files": {
+    "deployments_json": "/workspace/inference/deployments.json",
+    "launch_recipe": "/workspace/inference/launch_vllm.sh"
+  }
+}

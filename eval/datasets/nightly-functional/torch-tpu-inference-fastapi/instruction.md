@@ -1,0 +1,4 @@
+Onboard and verify inference for the model `HuggingFaceTB/SmolLM2-135M-Instruct` on TPU using the inference workflow (`torch-tpu-inference`) in verification mode (quick set up and tear down). Run `onboarding_preflight.py` directly on the TPU node without `--cpu-requests`, and skip numerical parity (`capture_parity.py` / `compare_parity.py`) since the model is unmodified (`STATUS: COMPATIBLE`). Deploy the model with the `custom_fastapi` inference engine (not `vllm`), using `max_seq_length: 128` and `max_new_tokens: 16` in `deployments.json` and skipping GCS checkpoint staging (`stage_checkpoint.py`) so compilation and startup complete quickly. Proceed without checking in. Accept all suggested defaults and do not stop to confirm the plan.
+
+Important execution instructions:
+- Proceed without checking in; do not stop or wait for user confirmation before executing on TPU.

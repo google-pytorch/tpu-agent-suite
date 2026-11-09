@@ -126,7 +126,7 @@ class PageLinkTest(unittest.TestCase):
         self.assertTrue(pages, f"no pages under {_PAGES}")
         for page in pages:
             for n, line in enumerate(page.read_text().splitlines(), 1):
-                for key in re.findall(r"index\.py get ([^\s`)]+)", line):
+                for key in re.findall(r"index\.py get ([^\s`)<]+)", line):
                     with self.subTest(page=page.name, line=n):
                         self.assertIsNotNone(
                             catalog.find(entries, key),

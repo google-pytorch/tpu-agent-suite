@@ -14,6 +14,7 @@
 
 default_install_hook_types:
   - pre-commit
+  - pre-push
   - commit-msg
 # Agent instructions/references are compiled verbatim into LLM context, so any
 # reformatting changes what the model reads. Keep them byte-identical.
@@ -114,6 +115,13 @@ repos:
     language: system
     always_run: true
     pass_filenames: false
+  - id: check-denylist
+    name: Check staged or pushed diff against internal denylist
+    entry: python3 scripts/check_denylist.py --staged
+    language: system
+    always_run: true
+    pass_filenames: false
+    stages: [pre-commit, pre-push]
   - id: suggestion
     name: Suggestion
     entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'

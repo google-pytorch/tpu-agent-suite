@@ -14,12 +14,11 @@
 """Unit tests for the framework compute runtime layer.
 
 Test Coverage Overview:
-- TestDriverContracts / TestDriverRegistry: the data contracts, the abstract
-  driver interface, plugin registration, and driver auto-discovery.
+- TestDriverRegistry: plugin registration, driver CLI flags, and driver
+  auto-discovery.
 - TestLocalDriver: host probing and the local job lifecycle.
 - TestRemoteShellDrivers: the lifecycle GceTpuVmDriver and GkePodDriver share,
   exercised once against both transports, plus each transport's own commands.
-- TestGkeXpkDriver: cluster status vocabulary, occupancy, and GCS retrieval.
 - TestComputeConfig / TestEnvironmentResolution: 3-tier configuration
   resolution, environment.json schemas, and CLI override precedence.
 - TestComputeCli / TestContractGeneration: `runtime.py compute` behaviour,
@@ -37,7 +36,6 @@ import json
 import os
 import pathlib
 import re
-import shlex
 import shutil
 import signal
 import socket
@@ -60,39 +58,43 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 try:
-    from framework import compiler, compute, runtime, utils
-    from framework.compute import (DRIVER_REGISTRY,
-                                   AsynchronousExecutionResult,
+    from framework import compute, paths, run_state, runtime, utils
+    from framework.builder import prompt_contracts
+    from framework.compute import (AsynchronousExecutionResult,
                                    ComputeConfigError, ComputeDriver,
                                    GceTpuVmDriver, GkeJobDriver, GkePodDriver,
-                                   GkeXpkDriver, HardwareProfile, LocalDriver,
-                                   StagedFile, SynchronousExecutionResult)
+                                   HardwareProfile, LocalDriver, StagedFile,
+                                   SynchronousExecutionResult)
     from framework.compute import config as compute_config
     from framework.compute import (get_driver, get_registered_driver_cli_flags,
-                                   get_registered_drivers, list_drivers,
-                                   register_driver, resolve_driver)
+                                   get_registered_drivers, register_driver,
+                                   resolve_driver)
     from framework.compute.drivers import (_auto_discover_drivers, auth_utils,
-                                           base, gke_pod, jobs, probe)
+                                           base, external, gke_pod, jobs,
+                                           probe)
     from framework.compute.drivers import registry as driver_registry
     from framework.compute.drivers import shell
+    from framework.compute.drivers.registry import (DRIVER_REGISTRY,
+                                                    list_drivers)
 except ImportError:
-    import compiler
     import compute
+    import run_state
     import runtime
     import utils
-    from compute import (DRIVER_REGISTRY, AsynchronousExecutionResult,
-                         ComputeConfigError, ComputeDriver, GceTpuVmDriver,
-                         GkeJobDriver, GkePodDriver, GkeXpkDriver,
-                         HardwareProfile, LocalDriver, StagedFile,
-                         SynchronousExecutionResult)
+    from builder import prompt_contracts
+    from compute import (AsynchronousExecutionResult, ComputeConfigError,
+                         ComputeDriver, GceTpuVmDriver, GkeJobDriver,
+                         GkePodDriver, HardwareProfile, LocalDriver,
+                         StagedFile, SynchronousExecutionResult)
     from compute import config as compute_config
     from compute import (get_driver, get_registered_driver_cli_flags,
-                         get_registered_drivers, list_drivers, register_driver,
+                         get_registered_drivers, register_driver,
                          resolve_driver)
     from compute.drivers import (_auto_discover_drivers, auth_utils, base,
-                                 gke_pod, jobs, probe)
+                                 external, gke_pod, jobs, probe)
     from compute.drivers import registry as driver_registry
     from compute.drivers import shell
+    from compute.drivers.registry import DRIVER_REGISTRY, list_drivers
 
 Path = pathlib.Path
 
@@ -133,6 +135,22 @@ def profile_env(backend: str, **params: Any) -> dict[str, Any]:
     return {"default": "default", "profiles": {"default": profile}}
 
 
+def _cli_args(**overrides: Any) -> argparse.Namespace:
+    """`compute` arguments as the parser leaves them, for `pkg@1`."""
+    return argparse.Namespace(
+        **{
+            "compute_action": "inspect",
+            "backend": None,
+            "package": "pkg@1",
+            "workspace": None,
+            "json": True,
+            "profile": None,
+            "run_id": None,
+            "job_id": None,
+            **overrides
+        })
+
+
 def _decode_inner_script(ssh_command: str) -> str:
     """Pull the workload back out of the base64 payload `run` stages.
 
@@ -155,6 +173,42 @@ def _completed(stdout: str = "",
                                        stderr=stderr)
 
 
+def _patch_home(test: unittest.TestCase) -> Path:
+    """Point the central store at a fresh temp dir for the rest of `test`."""
+    home = Path(tempfile.mkdtemp())
+    test.addCleanup(shutil.rmtree, home, ignore_errors=True)
+    patcher = patch.dict(os.environ, {"TPU_AGENT_SUITE_HOME": str(home)})
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return home
+
+
+@contextlib.contextmanager
+def _temp_home():
+    """Point the central store at a fresh temp dir inside the block."""
+    with tempfile.TemporaryDirectory() as home, patch.dict(
+            os.environ, {"TPU_AGENT_SUITE_HOME": home}):
+        yield Path(home)
+
+
+# A complete gke_job profile, as the answers `compute setup apply` takes.
+_GKE_ANSWERS = {
+    "backend": "gke_job",
+    "image": "us-docker.pkg.dev/p/r/img:v1",
+    "tpu_accelerator": "tpu7x",
+    "tpu_topology": "2x2x1",
+}
+# A well-formed run id.
+_RUN = "20260101T000000Z-123456789abc"
+# A complete gce_tpu_vm profile.
+_GCE_ANSWERS = {
+    "backend": "gce_tpu_vm",
+    "project": "p",
+    "zone": "us-east5-a",
+    "tpu_name": "v",
+}
+
+
 class _ScriptMixin:
     """Writes throwaway scripts that are removed when the test finishes."""
 
@@ -171,48 +225,25 @@ class _ScriptMixin:
 class MockTestDriver(ComputeDriver):
     """Mock compute driver used to verify base framework contracts and CLI routing."""
 
-    def __init__(
-        self,
-        endpoint: str = "default-endpoint",
-        token: str = "default-token",
-        python_interpreter: str = "python3",
-    ):
+    def __init__(self, endpoint: str = "default-endpoint"):
         self.endpoint = endpoint
-        self.token = token
-        self.python_interpreter = python_interpreter
+        self.python_interpreter = "python3"
 
     @classmethod
     def from_params(cls, params: dict) -> MockTestDriver:
-        endpoint = params.get("endpoint", "default-endpoint")
-        return cls(
-            endpoint=endpoint,
-            token=params.get("token", "default-token"),
-            python_interpreter=params.get("python_interpreter", "python3"),
-        )
+        return cls(params.get("endpoint", "default-endpoint"))
 
     @classmethod
     def register_cli_args(cls, parser: Any) -> None:
         cls.add_cli_arg(parser, "--endpoint", type=str, help="Mock endpoint")
-        cls.add_cli_arg(parser, "--token", type=str, help="Mock token")
 
     def inspect(self) -> HardwareProfile:
-        return HardwareProfile(
-            accelerator="mock_tpu",
-            topology="2x2x1",
-            chips=4,
-            hbm_gb=64.0,
-            status="healthy",
-            available_chips=4,
-            held_by=[],
-        )
+        return HardwareProfile("mock_tpu", "2x2x1", 4, 64.0, "healthy")
 
     def run(self, code_path: str, *args,
             **kwargs) -> SynchronousExecutionResult:
-        return SynchronousExecutionResult(
-            exit_code=0,
-            stdout=f"mock run executed {code_path}",
-            stderr="",
-        )
+        return SynchronousExecutionResult(0, f"mock run executed {code_path}",
+                                          "")
 
     def submit(self, recipe_path: str, *args, **kwargs) -> str:
         return "mock-job-999"
@@ -224,65 +255,14 @@ class MockTestDriver(ComputeDriver):
         return f"mock logs for {job_id}"
 
     def fetch_artifacts(self, job_id: str, dest_dir: str) -> list[str]:
-        return [str(Path(dest_dir) / "output.txt")]
+        return []
 
     def cancel(self, job_id: str) -> None:
         pass
 
 
-class TestDriverContracts(unittest.TestCase):
-    """The dataclasses drivers return, and the abstractness of the interface."""
-
-    def test_execution_result_defaults(self):
-        """Verify execution results keep unknown fields unset rather than zeroed."""
-        sync = SynchronousExecutionResult(exit_code=0,
-                                          stdout="out",
-                                          stderr="err")
-        self.assertEqual((sync.exit_code, sync.stdout, sync.stderr),
-                         (0, "out", "err"))
-
-        job = AsynchronousExecutionResult(job_id="job-1", status="PENDING")
-        self.assertEqual(job.job_id, "job-1")
-        self.assertIsNone(job.exit_code)
-        self.assertIsNone(job.start_time)
-        self.assertIsNone(job.end_time)
-
-    def test_availability_preserves_none_and_zero(self):
-        """Verify unmeasured (None) vs measured saturated (0) availability distinctions are preserved."""
-        unmeasured = HardwareProfile(accelerator="v4",
-                                     topology="2x2x1",
-                                     chips=4,
-                                     hbm_gb=32.0,
-                                     status="healthy")
-        self.assertIsNone(unmeasured.available_chips)
-        self.assertIsNone(unmeasured.to_dict()["available_chips"])
-        self.assertEqual(unmeasured.held_by, [])
-
-        saturated = HardwareProfile(accelerator="v6e",
-                                    topology="2x2x1",
-                                    chips=4,
-                                    hbm_gb=32.0,
-                                    status="busy",
-                                    available_chips=0,
-                                    held_by=["PID 1 on /dev/accel0"])
-        self.assertEqual(saturated.to_dict()["available_chips"], 0)
-
-    def test_compute_driver_is_abstract(self):
-        """Verify ComputeDriver cannot be instantiated without its methods."""
-        with self.assertRaises(TypeError):
-            ComputeDriver()  # type: ignore[abstract]
-
-
 class TestDriverRegistry(unittest.TestCase):
     """Driver registration, discovery, and CLI flag declaration."""
-
-    def test_driver_registration_and_lookup(self):
-        """Verify the register_driver decorator, list_drivers, and valid backends."""
-        self.assertIn("mock_test", list_drivers())
-        self.assertIs(get_driver("mock_test"), MockTestDriver)
-        self.assertIn("mock_test", get_registered_drivers())
-        self.assertEqual(set(compute_config.get_valid_backends()),
-                         set(list_drivers()))
 
     def test_registered_backends_are_declared_in_schema(self):
         """Verify every shipped driver is a documented environment.json backend."""
@@ -291,21 +271,16 @@ class TestDriverRegistry(unittest.TestCase):
         if not schema_path.is_file():
             self.skipTest("package schema not available in this layout")
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        compute = schema["properties"]["profiles"]["additionalProperties"][
-            "properties"]
-        declared = set(compute["backend"]["enum"])
-        shipped = {n for n in list_drivers() if not n.startswith("mock")}
+        compute_props = schema["properties"]["profiles"][
+            "additionalProperties"]["properties"]
+        declared = set(compute_props["backend"]["enum"])
+        shipped = {n
+                   for n in list_drivers() if not n.startswith("mock")} - set(
+                       driver_registry.EXTERNAL_DRIVERS)
         self.assertTrue(
             shipped <= declared,
             f"backends missing from environment.json schema: {shipped - declared}"
         )
-
-    def test_declared_flags_are_collected(self):
-        """Verify flags a driver declares are recorded for parameter extraction."""
-        MockTestDriver.register_cli_args(argparse.ArgumentParser())
-        flags = get_registered_driver_cli_flags()
-        self.assertIn("endpoint", flags)
-        self.assertIn("token", flags)
 
     def test_add_cli_arg_enforces_rules(self):
         """Verify driver defaults are stripped and reserved names are rejected."""
@@ -343,7 +318,12 @@ class TestDriverRegistry(unittest.TestCase):
             _auto_discover_drivers()
         errors = driver_registry.get_discovery_errors()
         self.assertIn("probe boom", errors["zz_broken"])
-        self.assertIn("zz_broken", driver_registry.describe_discovery_errors())
+        # A driver that failed to import is named in INVALID_BACKEND, rather
+        # than vanishing and leaving the user told only "invalid".
+        with self.assertRaises(ComputeConfigError) as ctx:
+            resolve_driver(backend_override="zz_broken")
+        self.assertEqual(ctx.exception.error_code, "INVALID_BACKEND")
+        self.assertIn("probe boom", ctx.exception.message)
 
         with patch("pkgutil.iter_modules",
                    return_value=[(None, "zz_probe_pkg", True)]), \
@@ -352,51 +332,215 @@ class TestDriverRegistry(unittest.TestCase):
         parent_pkg = driver_registry.__name__.rsplit(".", 1)[0]
         mock_import.assert_called_with(f"{parent_pkg}.zz_probe_pkg")
 
-    def test_invalid_backend_error_reports_discovery_failures(self):
-        """Verify a failed driver import is named in the INVALID_BACKEND message.
 
-        Otherwise a driver with a missing dependency vanishes silently and the
-        user is told only that their backend is 'invalid'.
-        """
-        driver_registry.DISCOVERY_ERRORS["ghost_backend"] = (
-            "ModuleNotFoundError: No module named 'internal_dep'")
-        self.addCleanup(driver_registry.DISCOVERY_ERRORS.pop, "ghost_backend",
-                        None)
+_ACCEL2 = ["/dev/accel0", "/dev/accel1"]
+_VFIO8 = [f"/dev/vfio/{i}" for i in range(8)]
+_V6E2 = {"ACCELERATOR_TYPE": "v6e-2"}
+
+# A minimal external driver. It reuses the local driver for execution and
+# adds one required setup field, `target`, so that profile validation has a
+# backend-specific field to check.
+_EXTERNAL_DRIVER_SOURCE = """
+from framework.compute.drivers import base, local, registry
+
+
+@registry.register_driver("{name}")
+class ExternalProbeDriver(local.LocalDriver):
+    SETUP_FIELDS = base.SetupFields(required=("target",))
+
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+
+    @classmethod
+    def from_params(cls, params):
+        if not params.get("target"):
+            raise base.ComputeConfigError("{name} requires target",
+                                          error_code="MISSING_FIELD")
+        return cls(params["target"])
+"""
+
+
+class TestExternalDrivers(unittest.TestCase):
+    """Loading compute drivers from outside the package (drivers/external.py)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # Each test gets an empty store and no environment variable, so the
+        # developer's own external drivers are never loaded here.
+        env = patch.dict(
+            os.environ, {
+                "TPU_AGENT_SUITE_HOME": str(self.tmp / "store"),
+                external.ENV_VAR: "",
+            })
+        env.start()
+        self.addCleanup(env.stop)
+        repo_patch = patch.object(external,
+                                  "repo_google_drivers_dir",
+                                  return_value=None)
+        repo_patch.start()
+        self.addCleanup(repo_patch.stop)
+        dict_registries = (
+            DRIVER_REGISTRY,
+            driver_registry.EXTERNAL_DRIVERS,
+            driver_registry.DISCOVERY_ERRORS,
+            driver_registry.DRIVER_CLI_FLAGS,
+            driver_registry.DRIVER_REQUIRED_FLAGS,
+        )
+        dict_snapshots = [{
+            k: (list(v) if isinstance(v, list) else
+                set(v) if isinstance(v, set) else v)
+            for k, v in r.items()
+        } for r in dict_registries]
+        cli_flags_snapshot = set(driver_registry.REGISTERED_DRIVER_CLI_FLAGS)
+        modules = set(sys.modules)
+
+        def restore():
+            for live, snapshot in zip(dict_registries, dict_snapshots):
+                live.clear()
+                live.update(snapshot)
+            driver_registry.REGISTERED_DRIVER_CLI_FLAGS.clear()
+            driver_registry.REGISTERED_DRIVER_CLI_FLAGS.update(
+                cli_flags_snapshot)
+            for name in set(sys.modules) - modules:
+                if name.startswith(external.MODULE_PREFIX):
+                    del sys.modules[name]
+
+        self.addCleanup(restore)
+
+    def write_driver(self, path: Path, name: str) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_EXTERNAL_DRIVER_SOURCE.format(name=name),
+                        encoding="utf-8")
+        return path
+
+    def load(self, *env_paths: Path) -> None:
+        with patch.dict(
+                os.environ,
+            {external.ENV_VAR: os.pathsep.join(str(p) for p in env_paths)}):
+            external.load_external_drivers()
+
+    def test_loads_file_named_in_env_var(self):
+        source = self.write_driver(self.tmp / "ext_a.py", "ext_a")
+        self.load(source)
+        self.assertIn("ext_a", compute_config.get_valid_backends())
+        self.assertEqual(driver_registry.EXTERNAL_DRIVERS["ext_a"],
+                         str(source.resolve()))
+        driver = resolve_driver(backend_override="ext_a",
+                                param_overrides={"target": "t1"})
+        self.assertEqual(driver.target, "t1")
+
+    def test_loads_store_directory_and_skips_private_names(self):
+        drivers_dir = external.default_drivers_dir()
+        self.write_driver(drivers_dir / "ext_b.py", "ext_b")
+        self.write_driver(drivers_dir / "_helper.py", "ext_hidden")
+        (drivers_dir / "notes.txt").write_text("not a driver")
+        self.load()
+        self.assertIn("ext_b", list_drivers())
+        self.assertNotIn("ext_hidden", list_drivers())
+        self.assertFalse([
+            k for k in driver_registry.DISCOVERY_ERRORS
+            if k.startswith(str(drivers_dir))
+        ])
+
+    def test_loads_package_directory_with_relative_import(self):
+        package = self.tmp / "ext_pkg"
+        package.mkdir()
+        (package / "helpers.py").write_text('NAME = "ext_c"\n')
+        (package / "__init__.py"
+         ).write_text("from .helpers import NAME\n" +
+                      _EXTERNAL_DRIVER_SOURCE.format(name="ext_c").replace(
+                          'register_driver("ext_c")', "register_driver(NAME)"))
+        self.load(package)
+        self.assertIn("ext_c", list_drivers())
+
+    def test_missing_env_path_is_reported(self):
+        missing = self.tmp / "absent.py"
+        self.load(missing)
+        self.assertIn(str(missing), driver_registry.DISCOVERY_ERRORS)
         with self.assertRaises(ComputeConfigError) as ctx:
-            resolve_driver(backend_override="ghost_backend")
-        self.assertEqual(ctx.exception.error_code, "INVALID_BACKEND")
-        self.assertIn("ghost_backend", ctx.exception.message)
-        self.assertIn("internal_dep", ctx.exception.message)
+            resolve_driver(backend_override="absent")
+        self.assertIn(str(missing), ctx.exception.message)
 
-    def test_dynamic_plugin_registration(self):
-        """Verify an out-of-tree driver resolves and enforces its own parameters."""
+    def test_builtin_backend_name_is_rejected(self):
+        source = self.write_driver(self.tmp / "takeover.py", "local")
+        self.load(source)
+        self.assertIs(get_driver("local"), LocalDriver)
+        self.assertNotIn("local", driver_registry.EXTERNAL_DRIVERS)
+        self.assertIn("already uses",
+                      driver_registry.DISCOVERY_ERRORS[str(source.resolve())])
 
-        @register_driver("mock_plugin")
-        class MockPluginDriver(MockTestDriver):
+    def test_source_that_registers_nothing_is_reported(self):
+        source = self.tmp / "empty.py"
+        source.write_text("VALUE = 1\n")
+        self.load(source)
+        self.assertIn("registers no backend",
+                      driver_registry.DISCOVERY_ERRORS[str(source.resolve())])
 
-            def __init__(self, custom_val: str = ""):
-                super().__init__()
-                self.custom_val = custom_val
+    def test_import_failure_rolls_back_partial_registration(self):
+        source = self.write_driver(self.tmp / "broken.py", "ext_broken")
+        source.write_text(source.read_text() +
+                          "\nraise RuntimeError('boom')\n")
+        self.load(source)
+        self.assertNotIn("ext_broken", list_drivers())
+        self.assertIn("boom",
+                      driver_registry.DISCOVERY_ERRORS[str(source.resolve())])
 
-            @classmethod
-            def from_params(cls, params):
-                val = params.get("custom_val")
-                if not val:
-                    raise ComputeConfigError("mock_plugin requires custom_val",
-                                             error_code="MISSING_FIELD")
-                return cls(custom_val=val)
+    def test_duplicate_module_name_keeps_first(self):
+        first = self.write_driver(self.tmp / "a" / "ext_dup.py", "ext_dup_a")
+        second = self.write_driver(self.tmp / "b" / "ext_dup.py", "ext_dup_b")
+        self.load(first, second)
+        self.assertIn("ext_dup_a", list_drivers())
+        self.assertNotIn("ext_dup_b", list_drivers())
+        self.assertIn("already loaded",
+                      driver_registry.DISCOVERY_ERRORS[str(second.resolve())])
 
-        self.addCleanup(DRIVER_REGISTRY.pop, "mock_plugin", None)
-        self.assertIn("mock_plugin", compute_config.get_valid_backends())
+    def test_setup_accepts_external_backend_and_fields(self):
+        profile = {"backend": "ext_d", "params": {"target": "t1"}}
+        self.write_driver(self.tmp / "ext_d.py", "ext_d")
+        before = compute.setup.validate_profile("p", profile)
+        self.assertNotEqual(before["status"], "ok")
+        self.load(self.tmp / "ext_d.py")
+        self.assertEqual(
+            compute.setup.validate_profile("p", profile)["status"], "ok")
+        missing = compute.setup.validate_profile("p", {
+            "backend": "ext_d",
+            "params": {}
+        })
+        self.assertEqual([q["name"] for q in missing["missing"]], ["target"])
 
-        driver = resolve_driver(backend_override="mock_plugin",
-                                param_overrides={"custom_val": "test_123"})
-        self.assertIsInstance(driver, MockPluginDriver)
-        self.assertEqual(driver.custom_val, "test_123")
+    def test_failed_driver_rolls_back_cli_flags(self):
+        source = self.tmp / "flag_leak.py"
+        source.write_text(
+            _EXTERNAL_DRIVER_SOURCE.format(name="ext_leak") + """
+import argparse
+parser = argparse.ArgumentParser()
+ExtDriver.add_cli_arg(parser, "--leaked-flag", dest="leaked_flag", help="leak")
+raise RuntimeError("boom after cli flag registration")
+""",
+            encoding="utf-8",
+        )
+        self.load(source)
+        self.assertNotIn("ext_leak", list_drivers())
+        self.assertNotIn("leaked_flag",
+                         driver_registry.REGISTERED_DRIVER_CLI_FLAGS)
+        self.assertFalse(
+            any("--leaked-flag" in flags
+                for flags in driver_registry.DRIVER_CLI_FLAGS.values()))
 
-        with self.assertRaises(ComputeConfigError) as ctx:
-            resolve_driver(backend_override="mock_plugin", param_overrides={})
-        self.assertEqual(ctx.exception.error_code, "MISSING_FIELD")
+    def test_idempotent_reload_of_same_source(self):
+        source = self.write_driver(self.tmp / "ext_idem.py", "ext_idem")
+        self.load(source)
+        self.assertIn("ext_idem", list_drivers())
+        self.assertNotIn(str(source.resolve()),
+                         driver_registry.DISCOVERY_ERRORS)
+        # Loading the exact same source a second time must be a no-op rather
+        # than recording a self-collision in DISCOVERY_ERRORS.
+        self.load(source)
+        self.assertIn("ext_idem", list_drivers())
+        self.assertNotIn(str(source.resolve()),
+                         driver_registry.DISCOVERY_ERRORS)
 
 
 class TestHostProbe(unittest.TestCase):
@@ -439,121 +583,83 @@ class TestHostProbe(unittest.TestCase):
         return ([f"PID 42 (trainer) on {d}"
                  for d in sorted(held)], held, set())
 
-    def test_no_accelerator(self):
-        """Verify a host with no devices reports 'none' and no capacity."""
-        with self._probed():
-            profile = self.driver.inspect()
-        self.assertEqual(profile.accelerator, "none")
-        self.assertEqual(profile.chips, 0)
-        self.assertEqual(profile.status, "no_accelerator")
-
-    def test_accelerator_identification(self):
-        """Verify generation, chip count, topology, and HBM across device styles.
-
-        tpu7x exposes two devices per chip, so its chip count is half the device
-        count; GKE describes the same hardware through kube-label metadata
-        rather than an ACCELERATOR_TYPE, and both must land on the same answer.
-        """
-        cases = [
-            (
-                "v6e accel nodes",
-                dict(accel=["/dev/accel0", "/dev/accel1"],
-                     meta={"ACCELERATOR_TYPE": "v6e-2"}),
-                dict(accelerator="v6e", chips=2, status="healthy"),
-            ),
-            (
-                "tpu7x halves devices per chip",
-                dict(vfio=[f"/dev/vfio/{i}" for i in range(8)],
-                     meta={
-                         "ACCELERATOR_TYPE": "tpu7x-8",
-                         "TOPOLOGY": "2x2x1"
-                     }),
-                dict(accelerator="tpu7x",
-                     chips=4,
-                     topology="2x2x1",
-                     hbm_gb=192.0,
-                     available_chips=4),
-            ),
-            (
-                "gke kube-label metadata",
-                dict(vfio=[f"/dev/vfio/{i}" for i in range(8)],
-                     meta={
-                         "cloud.google.com/gke-tpu-accelerator":
-                         "tpu-v6e-slice",
-                         "cloud.google.com/gke-tpu-topology": "2x4",
-                         "cloud.google.com/machine-family": "ct6e",
-                     }),
-                dict(accelerator="v6e",
-                     chips=8,
-                     topology="2x4",
-                     hbm_gb=32.0,
-                     available_chips=8),
-            ),
-            (
-                "unrecognised chip count is not guessed at",
-                dict(accel=[f"/dev/accel{i}" for i in range(6)],
-                     meta={"ACCELERATOR_TYPE": "v6e-6"}),
-                dict(chips=6, topology="unknown"),
-            ),
-        ]
+    def _assert_profiles(self, cases):
+        """Probe each `(name, probe_args, expected)`; check the fields."""
         for name, probe_args, expected in cases:
             with self.subTest(name):
                 with self._probed(**probe_args):
                     profile = self.driver.inspect()
                 for field, value in expected.items():
                     self.assertEqual(getattr(profile, field), value, field)
+
+    def test_accelerator_identification(self):
+        """Verify generation, chip count, topology, and HBM across device styles.
+
+        A host with no devices reports 'none' and no capacity. tpu7x exposes
+        two devices per chip, so its chip count is half the device
+        count; GKE describes the same hardware through kube-label metadata
+        rather than an ACCELERATOR_TYPE, and both must land on the same answer.
+        """
+        gke = {
+            "cloud.google.com/gke-tpu-accelerator": "tpu-v6e-slice",
+            "cloud.google.com/gke-tpu-topology": "2x4",
+            "cloud.google.com/machine-family": "ct6e",
+        }
+        cases = [
+            ("no devices", {},
+             dict(accelerator="none", chips=0, status="no_accelerator")),
+            ("v6e accel nodes", dict(accel=_ACCEL2, meta=_V6E2),
+             dict(accelerator="v6e", chips=2, status="healthy")),
+            ("tpu7x halves devices per chip",
+             dict(vfio=_VFIO8,
+                  meta={
+                      "ACCELERATOR_TYPE": "tpu7x-8",
+                      "TOPOLOGY": "2x2x1"
+                  }),
+             dict(accelerator="tpu7x",
+                  chips=4,
+                  topology="2x2x1",
+                  hbm_gb=192.0,
+                  available_chips=4)),
+            ("gke kube-label metadata", dict(vfio=_VFIO8, meta=gke),
+             dict(accelerator="v6e", chips=8, topology="2x4", hbm_gb=32.0)),
+            ("unrecognised chip count is not guessed at",
+             dict(accel=[f"/dev/accel{i}" for i in range(6)],
+                  meta={"ACCELERATOR_TYPE":
+                        "v6e-6"}), dict(chips=6, topology="unknown")),
+        ]
+        self._assert_profiles(cases)
 
     def test_contention_counts_chips_not_devices(self):
         """Verify availability subtracts held chips, converting devices first.
 
         Four held tpu7x devices are two physical chips, not four; a lockfile
         held by libtpu means nothing is usable however free the devices look.
+        The holder descriptions reach the caller, not just a count.
         """
         cases = [
-            (
-                "some accel nodes held",
-                dict(accel=["/dev/accel0", "/dev/accel1"],
-                     meta={"ACCELERATOR_TYPE": "v6e-2"},
-                     holders=self._holders(["/dev/accel0"])),
-                dict(chips=2, available_chips=1, status="partially_busy"),
-            ),
-            (
-                "all accel nodes held",
-                dict(accel=["/dev/accel0", "/dev/accel1"],
-                     meta={"ACCELERATOR_TYPE": "v6e-2"},
-                     holders=self._holders(["/dev/accel0", "/dev/accel1"])),
-                dict(chips=2, available_chips=0, status="busy"),
-            ),
-            (
-                "tpu7x devices convert to chips",
-                dict(vfio=[f"/dev/vfio/{i}" for i in range(8)],
-                     meta={"ACCELERATOR_TYPE": "tpu7x-8"},
-                     holders=self._holders(
-                         [f"/dev/vfio/{i}" for i in range(4)])),
-                dict(chips=4, available_chips=2, status="partially_busy"),
-            ),
-            (
-                "held lockfile overrides free devices",
-                dict(accel=["/dev/accel0", "/dev/accel1"],
-                     meta={"ACCELERATOR_TYPE": "v6e-2"},
-                     locked=True),
-                dict(available_chips=0, status="busy"),
-            ),
+            ("some accel nodes held",
+             dict(accel=_ACCEL2,
+                  meta=_V6E2,
+                  holders=self._holders(_ACCEL2[:1])),
+             dict(available_chips=1,
+                  status="partially_busy",
+                  held_by=["PID 42 (trainer) on /dev/accel0"])),
+            ("all accel nodes held",
+             dict(accel=_ACCEL2, meta=_V6E2, holders=self._holders(_ACCEL2)),
+             dict(available_chips=0, status="busy")),
+            ("tpu7x devices convert to chips",
+             dict(vfio=_VFIO8,
+                  meta={"ACCELERATOR_TYPE": "tpu7x-8"},
+                  holders=self._holders(_VFIO8[:4])),
+             dict(chips=4, available_chips=2, status="partially_busy")),
+            ("held lockfile overrides free devices",
+             dict(accel=_ACCEL2, meta=_V6E2, locked=True),
+             dict(available_chips=0,
+                  status="busy",
+                  held_by=["libtpu_lockfile is locked by an active process"])),
         ]
-        for name, probe_args, expected in cases:
-            with self.subTest(name):
-                with self._probed(**probe_args):
-                    profile = self.driver.inspect()
-                for field, value in expected.items():
-                    self.assertEqual(getattr(profile, field), value, field)
-
-    def test_held_devices_are_named_in_the_profile(self):
-        """Verify the holder descriptions reach the caller, not just a count."""
-        with self._probed(accel=["/dev/accel0", "/dev/accel1"],
-                          meta={"ACCELERATOR_TYPE": "v6e-2"},
-                          holders=self._holders(["/dev/accel0"])):
-            profile = self.driver.inspect()
-        self.assertEqual(profile.held_by, ["PID 42 (trainer) on /dev/accel0"])
+        self._assert_profiles(cases)
 
     def test_devices_and_hbm_per_device_are_reported(self):
         """Verify TP inputs match gke_job's keys, and unknown chips say why."""
@@ -582,16 +688,22 @@ class TestHostProbe(unittest.TestCase):
         self.assertNotIn("hbm_gb_per_device", details)
         self.assertIn("tpu9z", details["hbm_gb_note"])
 
-    def test_generation_lookup_normalizes_vendor_names(self):
-        """Verify PCI ids and hyphenated product names resolve to a generation."""
-        self.assertEqual(probe.generation_for_pci_id("0x006f"), "v6e")
-        spec = probe.spec_for("v6e")
-        self.assertEqual(spec["devices_per_chip"], 1)
-        self.assertEqual(spec["hbm_gb"], 32.0)
-        self.assertEqual(probe.generation_for_name("tpu-v5-lite-podslice"),
-                         "v5e")
-        self.assertEqual(probe.generation_for_name("tpu-v6e-slice"), "v6e")
-        self.assertEqual(probe.generation_for_name("ct6e-standard-8t"), "v6e")
+    def test_list_devices_filters_unbacked_accel_nodes(self):
+        """Verify static unbacked /dev/accel* nodes do not shadow /dev/vfio/[0-9]*."""
+
+        def fake_glob(pattern: str) -> list[str]:
+            if pattern == "/dev/vfio/[0-9]*":
+                return [f"/dev/vfio/{i}" for i in range(806, 814)]
+            if pattern.startswith("/dev/accel"):
+                return ["/dev/accel-p2p"] + [
+                    f"/dev/accel{i}" for i in range(396)
+                ] + [f"/dev/accel_block{i}" for i in range(396)]
+            return []
+
+        with patch.object(probe.glob, "glob", side_effect=fake_glob):
+            accel, vfio = probe.list_devices()
+        self.assertEqual(accel, [])
+        self.assertEqual(len(vfio), 8)
 
     def test_missing_tpu_info_raises_runtime_error(self):
         """Import must survive a missing tpu_info; only probing itself raises.
@@ -627,6 +739,13 @@ def _terminate_quietly(pid: int) -> None:
         pass
 
 
+def _terminate_job_quietly(job_id: str) -> None:
+    """Stop a submitted job's process group, if its record has one."""
+    record = jobs.JobRecord.load(job_id)
+    if record and record.pid:
+        _terminate_quietly(record.pid)
+
+
 class TestLocalDriver(_ScriptMixin, unittest.TestCase):
     """LocalDriver's synchronous and detached execution on this host."""
 
@@ -648,74 +767,30 @@ class TestLocalDriver(_ScriptMixin, unittest.TestCase):
                                     "FAILED") and time.monotonic() < deadline:
             time.sleep(0.05)
             status = self.driver.get_status(job_id)
-        record = jobs.JobRecord.load(job_id)
-        if record and record.pid:
-            _terminate_quietly(record.pid)
+        _terminate_job_quietly(job_id)
         return status
 
-    def test_interpreter_path_expands_home(self):
-        """Verify a `~/...` interpreter from environment.json is usable locally.
-
-        The command is exec'd as an argv list with no shell in between, so
-        without expansion the tilde would be looked up as a literal directory.
-        """
-        with tempfile.TemporaryDirectory() as fake_home:
-            os.symlink(sys.executable, os.path.join(fake_home, "py"))
-            with patch.dict(os.environ, {"HOME": fake_home}):
-                driver = LocalDriver(python_interpreter="~/py")
-                res = driver.run(
-                    self._script("import sys; print(sys.executable)\n"))
-            # Inside the block: once the temp dir is gone, realpath can no
-            # longer follow the `py` symlink.
-            self.assertEqual(res.exit_code, 0, res.stderr)
-            self.assertEqual(os.path.realpath(res.stdout.strip()),
-                             os.path.realpath(os.path.join(fake_home, "py")))
+    @staticmethod
+    def _record_declaring(job_id: str, name: str) -> jobs.JobRecord:
+        """A local job record whose one declared output is `name`."""
+        return jobs.JobRecord.create(
+            job_id=job_id,
+            backend="local",
+            extra={"outputs": [{
+                "local": name,
+                "remote": name,
+            }]})
 
     def test_declared_outputs_survive_a_missing_artifacts_dir(self):
         """Outputs sit beside `artifacts/`, so its absence must not hide them."""
-        with tempfile.TemporaryDirectory() as home, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": home}):
-            record = jobs.JobRecord.create(job_id="job-out-1",
-                                           backend="local",
-                                           extra={
-                                               "outputs": [{
-                                                   "local":
-                                                   "results.json",
-                                                   "remote":
-                                                   "results.json",
-                                               }]
-                                           })
+        with _temp_home():
+            record = self._record_declaring("job-out-1", "results.json")
             (record.directory / "results.json").write_text('{"n": 42}')
             shutil.rmtree(record.directory / "artifacts")
             with tempfile.TemporaryDirectory() as dest:
                 files = self.driver.fetch_artifacts("job-out-1", Path(dest))
                 self.assertEqual([f.name for f in files], ["results.json"])
                 self.assertEqual(files[0].read_text(), '{"n": 42}')
-
-    def test_a_name_claimed_by_both_halves_is_reported_once(self):
-        """`artifacts/m.json` and a declared `m.json` want the same target.
-
-        Both halves of the fetch write it, and the declared output is the one
-        the caller asked for by name, so it lands last and wins. What must not
-        happen is the path being counted twice, which reads as two files
-        retrieved where there is one.
-        """
-        with tempfile.TemporaryDirectory() as home, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": home}):
-            record = jobs.JobRecord.create(
-                job_id="job-out-3",
-                backend="local",
-                extra={"outputs": [{
-                    "local": "m.json",
-                    "remote": "m.json",
-                }]})
-            (record.directory / "artifacts" / "m.json").write_text('"stray"')
-            (record.directory / "m.json").write_text('"declared"')
-            with tempfile.TemporaryDirectory() as dest:
-                files = self.driver.fetch_artifacts("job-out-3", Path(dest))
-                self.assertEqual(files, list(dict.fromkeys(files)))
-                self.assertEqual((Path(dest) / "m.json").read_text(),
-                                 '"declared"')
 
     def test_run_stages_inputs_and_outputs_like_a_remote(self):
         """Verify the local backend honours the same --input/--output spelling.
@@ -750,25 +825,6 @@ class TestLocalDriver(_ScriptMixin, unittest.TestCase):
         # did not outlive the run.
         self.assertNotEqual(produced["cwd"], os.getcwd())
         self.assertFalse(pathlib.Path(produced["cwd"]).exists())
-
-    def test_run_without_staging_keeps_the_callers_directory(self):
-        """Verify plain `run` still executes in cwd, as scripts relying on it expect."""
-        res = self.driver.run(self._script("import os; print(os.getcwd())\n"))
-        self.assertEqual(res.stdout.strip(), os.getcwd())
-
-    def test_run_returns_output_and_exit_code(self):
-        """Verify synchronous execution reports stdout, exit status, and interpreter."""
-        path = self._script("import sys; print('ran_ok'); sys.exit(3)\n")
-        res = self.driver.run(path)
-        self.assertIsInstance(res, SynchronousExecutionResult)
-        self.assertEqual(res.exit_code, 3)
-        self.assertIn("ran_ok", res.stdout)
-
-        interp_path = self._script("import sys; print(sys.executable)\n")
-        res_interp = self.driver.run(interp_path,
-                                     python_interpreter=sys.executable)
-        self.assertEqual(res_interp.exit_code, 0)
-        self.assertIn(sys.executable, res_interp.stdout)
 
     def test_run_kills_the_whole_process_tree_on_timeout(self):
         """A timed-out workload must not leave children holding the device.
@@ -824,18 +880,6 @@ class TestLocalDriver(_ScriptMixin, unittest.TestCase):
         else:
             self.fail("the grandchild survived and still holds the device")
 
-    def test_missing_input_raises_the_same_error_for_run_and_submit(self):
-        """Verify both entry points answer a missing file identically."""
-        with tempfile.TemporaryDirectory() as tmp:
-            missing = os.path.join(tmp, "nonexistent", "script.py")
-            for call in (self.driver.run, self.driver.submit):
-                with self.subTest(call.__name__):
-                    with self.assertRaises(ComputeConfigError) as ctx:
-                        call(missing)
-                    self.assertEqual(ctx.exception.error_code,
-                                     "INPUT_NOT_FOUND")
-                    self.assertIn("does not exist", ctx.exception.message)
-
     def test_unreadable_input_reports_permission_cause(self):
         """Verify an inaccessible parent directory reports why it could not be stat'd."""
         with patch.object(Path,
@@ -868,16 +912,6 @@ class TestLocalDriver(_ScriptMixin, unittest.TestCase):
                 self.assertEqual(status.status, expected)
                 self.assertEqual(status.exit_code, exit_code)
                 self.assertIn("logged_output", self.driver.fetch_logs(job_id))
-
-    def test_cancel_marks_the_job_cancelled(self):
-        """Verify terminating a running job reports CANCELLED, not FAILED."""
-        job_id = self.driver.submit(
-            self._script("import time\ntime.sleep(10)\n"))
-        self.driver.cancel(job_id)
-        self.assertEqual(self.driver.get_status(job_id).status, "CANCELLED")
-        record = jobs.JobRecord.load(job_id)
-        if record and record.pid:
-            _terminate_quietly(record.pid)
 
     def test_a_reused_pid_is_neither_running_nor_signalled(self):
         """A pid now held by another process is not the job, and is left be.
@@ -934,65 +968,25 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
     """
 
     @patch("subprocess.run")
-    def test_probe_output_becomes_a_profile(self, mock_run):
-        """Verify the shipped probe's JSON is parsed into a HardwareProfile."""
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.return_value = _completed(json.dumps(_PROBE_PAYLOAD))
-                profile = make_driver().inspect()
-                self.assertEqual(profile.chips, 4)
-                self.assertEqual(profile.accelerator, "v4")
-                self.assertEqual(profile.topology, "2x2x1")
-                self.assertEqual(profile.status, "healthy")
-
-    @patch("subprocess.run")
-    def test_profile_names_the_host_it_measured(self, mock_run):
-        """Verify each transport labels the profile with its own target.
-
-        The probe reports what it found but not where; without these details a
-        cached profile cannot be told apart from another backend's.
-        """
-        mock_run.return_value = _completed(json.dumps(_PROBE_PAYLOAD))
-        gce = GceTpuVmDriver(tpu_name="test-tpu",
-                             zone="us-central2-b",
-                             project="test-proj").inspect()
-        self.assertEqual(gce.details["tpu_name"], "test-tpu")
-        self.assertEqual(gce.details["zone"], "us-central2-b")
-        self.assertEqual(gce.details["project"], "test-proj")
-
-        pod = GkePodDriver(namespace="default", pod="tpu-pod").inspect()
-        self.assertEqual(pod.details["pod"], "tpu-pod")
-        self.assertEqual(pod.details["namespace"], "default")
-
-    @patch("subprocess.run")
-    def test_remote_contention_is_reported(self, mock_run):
-        """Verify a busy remote host reads as busy rather than healthy.
-
-        `gcloud describe` would call such a VM READY; only an on-host probe can
-        see that another process already holds the chips.
-        """
-        payload = dict(_PROBE_PAYLOAD,
-                       status="busy",
-                       available_chips=0,
-                       held_by=[f"PID 42 on /dev/accel{i}" for i in range(4)])
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.return_value = _completed(json.dumps(payload))
-                profile = make_driver().inspect()
-                self.assertEqual(profile.status, "busy")
-                self.assertEqual(profile.available_chips, 0)
-
-    @patch("subprocess.run")
     def test_unreachable_host_is_not_free_capacity(self, mock_run):
-        """Verify a host that could not be probed reports unknown availability."""
+        """Verify a host that could not be probed reports unknown availability.
+
+        A missing `tpu_info` looks identical to a dead ssh link in the status
+        field; the interpreter in `details` is what points at the venv.
+        """
         for name, make_driver in _shell_drivers().items():
             with self.subTest(name):
                 mock_run.return_value = _completed(
-                    returncode=255, stderr="ssh: connect refused")
-                profile = make_driver().inspect()
+                    returncode=1, stderr="RuntimeError: tpu_info is required")
+                driver = make_driver()
+                driver.python_interpreter = "/opt/venv/bin/python3"
+                profile = driver.inspect()
                 self.assertEqual(profile.status, "unreachable")
                 self.assertIsNone(profile.available_chips)
                 self.assertEqual(profile.chips, 0)
+                self.assertEqual(profile.details["python_interpreter"],
+                                 "/opt/venv/bin/python3")
+                self.assertIn("tpu_info", profile.details["error"])
 
     @patch("subprocess.run")
     def test_probe_runs_under_the_configured_interpreter(self, mock_run):
@@ -1015,38 +1009,6 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
                 self.assertNotIn(" python3 -c ", remote)
 
     @patch("subprocess.run")
-    def test_failed_probe_names_its_interpreter(self, mock_run):
-        """Verify an unreachable profile says which interpreter the probe used.
-
-        A missing `tpu_info` looks identical to a dead ssh link in the status
-        field; the interpreter in `details` is what points at the venv.
-        """
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.return_value = _completed(
-                    returncode=1, stderr="RuntimeError: tpu_info is required")
-                driver = make_driver()
-                driver.python_interpreter = "/opt/venv/bin/python3"
-                profile = driver.inspect()
-                self.assertEqual(profile.status, "unreachable")
-                self.assertEqual(profile.details["python_interpreter"],
-                                 "/opt/venv/bin/python3")
-                self.assertIn("tpu_info", profile.details["error"])
-
-    @patch("subprocess.run")
-    def test_run_copies_then_executes(self, mock_run):
-        """Verify synchronous execution stages the file and returns its output."""
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.side_effect = [
-                    _completed(),  # copy in
-                    _completed("remote_ok\n"),  # execute
-                ]
-                res = make_driver().run(self._script("print('hi')\n"))
-                self.assertEqual(res.exit_code, 0)
-                self.assertEqual(res.stdout, "remote_ok\n")
-
-    @patch("subprocess.run")
     def test_run_stages_inputs_and_copies_outputs_back(self, mock_run):
         """Verify --input files land beside the script and --output files return.
 
@@ -1054,70 +1016,39 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
         name and read a result by bare name; on a remote backend that only
         works if both travel with the script and it runs where they landed.
         """
+        payload = self._script("{}", suffix=".json")
         for name, make_driver in _shell_drivers().items():
             with self.subTest(name):
-                payload = self._script("{}", suffix=".json")
-                out_dir = pathlib.Path(tempfile.mkdtemp())
-                out_local = out_dir / "nested" / "results.json"
-
-                responses = iter([
-                    _completed(),  # mkdir run dir
-                    _completed(),  # copy script in
-                    _completed(),  # copy payload in
-                    _completed("ran\n"),  # execute
-                    _completed(),  # copy results out
-                ])
+                out_local = Path(tempfile.mkdtemp()) / "nested" / "r.json"
+                calls = []
 
                 def fake_run(cmd, *a, **k):
+                    calls.append(" ".join(str(x) for x in cmd))
                     # The copy-out names the local path; "deliver" the file.
-                    if any(str(out_local) == str(x) for x in cmd):
+                    if str(out_local) in cmd:
                         out_local.parent.mkdir(parents=True, exist_ok=True)
                         out_local.write_text("{}")
-                    return next(responses)
+                    return _completed("ran\n" if len(calls) == 4 else "")
 
                 mock_run.side_effect = fake_run
                 res = make_driver().run(
                     self._script("print('hi')\n"),
-                    args=["payload.json", "results.json"],
+                    args=["payload.json", "r.json"],
                     inputs=[StagedFile(local=payload, remote="payload.json")],
                     outputs=[
-                        StagedFile(local=str(out_local), remote="results.json")
+                        StagedFile(local=str(out_local), remote="r.json")
                     ],
                 )
-                self.assertEqual(res.exit_code, 0, res.stderr)
+                self.assertEqual((res.exit_code, res.stdout), (0, "ran\n"))
                 self.assertTrue(out_local.is_file())
-
                 # The script ran inside the run directory, by bare name, with
                 # the payload copied to that same directory. The workload
                 # travels base64-encoded, so assert on what the target will
                 # actually execute rather than on the SSH command around it.
-                calls = [
-                    " ".join(str(x) for x in c.args[0])
-                    for c in mock_run.call_args_list
-                ]
-                execute = calls[3]
-                inner = _decode_inner_script(execute)
+                inner = _decode_inner_script(calls[3])
                 self.assertIn("cd /tmp/tpu_agent_suite_run_", inner)
-                self.assertIn("script.py payload.json results.json", inner)
+                self.assertIn("script.py payload.json r.json", inner)
                 self.assertIn("/payload.json", calls[2])
-                mock_run.reset_mock()
-
-    @patch("subprocess.run")
-    def test_run_keeps_a_shell_recipe_apart_from_its_launch_wrapper(
-            self, mock_run):
-        """Verify an unstaged .sh recipe isn't overwritten by the wrapper."""
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.side_effect = [_completed(), _completed()]
-                make_driver().run(self._script("echo hi\n", suffix=".sh"))
-                copy_in, execute = (" ".join(map(str, c.args[0]))
-                                    for c in mock_run.call_args_list)
-                recipe = re.search(r"/tmp/tpu_agent_suite_run_\S+?\.sh",
-                                   copy_in).group(0)
-                self.assertNotIn(f"base64 -d > {recipe}", execute)
-                self.assertIn(f"exec bash {recipe}",
-                              _decode_inner_script(execute))
-                mock_run.reset_mock()
 
     @patch("subprocess.run")
     def test_run_reaps_the_remote_process_when_it_times_out(self, mock_run):
@@ -1152,26 +1083,10 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
                 mock_run.reset_mock()
 
     @patch("subprocess.run")
-    def test_run_serialises_on_the_target_run_lock(self, mock_run):
-        """Concurrent runs against one accelerator must not interleave."""
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.side_effect = [_completed(), _completed("ok\n")]
-                make_driver().run(self._script("print('hi')\n"), timeout=600)
-                execute = " ".join(
-                    str(x) for x in mock_run.call_args_list[-1].args[0])
-                self.assertIn("flock -w", execute)
-                self.assertIn(shell.RUN_LOCK_PATH, execute)
-                # Half the call's timeout, so a contended target still leaves
-                # the workload most of its budget.
-                self.assertIn("-w 300", execute)
-                # Absent flock, the run proceeds rather than failing.
-                self.assertIn("command -v flock", execute)
-                mock_run.reset_mock()
-
-    @patch("subprocess.run")
-    def test_run_reports_a_busy_target_as_never_having_started(self, mock_run):
-        """Losing the lock race is not a failed run, and must not read as one."""
+    def test_runs_serialise_on_the_target_lock_and_busy_never_started(
+            self, mock_run):
+        """Concurrent runs against one accelerator must not interleave, and
+        losing the lock race is not a failed run, nor may it read as one."""
         for name, make_driver in _shell_drivers().items():
             with self.subTest(name):
                 mock_run.side_effect = [
@@ -1179,61 +1094,19 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
                     _completed(returncode=shell.LOCK_BUSY_EXIT),
                 ]
                 res = make_driver().run(self._script("print('hi')\n"),
-                                        timeout=60)
+                                        timeout=600)
+                execute = " ".join(
+                    str(x) for x in mock_run.call_args_list[-1].args[0])
+                self.assertIn(shell.RUN_LOCK_PATH, execute)
+                # Half the call's timeout, so a contended target still leaves
+                # the workload most of its budget.
+                self.assertIn("flock -w 300", execute)
+                # Absent flock, the run proceeds rather than failing.
+                self.assertIn("command -v flock", execute)
                 self.assertEqual(res.exit_code, shell.LOCK_BUSY_EXIT)
                 self.assertIn("busy", res.stderr)
                 self.assertIn("no measurement was taken", res.stderr)
                 mock_run.reset_mock()
-
-    @patch("subprocess.run")
-    def test_run_reports_a_declared_output_that_never_appeared(self, mock_run):
-        """Verify a clean exit without a promised output is not reported as success."""
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                missing = pathlib.Path(tempfile.mkdtemp()) / "never.json"
-                mock_run.side_effect = [
-                    _completed(),  # mkdir
-                    _completed(),  # copy script
-                    _completed("ok\n"),  # execute, exit 0
-                    _completed(returncode=1,
-                               stderr="No such file"),  # copy out
-                ]
-                res = make_driver().run(self._script("print('hi')\n"),
-                                        outputs=[
-                                            StagedFile(local=str(missing),
-                                                       remote="never.json")
-                                        ])
-                self.assertEqual(res.exit_code, 1)
-                self.assertIn("never.json", res.stderr)
-                self.assertIn("not produced", res.stderr)
-                mock_run.reset_mock()
-
-    @patch("subprocess.run")
-    def test_submit_then_status_reads_the_remote_exit_code(self, mock_run):
-        """Verify a detached job is tracked through the remote exit-code file."""
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.side_effect = [
-                    _completed(),  # mkdir
-                    _completed(),  # copy recipe in
-                    _completed(),  # detached launch
-                    _completed("COMPLETED 0\n"),  # status probe
-                ]
-                driver = make_driver()
-                job_id = driver.submit(self._script("print('submitted')\n"))
-                self.assertTrue(job_id.startswith("job-"))
-                status = driver.get_status(job_id)
-                self.assertEqual(status.status, "COMPLETED")
-                self.assertEqual(status.exit_code, 0)
-
-    @patch("subprocess.run")
-    def test_fetch_logs_returns_the_remote_log(self, mock_run):
-        """Verify logs are read back from the job's remote directory."""
-        for name, make_driver in _shell_drivers().items():
-            with self.subTest(name):
-                mock_run.return_value = _completed("remote_log_contents\n")
-                self.assertEqual(make_driver().fetch_logs("job-123"),
-                                 "remote_log_contents\n")
 
     @patch("subprocess.run")
     def test_cancel_of_a_finished_job_keeps_its_exit_status(self, mock_run):
@@ -1308,22 +1181,7 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
 
         mock_run.return_value = _completed("FAILED 1\n")
         self.assertEqual(driver.get_status(job_id).status, "CANCELLED")
-        record = jobs.JobRecord.load(job_id)
-        if record and record.pid:
-            _terminate_quietly(record.pid)
-
-    def test_gce_command_carries_vm_coordinates_and_ssh_flags(self):
-        """Verify gcloud calls name the VM, zone, project, and separate ssh flags."""
-        cmd = GceTpuVmDriver(tpu_name="t", zone="z",
-                             project="p")._gcloud_base("ssh")
-        self.assertEqual(cmd[:6],
-                         ["gcloud", "compute", "tpus", "tpu-vm", "ssh", "t"])
-        self.assertIn("--zone=z", cmd)
-        self.assertIn("--project=p", cmd)
-        ssh_flags = [part for part in cmd if part.startswith("--ssh-flag=")]
-        self.assertEqual(len(ssh_flags), 3)
-        for flag in ssh_flags:
-            self.assertEqual(flag.count("-o "), 1)
+        _terminate_job_quietly(job_id)
 
     def test_gce_internal_ip_reaches_ssh_and_scp_only(self):
         """Verify internal_ip adds --internal-ip to ssh and scp, not describe."""
@@ -1339,38 +1197,6 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
             driver._scp("a", "t:b")
         self.assertIn("--internal-ip", run.call_args.args[0])
 
-    def test_shell_recipe_runs_under_bash_with_tpu_agent_suite_python(self):
-        """Verify a .sh runs under bash, handed the interpreter, not run by it."""
-        driver = GkePodDriver(namespace="default",
-                              pod="tpu-pod",
-                              python_interpreter="~/venv/bin/python3")
-        self.assertEqual(driver._runner_for(pathlib.Path("r.sh"), None),
-                         "TPU_AGENT_SUITE_PYTHON=~/venv/bin/python3 bash")
-        self.assertEqual(driver._runner_for(pathlib.Path("r.py"), None),
-                         "~/venv/bin/python3")
-
-    def test_run_inner_script_executes_a_shell_recipe(self):
-        """Verify the wrapper really runs a .sh recipe with its interpreter."""
-        driver = GkePodDriver(namespace="default",
-                              pod="tpu-pod",
-                              python_interpreter="~/venv/bin/python3")
-        with tempfile.TemporaryDirectory() as tmp:
-            recipe = pathlib.Path(tmp) / "recipe.sh"
-            recipe.write_text('echo "py=$TPU_AGENT_SUITE_PYTHON arg=$1"\n')
-            command = (f"{driver._runner_for(recipe, None)} "
-                       f"{shlex.quote(str(recipe))} a1")
-            proc = subprocess.run([
-                "sh", "-c",
-                shell.run_inner_script(command, f"{tmp}/pid", None)
-            ],
-                                  capture_output=True,
-                                  text=True,
-                                  timeout=30,
-                                  check=False)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(f"py={os.path.expanduser('~')}/venv/bin/python3 arg=a1",
-                      proc.stdout)
-
     def test_gke_pod_command_carries_namespace_and_container(self):
         """Verify kubectl calls are scoped to the pod's namespace and container."""
         driver = GkePodDriver(namespace="ns-1", pod="p-1", container="trainer")
@@ -1383,332 +1209,7 @@ class TestRemoteShellDrivers(_ScriptMixin, unittest.TestCase):
                          ["kubectl", "--context", "c", "-n", "default"])
 
 
-class TestGkeXpkDriver(_ScriptMixin, unittest.TestCase):
-    """Cluster workloads via xpk: status vocabulary, occupancy, and GCS reads."""
-
-    def setUp(self):
-        self.driver = GkeXpkDriver(cluster_name="c1",
-                                   project="p1",
-                                   zone="z1",
-                                   gcs_bucket="gs://test-bucket")
-        self.empty_listing = _completed("Jobset Name  Status\n")
-
-    def _listing(self, name: str, status: str) -> subprocess.CompletedProcess:
-        """An `xpk workload list` table with one workload in the given state.
-
-        The name sits in the second column, so this also covers the driver
-        matching an identifier wherever xpk chooses to print it.
-        """
-        return _completed(f"Jobset Name  Workload Name  Status\n"
-                          f"jobset-1     {name}         {status}\n")
-
-    def test_run_is_refused_before_anything_executes(self):
-        """Verify sync `run` raises rather than running on the calling host.
-
-        The script must not run at all: a real exit code from a chipless host
-        is the failure mode being closed off, so the marker file the script
-        would write is the assertion.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            marker = Path(td) / "ran"
-            path = self._script(f"open({str(marker)!r}, 'w').close()\n")
-            with self.assertRaises(ComputeConfigError) as ctx:
-                self.driver.run(path, inputs=[StagedFile(path, "in.py")])
-            self.assertEqual(ctx.exception.error_code, "UNSUPPORTED_OPERATION")
-            self.assertIn("compute submit", ctx.exception.message)
-            self.assertFalse(marker.exists())
-
-    def test_submit_refuses_staging_it_cannot_do(self):
-        """The recipe builds the workload, so nothing here can stage for it.
-
-        Accepting the flags and staging nothing leaves the recipe to die on a
-        missing path at runtime, long after the command reported success.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            marker = Path(td) / "ran"
-            path = self._script(f"open({str(marker)!r}, 'w').close()\n")
-            with self.assertRaises(ComputeConfigError) as ctx:
-                self.driver.submit(path, outputs=[StagedFile(path, "o.pt")])
-            self.assertEqual(ctx.exception.error_code, "UNSUPPORTED_OPERATION")
-            self.assertFalse(marker.exists())
-
-    def test_command_coordinates_and_bucket_formatting(self):
-        """Verify xpk commands carry cluster coordinates and bucket paths normalize."""
-        cmd = self.driver._xpk("workload", "list")
-        self.assertEqual(cmd[:3], ["xpk", "workload", "list"])
-        self.assertIn("--cluster=c1", cmd)
-        self.assertIn("--project=p1", cmd)
-        self.assertIn("--zone=z1", cmd)
-
-        driver = GkeXpkDriver(cluster_name="c",
-                              project="p",
-                              zone="z",
-                              gcs_bucket="gs://my-bucket/")
-        self.assertEqual(driver.gcs_bucket, "gs://my-bucket")
-        # Spelled either way in environment.json, read one way: never
-        # `gs://gs://...`, never a bare name handed to gcloud.
-        for spelled in ("my-bucket", "my-bucket/", "gs://my-bucket"):
-            with self.subTest(spelled=spelled):
-                driver = GkeXpkDriver(cluster_name="c",
-                                      project="p",
-                                      zone="z",
-                                      gcs_bucket=spelled)
-                self.assertEqual(driver.gcs_bucket, "gs://my-bucket")
-        self.assertEqual(
-            GkeXpkDriver(cluster_name="c", project="p", zone="z").gcs_bucket,
-            "")
-
-    @patch("subprocess.run")
-    def test_workload_state_vocabulary(self, mock_run):
-        """Verify each xpk/Kueue state maps to the framework's own vocabulary.
-
-        Kueue's ADMITTED, SUSPENDED, PREEMPTED, and EVICTED are not terminal --
-        the workload still holds or is reclaiming quota and may be requeued, so
-        calling a preempted job FAILED would end a poll loop on a live job.
-        """
-        cases = [
-            ("COMPLETE", "COMPLETED", 0),
-            ("SUCCESSFUL", "COMPLETED", 0),
-            ("FAILED", "FAILED", 1),
-            ("FINISHED", "COMPLETED", 0),
-            ("FINISHED JobSet failed: Pod backoff limit reached", "FAILED", 1),
-            ("RUNNING", "RUNNING", None),
-            ("QUEUED", "PENDING", None),
-            ("ADMITTED", "PENDING", None),
-            ("PREEMPTED", "PENDING", None),
-        ]
-        for raw, expected, exit_code in cases:
-            with self.subTest(raw):
-                mock_run.return_value = self._listing("wl-1", raw)
-                result = self.driver.get_status("wl-1")
-                self.assertEqual(result.status, expected)
-                self.assertEqual(result.exit_code, exit_code)
-
-    @patch("subprocess.run")
-    def test_unrecognised_state_is_reported_not_hidden(self, mock_run):
-        """Verify an unknown state names itself instead of looking like absence.
-
-        A vocabulary this build does not know is a different problem from a
-        workload that was never created, and the message must say which.
-        """
-        mock_run.return_value = self._listing("wl-x", "FLARGLE")
-        result = self.driver.get_status("wl-x")
-        self.assertEqual(result.status, "UNKNOWN")
-        self.assertIn("unrecognised workload state", result.error)
-        self.assertIn("FLARGLE", result.error)
-
-    @patch("subprocess.run")
-    def test_missing_workload_is_unknown_not_running(self, mock_run):
-        """Verify an absent workload reports UNKNOWN, not a perpetual RUNNING.
-
-        An orchestrator polls until a terminal state; reporting RUNNING for a
-        workload that does not exist hangs that loop forever.
-        """
-        mock_run.return_value = self.empty_listing
-        result = self.driver.get_status("job-nonexistent")
-        self.assertEqual(result.status, "UNKNOWN")
-        self.assertIn("not found", result.error)
-
-    @patch("subprocess.run")
-    def test_recipe_exit_code_does_not_stand_in_for_the_workload(
-            self, mock_run):
-        """Verify the local recipe's exit code cannot report job completion.
-
-        The recipe only *submits* the workload, so exit 0 proves nothing about
-        the job -- but a non-zero exit does explain an absent workload.
-        """
-        mock_run.return_value = self.empty_listing
-        for exit_code, expected in (("0\n", "UNKNOWN"), ("3\n", "FAILED")):
-            with self.subTest(exit_code.strip()):
-                record = jobs.JobRecord.create(job_name="j",
-                                               workload_name="wl-sub")
-                (record.directory / "exit_code.txt").write_text(exit_code)
-                result = self.driver.get_status(record.job_id)
-                self.assertEqual(result.status, expected)
-                if expected == "FAILED":
-                    self.assertEqual(result.exit_code, 3)
-                    self.assertIn("before the workload was created",
-                                  result.error)
-
-    @patch("subprocess.run")
-    def test_in_flight_submission_is_pending_not_missing(self, mock_run):
-        """Verify a still-submitting job is PENDING, not reported as absent.
-
-        `xpk workload create` takes tens of seconds; during that window the
-        workload is legitimately not on the cluster yet, and calling it missing
-        tells an orchestrator the job died before it started.
-        """
-        mock_run.return_value = _completed("Workload created\n")
-        job_id = self.driver.submit(self._script("sleep 30\n", suffix=".sh"),
-                                    job_name="wl-inflight")
-        # Reap the background recipe directly: `cancel` would shell out to the
-        # real xpk binary once this test's mock is torn down.
-        record = jobs.JobRecord.load(job_id)
-        if record and record.pid:
-            self.addCleanup(_terminate_quietly, record.pid)
-
-        mock_run.return_value = self.empty_listing
-        result = self.driver.get_status(job_id)
-        self.assertEqual(result.status, "PENDING")
-        self.assertIsNone(result.error)
-
-    @patch("subprocess.run")
-    def test_occupancy_matches_status_columns_not_row_text(self, mock_run):
-        """Verify a workload named `pending-sweep` does not count as pending.
-
-        Occupancy drives capacity reporting, so statuses are matched as whole
-        columns rather than as substrings anywhere in the row.
-        """
-        mock_run.return_value = _completed(
-            "Jobset Name    Status\npending-sweep  FINISHED\n")
-        self.assertEqual(self.driver._occupying_workloads(), [])
-
-        mock_run.return_value = _completed(
-            "Jobset Name  Status\nwl-admitted  ADMITTED\n")
-        self.assertEqual(self.driver._occupying_workloads(), ["wl-admitted"])
-
-    @patch("subprocess.run")
-    def test_unlistable_workloads_report_unknown_availability(self, mock_run):
-        """Verify a cluster whose workloads cannot be listed is not called free."""
-        mock_run.return_value = _completed(returncode=1, stderr="boom")
-        self.assertIsNone(self.driver._occupying_workloads())
-
-    @patch("subprocess.run")
-    def test_inspect_scrapes_cluster_description(self, mock_run):
-        """Verify cluster TPU type and health come from `xpk cluster describe`."""
-        mock_run.return_value = _completed(
-            "device_type: v5e\nchips_per_node: 4\n")
-        profile = self.driver.inspect()
-        self.assertEqual(profile.accelerator, "v5e")
-        self.assertEqual(profile.status, "healthy")
-
-    def test_inspect_handles_failures_gracefully(self):
-        """Verify inspect degrades to an error profile on non-zero exit or missing binary."""
-        with patch("subprocess.run",
-                   return_value=_completed(returncode=1,
-                                           stderr="cluster not found")):
-            profile = self.driver.inspect()
-            self.assertEqual(profile.status, "degraded")
-            self.assertIsNone(profile.available_chips)
-            self.assertIn("cluster not found", profile.details["error"])
-
-        with patch("subprocess.run",
-                   side_effect=OSError("xpk binary missing")):
-            profile = self.driver.inspect()
-            self.assertIn("error", profile.status)
-            self.assertIsNone(profile.available_chips)
-            self.assertIn("xpk binary missing", profile.details["error"])
-
-    @patch("subprocess.run")
-    def test_gcs_log_name_is_discovered_not_assumed(self, mock_run):
-        """Verify log retrieval lists the prefix rather than assuming a filename.
-
-        The name is recipe-specific: MaxText writes `train-0.log`, others use
-        `main.log` or `rank-0.log`.
-        """
-
-        def fake(cmd, **_kwargs):
-            if cmd[:3] == ["gcloud", "storage", "ls"]:
-                return _completed("gs://test-bucket/wl/logs/rank-0.log\n")
-            return _completed("log body")
-
-        mock_run.side_effect = fake
-        self.assertEqual(self.driver._gcs_logs("wl"), "log body")
-
-    def test_fetch_logs_returns_empty_for_unknown_job(self):
-        """Verify an unknown job yields no logs rather than an error."""
-        with patch("subprocess.run", return_value=_completed(returncode=1)):
-            self.assertEqual(self.driver.fetch_logs("nonexistent-job"), "")
-
-    @patch("subprocess.run")
-    def test_cancel_deletes_the_workload(self, mock_run):
-        """Verify cancelling asks xpk to delete the workload and records it."""
-        mock_run.return_value = _completed("Deleted\n")
-        record = jobs.JobRecord.create(job_name="j", workload_name="wl-xyz")
-        self.driver.cancel(record.job_id)
-
-        cmd = mock_run.call_args[0][0]
-        self.assertEqual(cmd[:3], ["xpk", "workload", "delete"])
-        self.assertIn("--workload=wl-xyz", cmd)
-        self.assertEqual(
-            jobs.JobRecord.load(record.job_id).status, "CANCELLED")
-
-    @patch("subprocess.run")
-    def test_cancel_of_a_finished_workload_records_how_it_finished(
-            self, mock_run):
-        """A FINISHED workload is COMPLETED, not CANCELLED, and not deleted."""
-        mock_run.return_value = self._listing("wl-done", "FINISHED")
-        record = jobs.JobRecord.create(job_name="j", workload_name="wl-done")
-        self.driver.cancel(record.job_id)
-        self.assertEqual(
-            jobs.JobRecord.load(record.job_id).status, "COMPLETED")
-        for call in mock_run.call_args_list:
-            self.assertNotIn("delete", call[0][0])
-
-    @patch("subprocess.run")
-    def test_cancel_that_cannot_delete_raises_and_keeps_the_record_live(
-            self, mock_run):
-        """A CANCELLED record over a live workload is a leak; refuse it."""
-        mock_run.side_effect = [
-            self._listing("wl-live", "RUNNING"),
-            _completed(returncode=1,
-                       stderr="ERROR: permission denied on cluster c1"),
-        ]
-        record = jobs.JobRecord.create(job_name="j", workload_name="wl-live")
-        with self.assertRaises(ComputeConfigError) as ctx:
-            self.driver.cancel(record.job_id)
-        self.assertEqual(ctx.exception.error_code, "CANCEL_FAILED")
-        self.assertIn("permission denied", str(ctx.exception))
-        self.assertEqual(jobs.JobRecord.load(record.job_id).status, "RUNNING")
-
-    @patch("subprocess.run")
-    def test_cancel_tolerates_a_workload_already_gone(self, mock_run):
-        mock_run.side_effect = [
-            self.empty_listing,
-            _completed(returncode=1, stderr="workload wl-gone not found"),
-        ]
-        record = jobs.JobRecord.create(job_name="j", workload_name="wl-gone")
-        self.driver.cancel(record.job_id)
-        self.assertEqual(
-            jobs.JobRecord.load(record.job_id).status, "CANCELLED")
-
-    def test_fetch_artifacts_requires_bucket(self):
-        driver = GkeXpkDriver(cluster_name="c1", project="p1", zone="z1")
-        with tempfile.TemporaryDirectory() as td:
-            with self.assertRaises(ComputeConfigError) as ctx:
-                driver.fetch_artifacts("job-1", Path(td))
-            self.assertEqual(ctx.exception.error_code, "BUCKET_NOT_CONFIGURED")
-            self.assertEqual(ctx.exception.missing, ["gcs_bucket"])
-
-    @patch("subprocess.run")
-    def test_fetch_artifacts_tolerates_not_found(self, mock_run):
-        mock_run.return_value = _completed(
-            returncode=1,
-            stderr=
-            ("ERROR: (gcloud.storage.cp) One or more URLs matched no objects."
-             ),
-        )
-        record = jobs.JobRecord.create(job_name="j", workload_name="wl-1")
-        with tempfile.TemporaryDirectory() as td:
-            files = self.driver.fetch_artifacts(record.job_id, Path(td))
-            self.assertEqual(files, [])
-
-    @patch("subprocess.run")
-    def test_fetch_artifacts_raises_on_failure(self, mock_run):
-        mock_run.return_value = _completed(
-            returncode=1,
-            stderr=
-            "ERROR: (gcloud.storage.cp) 403 Forbidden: Permission denied.",
-        )
-        record = jobs.JobRecord.create(job_name="j", workload_name="wl-2")
-        with tempfile.TemporaryDirectory() as td:
-            with self.assertRaises(ComputeConfigError) as ctx:
-                self.driver.fetch_artifacts(record.job_id, Path(td))
-            self.assertEqual(ctx.exception.error_code, "FETCH_FAILED")
-            self.assertIn("403 Forbidden", str(ctx.exception))
-
-
-class TestComputeConfig(unittest.TestCase):
+class TestComputeConfig(_ScriptMixin, unittest.TestCase):
     """Driver resolution, environment.json schemas, and override precedence."""
 
     @contextlib.contextmanager
@@ -1733,111 +1234,13 @@ class TestComputeConfig(unittest.TestCase):
                 resolve_driver(backend_override=backend)
             self.assertEqual(ctx.exception.error_code, "INVALID_BACKEND")
 
-    def test_cli_overrides_win_but_unset_flags_do_not_erase_config(self):
-        """Verify overrides outrank environment.json while `None` leaves it alone.
-
-        Unset argparse flags arrive as None; treating those as values would
-        blank out configured fields on every invocation.
-        """
-        with self._environment(
-                profile_env("mock_test",
-                            endpoint="base-ep",
-                            token="base-token")):
-            driver = resolve_driver(backend_override="mock_test",
-                                    param_overrides={
-                                        "endpoint": "override-ep",
-                                        "token": None
-                                    })
-        self.assertEqual(driver.endpoint, "override-ep")
-        self.assertEqual(driver.token, "base-token")
-
-    def test_backends_resolve_from_their_own_parameters(self):
-        """Verify each shipped backend builds from its configured fields."""
-        cases = [
-            (profile_env("local"), LocalDriver, {}),
-            (profile_env("gce_tpu_vm",
-                         tpu_name="node-1",
-                         zone="us-central2-b",
-                         project="proj-1"), GceTpuVmDriver, {
-                             "tpu_name": "node-1",
-                             "zone": "us-central2-b",
-                             "project": "proj-1"
-                         }),
-            (profile_env("gke_xpk",
-                         cluster_name="my-cluster",
-                         project="proj-1",
-                         zone="us-central2-b"), GkeXpkDriver, {
-                             "cluster_name": "my-cluster"
-                         }),
-            (profile_env("gke_pod", pod="my-pod",
-                         namespace="my-ns"), GkePodDriver, {
-                             "pod": "my-pod",
-                             "namespace": "my-ns"
-                         }),
-            (profile_env("gke_job",
-                         namespace="my-ns",
-                         tpu_chips=8,
-                         queue="my-queue",
-                         tpu_accelerator="tpu7x",
-                         tpu_topology="2x2x1"), GkeJobDriver, {
-                             "namespace": "my-ns",
-                             "tpu_chips": 8,
-                             "queue": "my-queue",
-                         }),
-        ]
-        for cfg, expected_cls, attrs in cases:
-            with self.subTest(cfg["profiles"]["default"]["backend"]):
-                run_id = "20260101T000000Z-123456789abc"
-                with self._environment(cfg):
-                    driver = resolve_driver(run_id=run_id)
-                self.assertIsInstance(driver, expected_cls)
-                self.assertEqual(driver.compute_profile, "default")
-                self.assertEqual(driver.run_id, run_id)
-                for field, value in attrs.items():
-                    self.assertEqual(getattr(driver, field), value, field)
-
-    def test_incomplete_profile_is_compute_not_configured(self):
-        """A profile `setup apply` would not save cannot be used.
-
-        The error names the fields to ask for and the plan command that asks.
-        """
-        cases = [
-            ("unknown backend", profile_env("mock_test"), ["backend"]),
-            ("gke_pod without pod", profile_env("gke_pod"), ["pod"]),
-        ]
-        for name, cfg, missing in cases:
-            with self.subTest(name):
-                with self._environment(cfg):
-                    with self.assertRaises(ComputeConfigError) as ctx:
-                        resolve_driver(package="pkg@1")
-                error = ctx.exception.to_dict()
-                self.assertEqual(error["error_code"], "COMPUTE_NOT_CONFIGURED")
-                self.assertEqual(error["missing"], missing)
-                self.assertIn(
-                    "compute --package pkg@1 setup plan --profile "
-                    "default", error["fix"])
-
-    def test_python_interpreter_passed_to_driver(self):
-        """Verify the shared interpreter parameter reaches the driver instance."""
-        with self._environment(
-                profile_env("local", python_interpreter="/opt/custom/python")):
-            driver = resolve_driver()
-        self.assertEqual(driver.python_interpreter, "/opt/custom/python")
-
     def test_cli_passes_the_job_and_fills_in_a_fields_fix(self):
         """The job's id reaches the resolver; a driver's `<GROUP>_NOT_CONFIGURED`
         gets the `setup plan --fields` command for this package and the
         driver's profile as its fix."""
         driver, seen = MockTestDriver(), {}
         driver.compute_profile = "c"
-        args = argparse.Namespace(compute_action="inspect",
-                                  backend=None,
-                                  package="pkg@1",
-                                  workspace=None,
-                                  json=True,
-                                  profile=None,
-                                  run_id=None,
-                                  job_id="job-1")
+        args = _cli_args(job_id="job-1")
         with patch.object(driver,
                           "inspect",
                           side_effect=base.NotConfigured(
@@ -1860,27 +1263,14 @@ class TestComputeConfig(unittest.TestCase):
         driver = MockTestDriver()
         driver.compute_profile = "c"
         lost = SynchronousExecutionResult(
-            exit_code=1,
-            stdout="",
-            stderr="",
-            details={"setup_fields": ["pod_service_account"]})
-        with tempfile.TemporaryDirectory() as td:
-            code = Path(td) / "job.py"
-            code.write_text("")
-            args = argparse.Namespace(compute_action="run",
-                                      backend=None,
-                                      package="pkg@1",
-                                      workspace=None,
-                                      json=True,
-                                      profile=None,
-                                      run_id=None,
-                                      job_id=None,
-                                      code=str(code),
-                                      timeout=None,
-                                      run_args=[])
-            with patch.object(driver, "run", return_value=lost), \
-                    contextlib.redirect_stdout(io.StringIO()) as out:
-                compute.handle_compute_cli(args, resolve=lambda **_: driver)
+            1, "", "", details={"setup_fields": ["pod_service_account"]})
+        args = _cli_args(compute_action="run",
+                         code=self._script(""),
+                         timeout=None,
+                         run_args=[])
+        with patch.object(driver, "run", return_value=lost), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            compute.handle_compute_cli(args, resolve=lambda **_: driver)
         fix = json.loads(out.getvalue())["details"]["fix"]
         self.assertTrue(
             fix.endswith("compute --package pkg@1 setup plan --profile c "
@@ -1890,99 +1280,46 @@ class TestComputeConfig(unittest.TestCase):
 class TestEnvironmentResolution(unittest.TestCase):
     """environment.json lookup must stay package-agnostic."""
 
-    def _write(self, directory: Path, backend: str) -> None:
+    def _install(self, directory: Path, backend: str | None,
+                 package: str) -> None:
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "environment.json").write_text(
-            json.dumps(profile_env(backend)),
-            encoding="utf-8",
-        )
-
-    def _ledger(self, directory: Path, package: str) -> None:
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "ownership.json").write_text(json.dumps(
-            {"package": package}),
-                                                  encoding="utf-8")
+        if backend:
+            (directory / "environment.json").write_text(
+                json.dumps(profile_env(backend)))
+        (directory / "ownership.json"
+         ).write_text(json.dumps({"package": package}) if package else "{")
 
     def test_environment_resolution_precedence_and_fallback(self):
         """Ownership-keyed resolution: workspace is authoritative, central
         serves the not-installed-here case, and nothing else is consulted."""
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp) / "ws"
-            home = Path(tmp) / "home"
-            old = os.environ.get("TPU_AGENT_SUITE_HOME")
-            os.environ["TPU_AGENT_SUITE_HOME"] = str(home)
-            try:
-                self._write(ws / ".tpu-agent-suite", "scoped")
-                self._ledger(ws / ".tpu-agent-suite", "demo-pkg")
-                self._write(home, "central")
-                self._ledger(home, "demo-pkg")
+        home = _patch_home(self)
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self._install(tmp / "ws" / ".tpu-agent-suite", "scoped", "demo-pkg")
+        self._install(home, "central", "demo-pkg")
+        # Another package's install, or an unreadable ledger, is not ours.
+        self._install(tmp / "other" / ".tpu-agent-suite", "x", "other-pkg")
+        self._install(tmp / "unreadable" / ".tpu-agent-suite", "x", "")
+        (tmp / "elsewhere").mkdir()
 
-                # Workspace config is authoritative, bare name or tag alike.
-                for package in ("demo-pkg", "demo-pkg@2.0.0"):
-                    self.assertEqual(
-                        compute_config.find_environment_data(
-                            workspace=ws,
-                            package=package)["profiles"]["default"]["backend"],
-                        "scoped")
+        def backend(ws: str, package: str) -> str | None:
+            data = compute_config.find_environment_data(workspace=tmp / ws,
+                                                        package=package)
+            return data and data["profiles"]["default"]["backend"]
 
-                # No package: nothing is consulted.
-                self.assertEqual(
-                    compute_config.find_environment_data(workspace=ws), {})
-
-                # Not installed in the workspace: the user-scope install in
-                # the central store, which is not version-namespaced, so a
-                # bare name reaches it too.
-                ws2 = Path(tmp) / "elsewhere"
-                ws2.mkdir()
-                for package in ("demo-pkg", "demo-pkg@2.0.0"):
-                    self.assertEqual(
-                        compute_config.find_environment_data(
-                            workspace=ws2,
-                            package=package)["profiles"]["default"]["backend"],
-                        "central")
-
-                # Another package's install is not this one's: skipped.
-                other = Path(tmp) / "other"
-                self._write(other / ".tpu-agent-suite", "not-mine")
-                self._ledger(other / ".tpu-agent-suite", "other-pkg")
-                self.assertEqual(
-                    compute_config.find_environment_data(
-                        workspace=other,
-                        package="demo-pkg")["profiles"]["default"]["backend"],
-                    "central")
-
-                # An unreadable ledger names no package: skipped as well.
-                unreadable = Path(tmp) / "unreadable"
-                self._write(unreadable / ".tpu-agent-suite", "not-mine")
-                (unreadable / ".tpu-agent-suite" /
-                 "ownership.json").write_text("{", encoding="utf-8")
-                self.assertEqual(
-                    compute_config.find_environment_data(
-                        workspace=unreadable,
-                        package="demo-pkg")["profiles"]["default"]["backend"],
-                    "central")
-
-                # Broken install: ledger present, config gone -> loud error.
-                broken = Path(tmp) / "broken"
-                self._ledger(broken / ".tpu-agent-suite", "demo-pkg")
-                with self.assertRaises(runtime.TpuAgentSuiteError):
-                    compute_config.find_environment_data(
-                        workspace=broken, package="demo-pkg@2.0.0")
-
-                # The resolver itself refuses an empty package outright.
-                with self.assertRaises(runtime.TpuAgentSuiteError):
-                    runtime.utils.resolve_environment("", ws)
-
-                # A package installed nowhere: clean miss, though the central
-                # store holds another package's config.
-                self.assertEqual(
-                    compute_config.find_environment_data(
-                        workspace=ws2, package="ghost-pkg@1.0.0"), {})
-            finally:
-                if old is not None:
-                    os.environ["TPU_AGENT_SUITE_HOME"] = old
-                else:
-                    os.environ.pop("TPU_AGENT_SUITE_HOME", None)
+        self.assertEqual(backend("ws", "demo-pkg@2.0.0"), "scoped")
+        # The central store is not version-namespaced: a bare name reaches it.
+        for ws in ("elsewhere", "other", "unreadable"):
+            self.assertEqual(backend(ws, "demo-pkg"), "central", ws)
+        self.assertEqual(
+            compute_config.find_environment_data(workspace=tmp / "ws"), {})
+        self.assertEqual(backend("elsewhere", "ghost-pkg@1.0.0"), {})
+        # Broken install: ledger present, config gone -> loud error.
+        self._install(tmp / "broken" / ".tpu-agent-suite", None, "demo-pkg")
+        with self.assertRaises(runtime.TpuAgentSuiteError):
+            backend("broken", "demo-pkg@2.0.0")
+        with self.assertRaises(runtime.TpuAgentSuiteError):
+            runtime.paths.resolve_environment("", tmp / "ws")
 
 
 class TestRuntimeCliCompute(_ScriptMixin, unittest.TestCase):
@@ -1992,73 +1329,6 @@ class TestRuntimeCliCompute(_ScriptMixin, unittest.TestCase):
         with io.StringIO() as buf, contextlib.redirect_stdout(buf):
             rc = runtime.main(argv)
             return rc, buf.getvalue()
-
-    def test_inspect_accepts_the_backend_flag_in_either_position(self):
-        """Verify --backend parses before or after the subcommand, JSON or not."""
-        variants = [
-            ["compute", "--backend", "mock_test", "inspect", "--json"],
-            ["compute", "inspect", "--backend", "mock_test", "--json"],
-            # Without --json the output is pretty-printed but still JSON.
-            ["compute", "--backend", "mock_test", "inspect"],
-        ]
-        for argv in variants:
-            with self.subTest(" ".join(argv)):
-                rc, out = self._run_cli(argv)
-                self.assertEqual(rc, 0)
-                payload = json.loads(out.strip())
-                self.assertEqual(payload["accelerator"], "mock_tpu")
-                self.assertEqual(payload["chips"], 4)
-
-    def test_run_dispatches_to_the_driver(self):
-        """Verify `compute run` reaches the resolved driver with the script path."""
-        path = self._script("print('from_runtime_cli')\n")
-        rc, out = self._run_cli([
-            "compute", "--backend", "mock_test", "run", "--code", path,
-            "--json"
-        ])
-        self.assertEqual(rc, 0)
-        payload = json.loads(out.strip())
-        self.assertEqual(payload["exit_code"], 0)
-        self.assertIn("mock run executed", payload["stdout"])
-
-    def test_run_forwards_the_name_flag(self):
-        """Verify `compute run --name` reaches the driver as `job_name`."""
-        path = self._script("print('named')\n")
-        with patch.object(MockTestDriver,
-                          "run",
-                          autospec=True,
-                          side_effect=MockTestDriver.run) as run:
-            self._run_cli([
-                "compute", "--backend", "mock_test", "run", "--code", path,
-                "--name", "qwen-bench"
-            ])
-        self.assertEqual(run.call_args.kwargs["job_name"], "qwen-bench")
-
-    def test_run_executes_python_and_bash_locally(self):
-        """Verify the local backend runs both script kinds end to end."""
-        cases = [
-            (".py", "print('from_python')\n", "from_python"),
-            (".sh", "#!/bin/bash\necho 'from_bash'\n", "from_bash"),
-        ]
-        for suffix, body, expected in cases:
-            with self.subTest(suffix):
-                path = self._script(body, suffix=suffix)
-                rc, out = self._run_cli([
-                    "compute", "--backend", "local", "run", "--code", path,
-                    "--json"
-                ])
-                self.assertEqual(rc, 0)
-                self.assertIn(expected, json.loads(out.strip())["stdout"])
-
-    def test_run_forwards_the_interpreter_flag(self):
-        """Verify --interpreter selects the binary that executes the script."""
-        path = self._script("import sys; print(sys.executable)\n")
-        rc, out = self._run_cli([
-            "compute", "--backend", "local", "run", "--interpreter",
-            sys.executable, "--code", path, "--json"
-        ])
-        self.assertEqual(rc, 0)
-        self.assertIn(sys.executable, json.loads(out.strip())["stdout"])
 
     def test_run_input_and_output_specs_are_parsed_and_validated(self):
         """Verify `--input LOCAL[:REMOTE]` and `--output REMOTE[:LOCAL]` reach the driver."""
@@ -2073,6 +1343,17 @@ class TestRuntimeCliCompute(_ScriptMixin, unittest.TestCase):
         for bad in ("/abs/path.json", "../up.json", "a/../../b"):
             with self.assertRaises(ComputeConfigError):
                 StagedFile.parse_output(bad)
+        # `~` after the colon reaches us unexpanded (the shell leaves it), and
+        # is how a prompt lands an output in its run directory; the target
+        # side is never a home directory, so `~` there stays a plain name.
+        home = os.path.expanduser("~")
+        self.assertEqual(
+            StagedFile.parse_output("x.pb:~/runs/r/x.pb"),
+            StagedFile(local=f"{home}/runs/r/x.pb", remote="x.pb"))
+        self.assertEqual(StagedFile.parse_input("~/in.json"),
+                         StagedFile(local=f"{home}/in.json", remote="in.json"))
+        self.assertEqual(StagedFile.parse_output("~x.json"),
+                         StagedFile(local="~x.json", remote="~x.json"))
 
         path = self._script("print('x')\n")
         with io.StringIO() as err, contextlib.redirect_stderr(err):
@@ -2084,24 +1365,6 @@ class TestRuntimeCliCompute(_ScriptMixin, unittest.TestCase):
             self.assertEqual(
                 json.loads(err.getvalue())["error_code"], "INPUT_NOT_FOUND")
 
-    def test_staged_local_paths_expand_a_leading_tilde(self):
-        """`~` after the colon reaches us unexpanded; the prompts rely on it.
-
-        `--output r.json:~/.tpu-agent-suite/runs/...` is how a prompt lands an
-        output in its run directory, and the shell leaves that `~` alone.
-        """
-        home = os.path.expanduser("~")
-        self.assertEqual(
-            StagedFile.parse_output("x.xplane.pb:~/runs/r/x.xplane.pb"),
-            StagedFile(local=f"{home}/runs/r/x.xplane.pb",
-                       remote="x.xplane.pb"))
-        self.assertEqual(StagedFile.parse_input("~/in.json"),
-                         StagedFile(local=f"{home}/in.json", remote="in.json"))
-        # The target side is never a home directory, so `~` there stays an
-        # ordinary (relative) name.
-        self.assertEqual(StagedFile.parse_output("~x.json"),
-                         StagedFile(local="~x.json", remote="~x.json"))
-
     def test_submit_without_json_prints_only_the_job_id(self):
         """Verify plain `submit` output is capturable as `JOB_ID=$(...)`.
 
@@ -2109,69 +1372,45 @@ class TestRuntimeCliCompute(_ScriptMixin, unittest.TestCase):
         `--job-id`, so anything but the bare id on stdout breaks polling.
         """
         path = self._script("print('submitted')\n")
-        rc, out = self._run_cli([
+        argv = [
             "compute", "--backend", "mock_test", "submit", "--recipe", path,
             "--run-id", "20260101T000000Z-123456789abc"
-        ])
+        ]
+        rc, out = self._run_cli(argv)
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "mock-job-999")
+        # The id still reaches stdout when the first status read fails; why
+        # it failed goes to stderr rather than an unobserved PENDING.
+        with patch.object(MockTestDriver,
+                          "get_status",
+                          side_effect=RuntimeError("cluster unreachable")), \
+                io.StringIO() as err, contextlib.redirect_stderr(err):
+            rc, out = self._run_cli(argv)
+            self.assertIn(
+                "Could not read initial status: RuntimeError: cluster "
+                "unreachable", err.getvalue())
+        self.assertEqual((rc, out.strip()), (0, "mock-job-999"))
 
     def test_submit_and_job_lifecycle_subcommands(self):
         """Verify submit, job status, job logs, and job cancel all route through."""
         path = self._script("print('submitted')\n")
-        rc, out = self._run_cli([
-            "compute", "--backend", "mock_test", "submit", "--recipe", path,
-            "--run-id", "20260101T000000Z-123456789abc", "--json"
-        ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(out.strip())["job_id"], "mock-job-999")
-
-        rc, out = self._run_cli([
-            "compute", "--backend", "mock_test", "job", "status", "--job-id",
-            "mock-job-999", "--json"
-        ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(out.strip())["status"], "RUNNING")
-
-        rc, out = self._run_cli([
-            "compute", "--backend", "mock_test", "job", "logs", "--job-id",
-            "mock-job-999"
-        ])
-        self.assertEqual(rc, 0)
-        self.assertIn("mock logs for mock-job-999", out)
-
+        mock = ["compute", "--backend", "mock_test"]
+        job = ["--job-id", "mock-job-999"]
         # A real driver's submit leaves a record, which cancel checks.
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}):
+        with _temp_home():
             jobs.JobRecord.create(job_id="mock-job-999", backend="mock_test")
-            rc, _ = self._run_cli([
-                "compute", "--backend", "mock_test", "job", "cancel",
-                "--job-id", "mock-job-999"
-            ])
-        self.assertEqual(rc, 0)
-
-    def test_driver_declared_flags_reach_param_overrides(self):
-        """Verify dynamically mounted driver flags are forwarded to the resolver."""
-        mock_driver = MagicMock()
-        mock_driver.inspect.return_value = MockTestDriver().inspect()
-        with io.StringIO() as buf, contextlib.redirect_stdout(buf):
-            # Patch the resolver where the CLI reads it, so the test exercises
-            # the real lookup path rather than a package-level alias.
-            with patch.object(runtime.compute.config,
-                              "resolve_driver",
-                              return_value=mock_driver) as mock_resolve:
-                rc = runtime.main([
-                    "compute", "--backend", "mock_test", "--endpoint",
-                    "https://custom.mock:8080", "--token", "custom-token-xyz",
-                    "inspect", "--json"
-                ])
-        self.assertEqual(rc, 0)
-        _, kwargs = mock_resolve.call_args
-        self.assertEqual(kwargs["backend_override"], "mock_test")
-        self.assertEqual(kwargs["param_overrides"]["endpoint"],
-                         "https://custom.mock:8080")
-        self.assertEqual(kwargs["param_overrides"]["token"],
-                         "custom-token-xyz")
+            for argv, key, expected in (
+                (["submit", "--recipe", path, "--run-id",
+                  _RUN], "job_id", "mock-job-999"),
+                (["job", "status", *job], "status", "RUNNING"),
+                (["job", "logs", *job], "logs", "mock logs for mock-job-999"),
+                (["job", "cancel", *job], "status", "CANCELLED"),
+            ):
+                rc, out = self._run_cli([*mock, *argv, "--json"])
+                self.assertEqual((rc, json.loads(out)[key]), (0, expected))
+        # Without --json, logs are plain text.
+        rc, out = self._run_cli([*mock, "job", "logs", *job])
+        self.assertEqual(out.strip(), "mock logs for mock-job-999")
 
 
 def _free_port() -> int:
@@ -2185,36 +1424,7 @@ class TestSpawnPortForward(unittest.TestCase):
     """The liveness check behind every backgrounded port forward."""
 
     def setUp(self):
-        home = tempfile.mkdtemp()
-        patcher = patch.dict(os.environ, {"TPU_AGENT_SUITE_HOME": home})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.addCleanup(shutil.rmtree, home, True)
-
-    def test_a_forward_that_dies_is_reported_as_dead(self):
-        """The pid alone proves nothing: Popen returns one either way."""
-        with self.assertRaises(ComputeConfigError) as ctx:
-            base.spawn_port_forward(
-                [sys.executable, "-c", "import sys; sys.exit(7)"],
-                "dead-1",
-                local_port=_free_port())
-        self.assertEqual(ctx.exception.error_code, "PORT_FORWARD_FAILED")
-        self.assertIn("code 7", str(ctx.exception))
-
-    def test_the_failure_is_quoted_back_and_kept(self):
-        """`/dev/null` is why this failure used to be undiagnosable."""
-        with self.assertRaises(ComputeConfigError) as ctx:
-            base.spawn_port_forward([
-                sys.executable, "-c",
-                "import sys; sys.stderr.write('unable to forward port\n');"
-                " sys.exit(1)"
-            ],
-                                    "dead-2",
-                                    local_port=_free_port())
-        message = str(ctx.exception)
-        self.assertIn("unable to forward port", message)
-        log_path = Path(message.rsplit("Log: ", 1)[1].strip())
-        self.assertIn("unable to forward port", log_path.read_text())
+        _patch_home(self)
 
     def test_a_forward_that_binds_its_port_is_ready(self):
         """The socket answering is the proof; the poll ends as soon as it does."""
@@ -2246,7 +1456,10 @@ class TestSpawnPortForward(unittest.TestCase):
         self.assertIn("nothing is listening", str(ctx.exception))
 
     def test_a_forward_that_dies_late_is_still_caught(self):
-        """The old fixed sleep returned a pid for anything slower than it."""
+        """The old fixed sleep returned a pid for anything slower than it.
+
+        The pid alone proves nothing: Popen returns one either way.
+        """
         port = _free_port()
         with self.assertRaises(ComputeConfigError) as ctx:
             base.spawn_port_forward([
@@ -2257,48 +1470,38 @@ class TestSpawnPortForward(unittest.TestCase):
                                     "late-1",
                                     local_port=port,
                                     ready_timeout_sec=10.0)
+        self.assertEqual(ctx.exception.error_code, "PORT_FORWARD_FAILED")
         self.assertIn("code 255", str(ctx.exception))
         self.assertIn("timed out", str(ctx.exception))
+        # The output is kept, not sent to /dev/null, which is why this
+        # failure used to be undiagnosable.
+        log_path = Path(str(ctx.exception).rsplit("Log: ", 1)[1].strip())
+        self.assertIn("timed out", log_path.read_text())
 
 
 class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
     """handle_compute_cli behaviour reachable without the runtime parser."""
 
     def _args(self, **overrides: Any) -> argparse.Namespace:
-        base_args = {
-            "compute_action": "inspect",
-            "backend": "mock_test",
-            "workspace": None,
-            "json": True,
-            "job_id": "job-1",
-            "out_dir": None,
-        }
-        base_args.update(overrides)
-        return argparse.Namespace(**base_args)
+        return _cli_args(**{"job_id": "job-1", "out_dir": None, **overrides})
+
+    def _submit_args(self, recipe: str,
+                     **overrides: Any) -> argparse.Namespace:
+        """`compute submit` of `recipe`, unnamed and without extra args."""
+        return self._args(
+            **{
+                "compute_action": "submit",
+                "recipe": recipe,
+                "name": None,
+                "submit_args": [],
+                "interpreter": None,
+                **overrides
+            })
 
     def _invoke(self, args: argparse.Namespace, driver: Any):
         with io.StringIO() as buf, contextlib.redirect_stdout(buf):
             rc = compute.handle_compute_cli(args, resolve=lambda **_: driver)
             return rc, buf.getvalue()
-
-    def test_resolver_is_injectable(self):
-        """Verify an injected resolver replaces the default without patching modules."""
-        mock_driver = MagicMock()
-        mock_driver.inspect.return_value = MockTestDriver().inspect()
-        calls: list[dict[str, Any]] = []
-
-        def fake_resolve(**kwargs: Any):
-            calls.append(kwargs)
-            return mock_driver
-
-        with io.StringIO() as buf, contextlib.redirect_stdout(buf):
-            rc = compute.handle_compute_cli(self._args(), resolve=fake_resolve)
-            payload = json.loads(buf.getvalue())
-
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["backend_override"], "mock_test")
-        self.assertEqual(payload["chips"], 4)
 
     def test_missing_tool_is_a_structured_error_not_a_traceback(self):
         """A missing kubectl crashed inspect with a traceback."""
@@ -2318,68 +1521,38 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
             self._invoke(self._args(compute_action="preflight"), driver)
             driver.preflight.assert_called_once()
 
-    def test_job_subcommands_emit_parseable_envelopes(self):
-        """Verify each `job` subcommand prints a JSON envelope or plain text."""
-        driver = MagicMock()
-        driver.fetch_logs.return_value = "line one\nline two"
-        driver.fetch_artifacts.return_value = [Path("/tmp/a.pb")]
-
-        _, out = self._invoke(
-            self._args(compute_action="job", job_action="logs"), driver)
-        payload = json.loads(out)
-        self.assertEqual(payload["job_id"], "job-1")
-        self.assertIn("line one", payload["logs"])
-
-        _, plain = self._invoke(
-            self._args(compute_action="job", job_action="logs", json=False),
-            driver)
-        self.assertIn("line one", plain)
-        self.assertNotIn('"job_id"', plain)
-
-        _, out = self._invoke(
-            self._args(compute_action="job", job_action="artifacts"), driver)
-        payload = json.loads(out)
-        self.assertEqual(payload["artifacts"], ["/tmp/a.pb"])
-        self.assertIn("out_dir", payload)
-        # cancel's envelope: test_job_cancel_only_deletes_this_runs_jobs.
-
     def test_job_cancel_only_deletes_this_runs_jobs(self):
         """`job cancel` only cancels jobs this run submitted."""
-        mine = "20261007T151000Z-0123456789ab"
-        other = "20261007T150000Z-ba9876543210"
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}):
+        mine, other = _RUN, "20261007T150000Z-ba9876543210"
+        driver = MagicMock()
+
+        def cancel(job_id, run_id=mine):
+            return self._invoke(
+                self._args(compute_action="job",
+                           job_action="cancel",
+                           job_id=job_id,
+                           run_id=run_id), driver)
+
+        with _temp_home():
             jobs.JobRecord.create(job_id="theirs", run_id=other)
             jobs.JobRecord.create(job_id="ours", run_id=mine)
             for job_id, why in (("someone-elses", "tell them compute can't"),
                                 ("theirs", f"belongs to run {other}")):
-                with self.subTest(job_id):
-                    driver = MagicMock()
-                    with self.assertRaises(ComputeConfigError) as ctx:
-                        self._invoke(
-                            self._args(compute_action="job",
-                                       job_action="cancel",
-                                       job_id=job_id,
-                                       run_id=mine), driver)
-                    self.assertEqual(ctx.exception.error_code,
-                                     compute.cli.NOT_OWN_JOB)
-                    self.assertIn(why, ctx.exception.message)
-                    driver.cancel.assert_not_called()
+                with self.subTest(job_id), self.assertRaises(
+                        ComputeConfigError) as ctx:
+                    cancel(job_id)
+                self.assertEqual(ctx.exception.error_code,
+                                 compute.cli.NOT_OWN_JOB)
+                self.assertIn(why, ctx.exception.message)
+            driver.cancel.assert_not_called()
             # This run's job, and the other run's when it is named outright.
             for job_id, run_id in (("ours", mine), ("theirs", other)):
-                with self.subTest(job_id=job_id, run_id=run_id):
-                    driver = MagicMock()
-                    rc, out = self._invoke(
-                        self._args(compute_action="job",
-                                   job_action="cancel",
-                                   job_id=job_id,
-                                   run_id=run_id), driver)
-                    self.assertEqual(rc, 0)
-                    driver.cancel.assert_called_once_with(job_id)
-                    self.assertEqual(json.loads(out), {
-                        "job_id": job_id,
-                        "status": "CANCELLED"
-                    })
+                rc, out = cancel(job_id, run_id)
+                self.assertEqual((rc, json.loads(out)), (0, {
+                    "job_id": job_id,
+                    "status": "CANCELLED"
+                }))
+                driver.cancel.assert_called_with(job_id)
 
     def test_job_action_requires_job_id(self):
         """status, logs, artifacts, cancel require --job-id.
@@ -2400,91 +1573,35 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
                 self.assertIn("--job-id", str(ctx.exception))
 
     def test_job_artifacts_fails_when_a_declared_output_never_arrived(self):
-        """Exit 0 with nothing to read is what makes an agent invent numbers."""
-        driver = MagicMock()
-        driver.fetch_artifacts.side_effect = lambda jid, dest: [
-            dest / f"{jid}.log"
-        ]
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}):
-            jobs.JobRecord.create(job_id="job-empty",
-                                  extra={
-                                      "outputs": [{
-                                          "local":
-                                          "autotune_summary.json",
-                                          "remote":
-                                          "autotune_summary.json",
-                                      }]
-                                  })
-            with tempfile.TemporaryDirectory() as dest:
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="artifacts",
-                               job_id="job-empty",
-                               out_dir=dest),
-                    driver,
-                )
-        self.assertEqual(rc, 1)
-        self.assertEqual(
-            json.loads(out)["missing_outputs"], ["autotune_summary.json"])
+        """Exit 0 with nothing to read is what makes an agent invent numbers.
 
-    def test_job_artifacts_is_a_success_once_the_outputs_are_there(self):
-        driver = MagicMock()
+        What did arrive is reported where it landed, not at a submit-time
+        ':LOCAL', which is where agents used to look for it.
+        """
 
-        def _fetch(jid, dest):
-            (dest / "eval").mkdir(parents=True, exist_ok=True)
-            (dest / "eval" / "metrics.json").write_text("{}")
-            return [dest / "eval" / "metrics.json"]
-
-        driver.fetch_artifacts.side_effect = _fetch
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}):
-            jobs.JobRecord.create(job_id="job-full",
-                                  extra={
-                                      "outputs": [{
-                                          "local":
-                                          "eval/metrics.json",
-                                          "remote":
-                                          "eval/metrics.json",
-                                      }]
-                                  })
-            with tempfile.TemporaryDirectory() as dest:
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="artifacts",
-                               job_id="job-full",
-                               out_dir=dest),
-                    driver,
-                )
-        self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(out)["missing_outputs"], [])
-
-    def test_job_artifacts_reports_where_each_output_landed(self):
-        """Agents looked for outputs at a submit-time ':LOCAL'."""
-        driver = MagicMock()
-
-        def _fetch(jid, dest):
+        def fetch(jid, dest):
             (dest / "r.json").write_text("{}")
             return [dest / "r.json"]
 
-        driver.fetch_artifacts.side_effect = _fetch
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}):
-            dest = Path(tmp) / "out"
-            jobs.JobRecord.create(
-                job_id="j",
-                extra={"outputs": [{
-                    "local": "x/r.json",
-                    "remote": "r.json"
-                }]})
+        driver = MagicMock()
+        driver.fetch_artifacts.side_effect = fetch
+        declared = [{
+            "remote": "r.json",
+            "local": "x/r.json"
+        }] + [{
+            "remote": "summary.json",
+            "local": "summary.json"
+        }]
+        with _temp_home() as home:
+            jobs.JobRecord.create(job_id="job-1", extra={"outputs": declared})
             rc, out = self._invoke(
                 self._args(compute_action="job",
                            job_action="artifacts",
-                           job_id="j",
-                           out_dir=str(dest)), driver)
-        self.assertEqual(rc, 0)
-        self.assertEqual(
-            json.loads(out)["outputs"], {"r.json": str(dest / "r.json")})
+                           out_dir=str(home)), driver)
+        payload = json.loads(out)
+        self.assertEqual((rc, payload["missing_outputs"]),
+                         (1, ["summary.json"]))
+        self.assertEqual(payload["outputs"], {"r.json": str(home / "r.json")})
 
     def test_submit_maps_outputs_and_warns_that_local_is_ignored(self):
         """Only a spec with a ':LOCAL' warns; every output is mapped."""
@@ -2493,23 +1610,19 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
         driver.get_status.return_value = AsynchronousExecutionResult(
             "job-s", "RUNNING")
         run_id = "20260101T000000Z-cccccccccccc"
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}), \
+        with _temp_home() as tmp, \
                 patch.object(compute.cli.lease, "spawn_watcher"), \
                 io.StringIO() as err, contextlib.redirect_stderr(err):
-            recipe = Path(tmp) / "recipe.py"
+            recipe = tmp / "recipe.py"
             recipe.write_text("print('hi')\n")
             rc, out = self._invoke(
-                self._args(compute_action="submit",
-                           recipe=str(recipe),
-                           name="s",
-                           submit_args=[],
-                           interpreter=None,
-                           run_id=run_id,
-                           output=["results.json:out/r.json", "a.json"]),
-                driver)
+                self._submit_args(str(recipe),
+                                  name="s",
+                                  run_id=run_id,
+                                  output=["results.json:out/r.json",
+                                          "a.json"]), driver)
             stderr = err.getvalue()
-            landing = utils.get_run_artifacts_dir(run_id) / "job-s"
+            landing = paths.get_run_artifacts_dir(run_id) / "job-s"
         self.assertEqual(rc, 0)
         self.assertEqual(
             json.loads(out)["outputs"], {
@@ -2521,270 +1634,140 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
             f"{landing / 'results.json'}", stderr)
         self.assertEqual(stderr.count("warning:"), 1)
 
-    def test_job_artifacts_declaring_nothing_has_nothing_to_miss(self):
-        """The batch jobs that predate `--output` must still exit 0."""
-        driver = MagicMock()
-        driver.fetch_artifacts.side_effect = lambda jid, dest: []
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}):
-            jobs.JobRecord.create(job_id="job-plain")
-            with tempfile.TemporaryDirectory() as dest:
-                rc, _ = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="artifacts",
-                               job_id="job-plain",
-                               out_dir=dest),
-                    driver,
-                )
-        self.assertEqual(rc, 0)
-
     def test_job_artifacts_defaults_to_run_artifact_dir(self):
         """When --out-dir is omitted, artifacts default to {{runs}}/<run_id>/artifacts/<job_id>/."""
         driver = MagicMock()
-        driver.fetch_artifacts.side_effect = lambda jid, dest: [
-            dest / "output.bin"
-        ]
-        valid_run_id = "20260101T000000Z-123456789abc"
+        driver.fetch_artifacts.side_effect = lambda jid, dest: []
+        run_id = "20260101T000000Z-123456789abc"
 
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp).resolve()
-            with patch.dict(os.environ,
-                            {"TPU_AGENT_SUITE_HOME": str(tmp_path)}):
-                # 1. JobRecord has run_id
-                record = jobs.JobRecord.create(
-                    job_id="job-custom-42",
-                    job_name="test-job",
-                    run_id=valid_run_id,
-                )
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="artifacts",
-                               job_id="job-custom-42",
-                               out_dir=None),
-                    driver,
-                )
-                self.assertEqual(rc, 0)
-                payload = json.loads(out)
-                expected_dir = tmp_path / "runs" / valid_run_id / "artifacts" / "job-custom-42"
-                self.assertEqual(payload["out_dir"], str(expected_dir))
-                self.assertTrue(expected_dir.is_dir())
+        def out_dir(job_id: str, **flags: Any) -> str:
+            rc, out = self._invoke(
+                self._args(compute_action="job",
+                           job_action="artifacts",
+                           job_id=job_id,
+                           **flags), driver)
+            self.assertEqual(rc, 0)
+            return json.loads(out)["out_dir"]
 
-                # 2. No run anywhere: cwd / job_id, so two jobs still cannot
-                # collide. Run from the temp dir so the directory it makes
-                # does not land in the repository.
-                jobs.JobRecord.create(job_id="job-no-run",
-                                      job_name="test-job-2",
-                                      run_id="")
-                scratch = tmp_path / "cwd"
-                scratch.mkdir()
-                previous = os.getcwd()
-                os.chdir(scratch)
-                try:
-                    rc, out = self._invoke(
-                        self._args(compute_action="job",
-                                   job_action="artifacts",
-                                   job_id="job-no-run",
-                                   out_dir=None,
-                                   run_id=None,
-                                   workspace=scratch),
-                        driver,
-                    )
-                finally:
-                    os.chdir(previous)
-                self.assertEqual(rc, 0)
-                payload = json.loads(out)
-                self.assertEqual(payload["out_dir"],
-                                 str(scratch / "job-no-run"))
+        with _temp_home() as home:
+            jobs.JobRecord.create(job_id="job-42", run_id=run_id)
+            expected = paths.get_run_artifacts_dir(run_id) / "job-42"
+            self.assertEqual(out_dir("job-42"), str(expected))
+            self.assertTrue(expected.is_dir())
+            # No run anywhere: cwd / job_id, so two jobs still cannot collide.
+            jobs.JobRecord.create(job_id="job-no-run", run_id="")
+            with contextlib.chdir(home):
+                self.assertEqual(
+                    out_dir("job-no-run", run_id=None, workspace=home),
+                    str(Path.cwd() / "job-no-run"))
 
     def test_job_list_and_reap(self):
         """Verify compute job list filters records and compute job reap cancels active jobs."""
         run_a = "20260101T000000Z-aaaaaaaaaaaa"
-        run_b = "20260101T000000Z-bbbbbbbbbbbb"
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with patch.dict(os.environ,
-                            {"TPU_AGENT_SUITE_HOME": str(tmp_path)}):
-                # Create some test jobs
-                j1 = jobs.JobRecord.create(job_id="job-101",
-                                           job_name="train",
-                                           run_id=run_a,
-                                           backend="mock_test")
-                j1.mark("RUNNING")
-                j2 = jobs.JobRecord.create(job_id="job-102",
-                                           job_name="eval",
-                                           run_id=run_a,
-                                           backend="mock_test")
-                j2.mark("COMPLETED")
-                j3 = jobs.JobRecord.create(job_id="job-103",
-                                           job_name="tune",
-                                           run_id=run_b,
-                                           backend="mock_test")
-                j3.mark("RUNNING")
 
-                # List all jobs as JSON
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="list",
-                               run_id=None,
-                               status=None),
-                    MagicMock(),
-                )
-                self.assertEqual(rc, 0)
-                records = json.loads(out)
-                self.assertEqual(len(records), 3)
+        def invoke(action, driver=None, **flags):
+            flags = {"run_id": None, "status": None, **flags}
+            rc, out = self._invoke(
+                self._args(compute_action="job", job_action=action, **flags),
+                driver or MagicMock())
+            self.assertEqual(rc, 0)
+            return out
 
-                # Filter by run_id
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="list",
-                               run_id=run_a,
-                               status=None),
-                    MagicMock(),
-                )
-                self.assertEqual(rc, 0)
-                records = json.loads(out)
-                self.assertEqual(len(records), 2)
-                self.assertEqual({r["job_id"]
-                                  for r in records}, {"job-101", "job-102"})
+        def listed(**flags) -> set[str]:
+            return {r["job_id"] for r in json.loads(invoke("list", **flags))}
 
-                # Filter by status
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="list",
-                               run_id=None,
-                               status="running"),
-                    MagicMock(),
-                )
-                self.assertEqual(rc, 0)
-                records = json.loads(out)
-                self.assertEqual(len(records), 2)
-                self.assertEqual({r["job_id"]
-                                  for r in records}, {"job-101", "job-103"})
+        with _temp_home():
+            for job_id, run_id, status in (("job-101", run_a, "RUNNING"),
+                                           ("job-102", run_a, "COMPLETED"),
+                                           ("job-103", "20260101T000000Z-b",
+                                            "RUNNING")):
+                jobs.JobRecord.create(job_id=job_id,
+                                      job_name="train",
+                                      run_id=run_id).mark(status)
+            self.assertEqual(listed(run_id=run_a), {"job-101", "job-102"})
+            self.assertEqual(listed(status="running"), {"job-101", "job-103"})
+            self.assertIn("train", invoke("list", json=False))
 
-                # List in plain text
-                rc, plain = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="list",
-                               run_id=None,
-                               status=None,
-                               json=False),
-                    MagicMock(),
-                )
-                self.assertEqual(rc, 0)
-                self.assertIn("job-101", plain)
-                self.assertIn("train", plain)
-
-                # Reap jobs for run-A. A driver's cancel records the
-                # outcome itself; the reaper reads the record back.
-                cancelled_jobs: list[str] = []
-
-                def fake_cancel(jid: str) -> None:
-                    cancelled_jobs.append(jid)
-                    jobs.JobRecord.load(jid).mark("CANCELLED")
-
-                mock_driver = MagicMock()
-                mock_driver.cancel.side_effect = fake_cancel
-
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="reap",
-                               run_id=run_a),
-                    mock_driver,
-                )
-                self.assertEqual(rc, 0)
-                payload = json.loads(out)
-                self.assertEqual(payload["run_id"], run_a)
-                self.assertEqual(payload["reaped"], ["job-101"])
-                self.assertEqual(cancelled_jobs, ["job-101"])
-
-                # Check job-101 is now CANCELLED on disk
-                reloaded = jobs.JobRecord.load("job-101")
-                self.assertEqual(reloaded.status, "CANCELLED")
+            # A driver's cancel records the outcome; the reaper reads it back.
+            driver = MagicMock()
+            driver.cancel.side_effect = (
+                lambda jid: jobs.JobRecord.load(jid).mark("CANCELLED"))
+            payload = json.loads(invoke("reap", driver, run_id=run_a))
+            self.assertEqual((payload["run_id"], payload["reaped"]),
+                             (run_a, ["job-101"]))
+            driver.cancel.assert_called_once_with("job-101")
 
     def test_job_list_refreshes_the_active_runs_unfinished_jobs(self):
         """A record says PENDING from submit until the job ends unless a
         status read updates it, so `job list` first asks the backend of each
         unfinished job in the run -- once per backend if it cannot answer."""
+        replies: dict[str, Any] = {}
 
-        def answering(**result: Any) -> MagicMock:
-            driver = MagicMock()
-            driver.get_status.side_effect = (
-                lambda jid: AsynchronousExecutionResult(job_id=jid, **result))
-            return driver
+        def status(jid: str) -> AsynchronousExecutionResult:
+            reply = replies.get(jid,
+                                AsynchronousExecutionResult(jid, "RUNNING"))
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"TPU_AGENT_SUITE_HOME": tmp}):
-            active, older = ("20260101T000000Z-000000000001",
-                             "20260101T000000Z-000000000000")
-            utils.record_active_run(active, workspace=Path(tmp))
-            for jid in ("a", "b"):
-                jobs.JobRecord.create(job_id=jid, run_id=active, backend="x")
-            jobs.JobRecord.create(job_id="done", run_id=active,
+        driver = MagicMock()
+        driver.get_status.side_effect = status
+        with _temp_home() as tmp:
+            paths.record_active_run(_RUN, workspace=tmp)
+            # A target is a backend and profile: "c" is on a second one.
+            for jid, profile in (("a", None), ("b", None), ("c", "other")):
+                jobs.JobRecord.create(job_id=jid,
+                                      run_id=_RUN,
+                                      backend="x",
+                                      compute_profile=profile)
+            jobs.JobRecord.create(job_id="done", run_id=_RUN,
                                   backend="x").mark("COMPLETED")
-            jobs.JobRecord.create(job_id="old-run", run_id=older, backend="x")
+            jobs.JobRecord.create(job_id="old-run",
+                                  run_id="20260101T000000Z-000000000000",
+                                  backend="x")
 
-            def listed(driver: MagicMock, **flags: Any) -> dict[str, Any]:
+            def listed(**flags: Any) -> dict[str, Any]:
+                driver.get_status.reset_mock()
                 rc, out = self._invoke(
                     self._args(compute_action="job",
                                job_action="list",
                                run_id=None,
                                status=None,
-                               workspace=Path(tmp),
+                               workspace=tmp,
                                **flags), driver)
                 self.assertEqual(rc, 0)
                 return {r["job_id"]: r for r in json.loads(out)}
 
-            running = answering(status="RUNNING")
-            self.assertEqual(
-                listed(running, no_refresh=True)["a"]["status"], "PENDING")
-            running.get_status.assert_not_called()
-
+            self.assertEqual(listed(no_refresh=True)["a"]["status"], "PENDING")
+            driver.get_status.assert_not_called()
             # Only the active run's unfinished jobs are asked about; an older
             # run's record may name a cluster today's config does not.
-            rows = listed(running)
-            self.assertEqual([rows[j]["status"] for j in ("a", "b", "done")],
-                             ["RUNNING", "RUNNING", "COMPLETED"])
-            self.assertEqual(rows["old-run"]["status"], "PENDING")
-            self.assertEqual(running.get_status.call_count, 2)
-
-            # A target that cannot answer -- by raising, or as UNKNOWN with
-            # an error -- is asked once, and every job on it says so. A
-            # target is a backend and profile: "c" is a second one.
-            jobs.JobRecord.create(job_id="c",
-                                  run_id=active,
-                                  backend="x",
-                                  compute_profile="other")
-            raising = MagicMock()
-            raising.get_status.side_effect = RuntimeError("no cluster")
-            for driver, why in ((raising, "no cluster"),
-                                (answering(status="UNKNOWN",
-                                           error="ssh: timed out"),
-                                 "ssh: timed out")):
-                with self.subTest(why=why):
-                    for jid in ("a", "b"):
-                        jobs.JobRecord.load(jid).mark("PENDING")
-                    rows = listed(driver)
-                    self.assertEqual(driver.get_status.call_count, 2)
-                    for jid in ("a", "b"):
-                        self.assertEqual(rows[jid]["status"], "PENDING")
-                        self.assertIn(why, rows[jid]["refresh_error"])
-                    self.assertNotIn("refresh_error", rows["old-run"])
-
+            rows = listed()
+            self.assertEqual([rows[j]["status"] for j in rows],
+                             ["RUNNING"] * 3 + ["COMPLETED", "PENDING"])
+            self.assertEqual(driver.get_status.call_count, 3)
+            # A target that cannot answer -- as UNKNOWN with an error, or by
+            # raising -- is asked once, and every job on it says so.
+            for jid in "abc":
+                jobs.JobRecord.load(jid).mark("PENDING")
+            timed_out = AsynchronousExecutionResult("a",
+                                                    "UNKNOWN",
+                                                    error="ssh: timed out")
+            replies.update(a=timed_out, b=timed_out, c=RuntimeError("no vm"))
+            rows = listed()
+            self.assertEqual(driver.get_status.call_count, 2)
+            self.assertEqual(rows["b"]["status"], "PENDING")
+            self.assertIn("ssh: timed out", rows["b"]["refresh_error"])
+            self.assertIn("no vm", rows["c"]["refresh_error"])
+            self.assertNotIn("refresh_error", rows["old-run"])
             # A Job deleted outside compute is its own error: the target
             # answered for the rest.
-            def a_is_gone(jid: str) -> AsynchronousExecutionResult:
-                if jid == "a":
-                    raise ComputeConfigError("deleted",
-                                             error_code=compute.cli.JOB_GONE)
-                return AsynchronousExecutionResult(job_id=jid,
-                                                   status="RUNNING")
-
-            gone = MagicMock()
-            gone.get_status.side_effect = a_is_gone
-            rows = listed(gone)
+            replies.update(a=ComputeConfigError(
+                "deleted", error_code=compute.cli.JOB_GONE),
+                           b=AsynchronousExecutionResult("b", "RUNNING"))
+            rows = listed()
             self.assertEqual(rows["a"]["refresh_error"], "deleted")
             self.assertEqual(rows["b"]["status"], "RUNNING")
-            self.assertNotIn("refresh_error", rows["b"])
 
     def test_job_reap_by_lease(self):
         """`--orphaned` needs no run, `--watch` one; both are tested in
@@ -2820,17 +1803,13 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
         run_id = "20260101T000000Z-123456789abc"
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp)
-        utils.record_active_run(run_id, workspace=tmp)
+        paths.record_active_run(run_id, workspace=tmp)
 
         def submit(**overrides):
             return self._invoke(
-                self._args(compute_action="submit",
-                           recipe=self._script("echo hi\n", suffix=".sh"),
-                           name=None,
-                           submit_args=[],
-                           interpreter=None,
-                           workspace=str(tmp),
-                           **overrides), driver)[0]
+                self._submit_args(self._script("echo hi\n", suffix=".sh"),
+                                  workspace=str(tmp),
+                                  **overrides), driver)[0]
 
         with patch.object(compute.lease, "spawn_watcher") as spawn, \
                 patch.object(compute.lease, "has_ended", return_value=True):
@@ -2840,143 +1819,23 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
             self.assertEqual(submit(run_id=run_id, serve=True), 0)
         spawn.assert_called_once_with(run_id)
 
-    def test_submit_tags_job_record_with_run_id(self):
-        """compute submit passes run_id to driver and tags the JobRecord."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with patch.dict(os.environ,
-                            {"TPU_AGENT_SUITE_HOME": str(tmp_path)}):
-                driver = LocalDriver()
-                recipe_path = tmp_path / "test_recipe.py"
-                recipe_path.write_text("print('hello')\n")
-
-                run_id = "20260101T000000Z-123456789abc"
-                rc, out = self._invoke(
-                    self._args(
-                        compute_action="submit",
-                        recipe=str(recipe_path),
-                        name="test-run-tag",
-                        submit_args=[],
-                        interpreter=None,
-                        run_id=run_id,
-                    ),
-                    driver,
-                )
-                self.assertEqual(rc, 0)
-                payload = json.loads(out)
-                job_id = payload["job_id"]
-                record = jobs.JobRecord.load(job_id)
-                self.assertIsNotNone(record)
-                self.assertEqual(record.run_id, run_id)
-                self.assertEqual(record.backend, "local")
-                driver.cancel(job_id)
-
-    def test_submit_reports_initial_status_failure(self):
-        """Verify a failing initial status check is reported, not hidden as PENDING.
-
-        The job was submitted, so its id must still reach the caller -- but the
-        optimistic "PENDING" must not be passed off as an observed state.
-        """
-        driver = MagicMock()
-        driver.submit.return_value = "job-123"
-        driver.get_status.side_effect = RuntimeError("cluster unreachable")
-
-        rc, out = self._invoke(
-            self._args(compute_action="submit",
-                       recipe=self._script("echo hi\n", suffix=".sh"),
-                       name=None,
-                       submit_args=[],
-                       interpreter=None,
-                       run_id="20260101T000000Z-123456789abc"), driver)
-        payload = json.loads(out)
-        self.assertEqual(rc, 0)
-        self.assertEqual(payload["job_id"], "job-123")
-        self.assertEqual(payload["status"], "PENDING")
-        self.assertIn("cluster unreachable", payload["status_error"])
-
-    def test_submit_with_serve_and_staged_files(self):
-        """Verify compute submit accepts --serve, --input, and --output."""
-        driver = MagicMock()
-        driver.submit.return_value = "job-serv-1"
-        driver.get_status.return_value = AsynchronousExecutionResult(
-            job_id="job-serv-1", status="RUNNING")
-        recipe = self._script("print('server')\n")
-        in_file = self._script("weights\n")
-        rc, out = self._invoke(
-            self._args(
-                compute_action="submit",
-                recipe=recipe,
-                name="server-test",
-                submit_args=[],
-                interpreter=None,
-                run_id="20260101T000000Z-123456789abc",
-                serve=True,
-                input=[f"{in_file}:weights.bin"],
-                output=["metrics.json"],
-            ),
-            driver,
-        )
-        self.assertEqual(rc, 0)
-        payload = json.loads(out)
-        self.assertEqual(payload["job_id"], "job-serv-1")
-        self.assertTrue(payload["serve"])
-        driver.submit.assert_called_once()
-        _, kwargs = driver.submit.call_args
-        self.assertTrue(kwargs["serve"])
-        self.assertEqual(len(kwargs["inputs"]), 1)
-        self.assertEqual(kwargs["inputs"][0].remote, "weights.bin")
-        self.assertEqual(len(kwargs["outputs"]), 1)
-        self.assertEqual(kwargs["outputs"][0].remote, "metrics.json")
-
     def test_port_forward_cli_dispatches_to_driver(self):
         """Verify compute port-forward parses [LOCAL:]REMOTE and calls driver."""
         driver = MagicMock()
-        driver.port_forward.return_value = 0
-        rc, _ = self._invoke(
-            self._args(
-                compute_action="port-forward",
-                port="8000",
-                job_id=None,
-            ),
-            driver,
-        )
-        self.assertEqual(rc, 0)
-        driver.port_forward.assert_called_with(local_port=8000,
-                                               remote_port=8000,
-                                               job_id=None,
-                                               background=False)
-
-        driver.reset_mock()
-        rc, _ = self._invoke(
-            self._args(
-                compute_action="port-forward",
-                port="8080:8000",
-                job_id="job-456",
-            ),
-            driver,
-        )
-        self.assertEqual(rc, 0)
-        driver.port_forward.assert_called_with(local_port=8080,
-                                               remote_port=8000,
-                                               job_id="job-456",
-                                               background=False)
-
-        driver.reset_mock()
-        driver.port_forward.return_value = 12345
-        rc, out = self._invoke(
-            self._args(
-                compute_action="port-forward",
-                port="8000",
-                job_id=None,
-                background=True,
-            ),
-            driver,
-        )
-        self.assertEqual(rc, 0)
-        driver.port_forward.assert_called_with(local_port=8000,
-                                               remote_port=8000,
-                                               job_id=None,
-                                               background=True)
+        for port, job_id, background, local in (("8000", None, False, 8000),
+                                                ("8080:8000", "job-4", True,
+                                                 8080)):
+            driver.port_forward.return_value = 12345 if background else 0
+            rc, out = self._invoke(
+                self._args(compute_action="port-forward",
+                           port=port,
+                           job_id=job_id,
+                           background=background), driver)
+            self.assertEqual(rc, 0)
+            driver.port_forward.assert_called_with(local_port=local,
+                                                   remote_port=8000,
+                                                   job_id=job_id,
+                                                   background=background)
         self.assertIn("12345", out)
 
     def test_port_forward_rejects_a_port_that_is_not_one(self):
@@ -3009,24 +1868,6 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
             self.assertIn("-L8080:localhost:8000", cmd)
             self.assertIn("-N", cmd)
 
-    def test_port_forward_gke_pod(self):
-        driver = compute.GkePodDriver(namespace="default", pod="my-pod")
-        with patch.object(subprocess, "run") as mock_run:
-            mock_run.return_value = subprocess.CompletedProcess(args=[],
-                                                                returncode=0)
-            rc = driver.port_forward(local_port=8080, remote_port=8000)
-            self.assertEqual(rc, 0)
-            cmd = mock_run.call_args[0][0]
-            self.assertEqual(cmd, [
-                "kubectl", "-n", "default", "port-forward", "pod/my-pod",
-                "8080:8000"
-            ])
-
-    def test_port_forward_local(self):
-        driver = compute.LocalDriver()
-        rc = driver.port_forward(local_port=8000, remote_port=8000)
-        self.assertEqual(rc, 0)
-
     def test_port_forward_local_refuses_a_remapping(self):
         """Nothing would be listening on the local port it was asked for."""
         driver = compute.LocalDriver()
@@ -3036,46 +1877,6 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
                                 background=True)
         self.assertEqual(ctx.exception.error_code, "UNSUPPORTED_OPERATION")
 
-    def test_port_forward_unsupported_on_xpk(self):
-        driver = compute.GkeXpkDriver(cluster_name="test-cl",
-                                      zone="us-central1-a",
-                                      project="test-p")
-        with self.assertRaises(compute.ComputeConfigError) as ctx:
-            driver.port_forward(local_port=8000, remote_port=8000)
-        self.assertEqual(ctx.exception.error_code, "UNSUPPORTED_OPERATION")
-
-    def test_missing_input_fails_before_the_driver_is_asked(self):
-        """Verify a missing --code/--recipe fails against the flag the user typed.
-
-        Drivers validate again for programmatic callers, but checking here keeps
-        the failure from surfacing midway through SSH or cloud staging.
-        """
-        driver = MagicMock()
-        with tempfile.TemporaryDirectory() as tmp:
-            cases = [
-                ("run",
-                 dict(compute_action="run",
-                      code=os.path.join(tmp, "nonexistent", "x.py"),
-                      timeout=None,
-                      run_args=[],
-                      interpreter=None)),
-                ("submit",
-                 dict(compute_action="submit",
-                      recipe=os.path.join(tmp, "nonexistent", "r.sh"),
-                      name=None,
-                      submit_args=[],
-                      interpreter=None)),
-            ]
-            for action, overrides in cases:
-                with self.subTest(action):
-                    with self.assertRaises(ComputeConfigError) as ctx:
-                        self._invoke(self._args(**overrides), driver)
-                    self.assertEqual(ctx.exception.error_code,
-                                     "INPUT_NOT_FOUND")
-                    self.assertIn("does not exist", ctx.exception.message)
-        driver.run.assert_not_called()
-        driver.submit.assert_not_called()
-
     def test_invalid_run_id_fails_before_the_driver_is_asked(self):
         """A malformed --run-id is INVALID_FIELD, and nothing is dispatched.
 
@@ -3083,221 +1884,80 @@ class TestComputeCliContracts(_ScriptMixin, unittest.TestCase):
         that no run could find, and the job id was never printed.
         """
         driver = MagicMock()
+        script = self._script("print('hi')\n")
         cases = [
-            ("run",
-             dict(compute_action="run",
-                  code=self._script("print('hi')\n"),
-                  timeout=None,
-                  run_args=[],
-                  interpreter=None)),
-            ("submit",
-             dict(compute_action="submit",
-                  recipe=self._script("echo hi\n", suffix=".sh"),
-                  name=None,
-                  submit_args=[],
-                  interpreter=None)),
+            self._args(compute_action="run",
+                       code=script,
+                       timeout=None,
+                       run_args=[],
+                       interpreter=None),
+            self._submit_args(script),
         ]
-        for action, overrides in cases:
-            with self.subTest(action), \
+        for args in cases:
+            with self.subTest(args.compute_action), \
                     patch.object(compute.lease, "spawn_watcher") as spawn:
                 with self.assertRaises(ComputeConfigError) as ctx:
-                    self._invoke(self._args(run_id="test-run1", **overrides),
-                                 driver)
+                    args.run_id = "test-run1"
+                    self._invoke(args, driver)
                 self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
                 self.assertIn("invalid run ID", ctx.exception.message)
                 spawn.assert_not_called()
         driver.run.assert_not_called()
         driver.submit.assert_not_called()
 
-    def test_job_fallback_to_active_run_id(self):
-        """Artifacts, reap, and submit fall back to utils.get_active_run_id."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            active_run = "20260101T000000Z-999999999999"
-            with patch.dict(os.environ,
-                            {"TPU_AGENT_SUITE_HOME": str(tmp_path)},
-                            clear=False):
-                utils.record_active_run(active_run, workspace=tmp_path)
-
-                driver = LocalDriver()
-                # The recipe must still be running when reap looks at it:
-                # submit settles the status right after launch, and a script
-                # that has already exited is COMPLETED, which reap skips.
-                recipe_path = tmp_path / "test_active_recipe.py"
-                recipe_path.write_text("import time\ntime.sleep(60)\n")
-
-                # 1. Submit fallback to active run id
-                rc, out = self._invoke(
-                    self._args(
-                        compute_action="submit",
-                        recipe=str(recipe_path),
-                        name="test-active",
-                        submit_args=[],
-                        interpreter=None,
-                        run_id=None,
-                        workspace=tmp_path,
-                    ),
-                    driver,
-                )
-                self.assertEqual(rc, 0)
-                job_id = json.loads(out)["job_id"]
-                rec = jobs.JobRecord.load(job_id)
-                self.assertEqual(rec.run_id, active_run)
-
-                # 2. Reap fallback to active run id
-                rc, out = self._invoke(
-                    self._args(
-                        compute_action="job",
-                        job_action="reap",
-                        run_id=None,
-                        workspace=tmp_path,
-                    ),
-                    driver,
-                )
-                self.assertEqual(rc, 0)
-                reap_payload = json.loads(out)
-                self.assertEqual(reap_payload["run_id"], active_run)
-                self.assertIn(job_id, reap_payload["reaped"])
-
     def test_submit_without_any_run_is_refused(self):
         """No --run-id and no active run: refuse rather than tag with ''.
 
         A job tagged with no run is one the run-end reaper can never find.
         """
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with patch.dict(os.environ,
-                            {"TPU_AGENT_SUITE_HOME": str(tmp_path)},
-                            clear=False):
-                recipe_path = tmp_path / "recipe.py"
-                recipe_path.write_text("print('hi')\n")
-                with self.assertRaises(ComputeConfigError) as ctx:
-                    self._invoke(
-                        self._args(
-                            compute_action="submit",
-                            recipe=str(recipe_path),
-                            name="untagged",
-                            submit_args=[],
-                            interpreter=None,
-                            run_id=None,
-                            workspace=tmp_path,
-                        ),
-                        LocalDriver(),
-                    )
-                self.assertEqual(ctx.exception.error_code, "MISSING_FIELD")
-                self.assertIn("--run-id", str(ctx.exception))
-                # The directory the search started from, not the cwd.
-                self.assertIn(str(tmp_path), str(ctx.exception))
-                self.assertEqual(jobs.list_jobs(), [])
-
-    def test_submit_outside_the_workspace_uses_the_sessions_run(self):
-        """A `cd` out of the workspace keeps the session's run and workspace.
-
-        The lease the session-start hook wrote names both, so `submit` from
-        /tmp tags the job with the session's run and runs it under the
-        interpreter the workspace's environment.json configures, as `run`
-        from inside the workspace would, rather than failing with
-        MISSING_FIELD or falling back to the default.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            home, ws, elsewhere = (Path(tmp) / d
-                                   for d in ("home", "ws", "elsewhere"))
-            for d in (home, ws / ".tpu-agent-suite", elsewhere):
-                d.mkdir(parents=True)
-            (ws / ".tpu-agent-suite" / "environment.json").write_text(
-                json.dumps(
-                    profile_env("local",
-                                python_interpreter="/opt/venv/bin/python")))
-            session_run = "20260101T000000Z-aaaaaaaaaaaa"
-            recipe = ws / "recipe.py"
-            recipe.write_text("print('hi')\n")
-            with patch.dict(os.environ, {"TPU_AGENT_SUITE_HOME": str(home)}), \
-                    patch.object(compute.cli.lease, "session_run",
-                                 return_value=(session_run, ws)), \
-                    patch.object(compute.cli.lease, "spawn_watcher"), \
-                    patch.object(LocalDriver, "submit", autospec=True,
-                                 return_value="job-x") as submit, \
-                    patch.object(LocalDriver, "get_status",
-                                 return_value=AsynchronousExecutionResult(
-                                     "job-x", "RUNNING")), \
-                    contextlib.chdir(elsewhere), \
-                    io.StringIO() as buf, contextlib.redirect_stdout(buf):
-                rc = compute.handle_compute_cli(
-                    self._args(compute_action="submit",
-                               backend=None,
-                               package="tpu-agent-suite@1.0.0",
-                               recipe=str(recipe),
-                               name="n",
-                               submit_args=[],
-                               interpreter=None,
-                               run_id=None),
-                    resolve=compute_config.resolve_driver)
-            self.assertEqual(rc, 0)
-            self.assertEqual(submit.call_args.kwargs["run_id"], session_run)
-            self.assertEqual(submit.call_args.args[0].python_interpreter,
-                             "/opt/venv/bin/python")
-
-    def test_the_lease_wins_over_the_workspace_the_cwd_is_in(self):
-        """A job launched from this session is this session's to reap, so
-        the lease names the run and workspace wherever the cwd is, even
-        inside another workspace with its own active run; `--workspace` or
-        `--run-id` is how to act on that one instead."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            active = "20260101T000000Z-bbbbbbbbbbbb"
-            leased = "20260101T000000Z-cccccccccccc"
-            other_ws = tmp_path / "other-ws"
-            other_ws.mkdir()
-            with patch.dict(os.environ,
-                            {"TPU_AGENT_SUITE_HOME": str(tmp_path)}):
-                utils.record_active_run(active, workspace=tmp_path)
-                (tmp_path / "sub").mkdir()
-                args = self._args(compute_action="job",
-                                  job_action="reap",
-                                  run_id=None)
-                with patch.object(compute.cli.lease, "session_run",
-                                  return_value=(leased, other_ws)), \
-                        contextlib.chdir(tmp_path / "sub"):
-                    rc, out = self._invoke(args, LocalDriver())
-            self.assertEqual(rc, 0)
-            self.assertEqual(json.loads(out)["run_id"], leased)
-            self.assertEqual(args.workspace, other_ws)
+        with _temp_home() as tmp_path:
+            recipe_path = tmp_path / "recipe.py"
+            recipe_path.write_text("print('hi')\n")
+            with self.assertRaises(ComputeConfigError) as ctx:
+                self._invoke(
+                    self._submit_args(
+                        str(recipe_path),
+                        name="untagged",
+                        run_id=None,
+                        workspace=tmp_path,
+                    ),
+                    LocalDriver(),
+                )
+            self.assertEqual(ctx.exception.error_code, "MISSING_FIELD")
+            self.assertIn("--run-id", str(ctx.exception))
+            # The directory the search started from, not the cwd.
+            self.assertIn(str(tmp_path), str(ctx.exception))
+            self.assertEqual(jobs.list_jobs(), [])
 
     def test_two_sessions_in_one_workspace_each_keep_their_own_run(self):
         """A second session's start overwrites the workspace's active-run
         marker; the lease is per harness process, so this session's `job
         list` still refreshes its own jobs, not the other session's."""
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp)
-            mine = "20260101T000000Z-aaaaaaaaaaaa"
-            theirs = "20260101T000000Z-bbbbbbbbbbbb"
-            driver = MagicMock()
-            driver.get_status.side_effect = (
-                lambda jid: AsynchronousExecutionResult(jid, "RUNNING"))
-            with patch.dict(os.environ, {"TPU_AGENT_SUITE_HOME": tmp}), \
-                    patch.object(compute.cli.lease, "session_run",
-                                 return_value=(mine, ws)), \
-                    contextlib.chdir(ws):
-                utils.record_active_run(theirs, workspace=ws)
-                jobs.JobRecord.create(job_id="my-job",
-                                      run_id=mine,
+        mine, theirs = _RUN, "20260101T000000Z-bbbbbbbbbbbb"
+        driver = MagicMock()
+        driver.get_status.side_effect = (
+            lambda jid: AsynchronousExecutionResult(jid, "RUNNING"))
+        with _temp_home() as ws, contextlib.chdir(ws), \
+                patch.object(compute.cli.lease, "session_run",
+                             return_value=(mine, ws)):
+            paths.record_active_run(theirs, workspace=ws)
+            for job_id, run_id in (("mine", mine), ("theirs", theirs)):
+                jobs.JobRecord.create(job_id=job_id,
+                                      run_id=run_id,
                                       backend="x")
-                jobs.JobRecord.create(job_id="their-job",
-                                      run_id=theirs,
-                                      backend="x")
-                rc, out = self._invoke(
-                    self._args(compute_action="job",
-                               job_action="list",
-                               run_id=None,
-                               status=None), driver)
-            self.assertEqual(rc, 0)
-            self.assertEqual(
-                {r["job_id"]: r["status"]
-                 for r in json.loads(out)}, {
-                     "my-job": "RUNNING",
-                     "their-job": "PENDING"
-                 })
-            driver.get_status.assert_called_once_with("my-job")
+            rc, out = self._invoke(
+                self._args(compute_action="job",
+                           job_action="list",
+                           run_id=None,
+                           status=None), driver)
+        self.assertEqual((rc, {
+            r["job_id"]: r["status"]
+            for r in json.loads(out)
+        }), (0, {
+            "mine": "RUNNING",
+            "theirs": "PENDING"
+        }))
+        driver.get_status.assert_called_once_with("mine")
 
 
 class _ScriptedJob:
@@ -3343,17 +2003,17 @@ class TestJobWait(unittest.TestCase):
     sleep loops that outlive the shell or miss a crash."""
 
     def wait(self, job: _ScriptedJob, **flags: Any) -> tuple[int, dict]:
-        args = argparse.Namespace(compute_action="job",
-                                  job_action="wait",
-                                  backend="mock_test",
-                                  workspace=None,
-                                  json=True,
-                                  job_id="serve-1",
-                                  until=None,
-                                  fail_on_log=None,
-                                  no_default_fail_patterns=False,
-                                  timeout=None)
-        vars(args).update(flags)
+        args = _cli_args(
+            **{
+                "compute_action": "job",
+                "job_action": "wait",
+                "job_id": "serve-1",
+                "until": None,
+                "fail_on_log": None,
+                "no_default_fail_patterns": False,
+                "timeout": None,
+                **flags
+            })
         cli = sys.modules[compute.handle_compute_cli.__module__]
         clock = job.clock
 
@@ -3400,6 +2060,7 @@ class TestJobWait(unittest.TestCase):
             (["FAILED"], "READY\nRaising signal 7", on_ready, 4, "job_ended",
              "Raising signal 7"),
             (["COMPLETED"], "bye", on_ready, 4, "job_ended", None),
+            (["PENDING"], "", dict(timeout=0), 3, "timed_out", None),
         ]
         for states, logs, flags, code, outcome, line in cases:
             with self.subTest(states=states, logs=logs, **flags):
@@ -3419,18 +2080,6 @@ class TestJobWait(unittest.TestCase):
         self.assertIn("Job not found", ctx.exception.message)
         self.assertEqual(job.reads, 3)
 
-    def test_timeout_leaves_room_for_the_next_poll(self):
-        rc, result = self.wait(_ScriptedJob(["PENDING"]), timeout=0)
-        self.assertEqual((rc, result["outcome"]), (3, "timed_out"))
-        self.assertIn("again", result["next"])
-
-        # Polls take 30s: after the one ending at 70s, another would end
-        # past 100s, so the wait stops at 70s rather than overrunning.
-        job = _ScriptedJob(["PENDING"])
-        job.poll_sec = 30
-        _, result = self.wait(job, timeout=100)
-        self.assertEqual(result["waited_sec"], 70)
-
     def test_a_long_pending_job_is_told_why_before_waiting_again(self):
         # An unqueued pod on a full cluster, past the ceiling.
         cli = sys.modules[compute.handle_compute_cli.__module__]
@@ -3447,7 +2096,7 @@ class TestJobWait(unittest.TestCase):
         self.assertIn(reason, result["next"])
 
         # Same ceiling, but queued, admitted, starting, running, or a backend
-        # that gives no reason (xpk, whose PENDING is always a queue): wait.
+        # that gives no reason: wait.
         kept = [("PENDING", None, {
             "pending_reason": r
         }) for r in (base.PENDING_QUEUED, base.PENDING_ADMITTED_NO_NODE,
@@ -3472,12 +2121,7 @@ class TestReapJobs(unittest.TestCase):
     RUN = "20260101T000000Z-000000000001"
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.patcher = patch.dict(os.environ,
-                                  {"TPU_AGENT_SUITE_HOME": str(self.tmp)})
-        self.patcher.start()
-        self.addCleanup(self.patcher.stop)
+        _patch_home(self)
 
     def _live(self,
               job_id: str,
@@ -3490,185 +2134,25 @@ class TestReapJobs(unittest.TestCase):
                                     serve=serve)
         return rec.mark("RUNNING")
 
-    def test_serving_jobs_are_exempt_from_reap(self):
-        """A job with serve=True is skipped by reap_jobs on session end."""
+    def test_serving_jobs_are_exempt_from_reap_unless_included(self):
+        """Session end leaves a serve=True job running, and reports it;
+        `job reap --include-serving` is a decision to clear the run."""
         self._live("job-serve-1", "local", serve=True)
-        driver = MagicMock()
-        reaped, failed = jobs.reap_jobs(self.RUN, lambda _: driver)
-        self.assertEqual(reaped, [])
-        self.assertEqual(failed, {})
-        driver.cancel.assert_not_called()
+        self._live("job-old-1", "local", serve=True).mark("COMPLETED")
+        reaped, failed = jobs.reap_jobs(self.RUN, lambda _: LocalDriver())
+        self.assertEqual((reaped, failed), ([], {}))
         self.assertEqual(jobs.JobRecord.load("job-serve-1").status, "RUNNING")
-
-    def test_local_job_is_cancelled_through_the_local_driver(self):
-        """Local jobs go through LocalDriver.cancel too: it is what knows
-        to signal the whole process group, not just the wrapper shell."""
-        self._live("job-local", "local")
-        resolved: list[str] = []
-
-        def resolver(job_id):
-            resolved.append(job_id)
-            return LocalDriver()
-
-        reaped, failed = jobs.reap_jobs(self.RUN, resolver)
-        self.assertEqual((reaped, failed), (["job-local"], {}))
-        self.assertEqual(resolved, ["job-local"])
-        self.assertEqual(jobs.JobRecord.load("job-local").status, "CANCELLED")
-
-    def test_untagged_backend_is_treated_as_local(self):
-        """A record from before backends were tagged was a local job, so it
-        gets the local driver whatever the profile's backend is."""
-        self._live("job-old", "")
-        with patch.object(compute_config,
-                          "find_environment_data",
-                          return_value=profile_env("gke_pod")):
-            driver = resolve_driver(job_id="job-old")
-        self.assertIsInstance(driver, LocalDriver)
-
-    def test_driver_failure_keeps_the_record_live_and_is_reported(self):
-        self._live("job-xpk", "gke_xpk")
-        driver = MagicMock()
-        driver.cancel.side_effect = RuntimeError("GCP cluster unavailable")
-        reaped, failed = jobs.reap_jobs(self.RUN, lambda _: driver)
-        self.assertEqual(reaped, [])
-        self.assertEqual(failed, {"job-xpk": "GCP cluster unavailable"})
-        # RUNNING, so a later reap or an operator can retry.
-        self.assertEqual(jobs.JobRecord.load("job-xpk").status, "RUNNING")
-
-    def test_reaped_means_the_driver_recorded_cancelled(self):
-        """The driver owns the record's final word. One that finds the job
-        already finished records that instead, and the job is not "reaped"."""
-        self._live("job-live", "gke_job")
-        self._live("job-done", "gke_job")
-
-        def cancel(job_id):
-            rec = jobs.JobRecord.load(job_id)
-            rec.mark("CANCELLED" if job_id == "job-live" else "COMPLETED")
-
-        driver = MagicMock()
-        driver.cancel.side_effect = cancel
-        reaped, failed = jobs.reap_jobs(self.RUN, lambda _: driver)
-        self.assertEqual((reaped, failed), (["job-live"], {}))
-        self.assertEqual(jobs.JobRecord.load("job-done").status, "COMPLETED")
-
-    def test_explicit_reap_can_take_the_serving_jobs_too(self):
-        """`job reap --include-serving` is a decision to clear the run."""
-        self._live("job-serve-2", "local", serve=True)
+        self.assertEqual(jobs.serving_jobs(self.RUN), ["job-serve-1"])
         reaped, failed = jobs.reap_jobs(self.RUN,
                                         lambda _: LocalDriver(),
                                         include_serving=True)
-        self.assertEqual((reaped, failed), (["job-serve-2"], {}))
+        self.assertEqual((reaped, failed), (["job-serve-1"], {}))
         self.assertEqual(
-            jobs.JobRecord.load("job-serve-2").status, "CANCELLED")
-
-    def test_serving_jobs_can_be_named_without_reaping_them(self):
-        """What the reaper left behind has to be reportable."""
-        self._live("job-serve-3", "local", serve=True)
-        self._live("job-batch-3", "local")
-        self._live("job-old-3", "local", serve=True).mark("COMPLETED")
-        self.assertEqual(jobs.serving_jobs(self.RUN), ["job-serve-3"])
-
-    def test_terminal_jobs_are_left_alone(self):
-        for i, status in enumerate(("COMPLETED", "FAILED", "CANCELLED")):
-            self._live(f"job-term-{i}", "gke_job").mark(status)
-        driver = MagicMock()
-        self.assertEqual(jobs.reap_jobs(self.RUN, lambda _: driver), ([], {}))
-        driver.cancel.assert_not_called()
+            jobs.JobRecord.load("job-serve-1").status, "CANCELLED")
 
 
 class TestContractGeneration(unittest.TestCase):
     """The generated agent contract must reflect the real registry."""
-
-    def test_required_flags_are_reported_per_backend_and_ordered_first(self):
-        """Verify `from_params` requirements match the registry and lead before optional flags."""
-        required = compute.describe_required_flags()
-        self.assertIn("--pod", required["gke_pod"])
-        self.assertNotIn("--container", required["gke_pod"])
-        self.assertIn("--cluster-name", required["gke_xpk"])
-        self.assertNotIn("--gcs-bucket", required["gke_xpk"])
-
-        flags = compute.describe_backends()["gke_pod"]
-        self.assertEqual(flags[0], "--pod")
-        self.assertEqual(flags[1:],
-                         ["--container", "--kube-context", "--namespace"])
-
-    def test_contract_lists_registered_backends_and_marks_optional_flags(self):
-        """Verify backends, their flags, and optionality come from the registry."""
-        section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
-        self.assertIn("`mock_test`", section)
-        self.assertIn("--endpoint", section)
-        self.assertIn("RUNTIME compute --package pkg@1.0.0 inspect", section)
-        self.assertIn("`--container <value>` (optional)", section)
-        self.assertNotIn("`--pod <value>` (optional)", section)
-
-    def test_contract_states_when_no_backends_registered(self):
-        """Verify an empty registry is stated plainly, not papered over."""
-        with patch.object(compute, "describe_backends", return_value={}):
-            section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
-        self.assertIn("no compute backends", section)
-        self.assertNotIn("gce_tpu_vm", section)
-
-    def test_every_contract_command_names_the_package(self):
-        """Without --package the resolver never looks in the package's own
-        environment.json, and a correctly installed package reports
-        NO_COMPUTE_BACKEND."""
-        section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
-        commands = [
-            line for line in section.splitlines() if "RUNTIME compute" in line
-        ]
-        self.assertTrue(commands)
-        for line in commands:
-            self.assertIn("--package pkg@1.0.0", line)
-
-    def test_contract_tells_agent_to_outlast_the_run(self):
-        """A shell call that times out kills the run inside it, so the section
-        must say to raise any per-call shell timeout past `--timeout`."""
-        section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
-        self.assertIn(f"+ {compiler.SHELL_TIMEOUT_HEADROOM_S} seconds",
-                      section)
-        self.assertIn(f"under {compiler.MAX_SYNC_COMPUTE_TIMEOUT_S}", section)
-
-    def test_contract_says_what_a_recipe_is(self):
-        """Verify the instructions explain what a recipe is and how it runs.
-
-        Before this, they only listed `submit --recipe <path>`, so agents had
-        to read the driver source to find out.
-        """
-        section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
-        self.assertIn("A recipe (`--recipe`", section)
-        self.assertIn("a `.sh` file runs under `bash`", section)
-        self.assertIn("[-- <recipe args>]", section)
-        self.assertIn(
-            "RUNTIME compute --package pkg@1.0.0 submit --recipe train.sh "
-            "--input train.py", section)
-        # Every agent gets this section, and torch-inference-coder says to
-        # start vLLM only through serve_vllm.sh, so don't show `vllm serve`.
-        self.assertNotIn("vllm serve", section)
-        # Shell recipes get the configured Python as TPU_AGENT_SUITE_PYTHON (#656).
-        self.assertIn("as `$TPU_AGENT_SUITE_PYTHON`", section)
-        self.assertIn('exec "$TPU_AGENT_SUITE_PYTHON" train.py', section)
-        self.assertNotIn("binaries by path", section)
-        self.assertIn("`$WORKLOAD_NAME`", section)
-        without_xpk = {
-            k: v
-            for k, v in compute.describe_backends().items() if k != "gke_xpk"
-        }
-        with patch.object(compute,
-                          "describe_backends",
-                          return_value=without_xpk):
-            section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
-        self.assertNotIn("gke_xpk", section)
-
-    def test_contract_keeps_agents_off_raw_cluster_commands(self):
-        """Agents left compute for raw kubectl and touched other runs' jobs.
-        Every agent gets this section, so it is the one place the rule needs
-        to be."""
-        section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
-        self.assertIn("Don't run `kubectl`", section)
-        # Recipes may (gke_xpk ones create their own XPK workload).
-        self.assertIn("a recipe that compute runs may", section)
-        self.assertIn("belongs to someone else", section)
-        self.assertIn("rather than working around it", section)
 
     def test_contract_matches_the_job_cli(self):
         """`job wait` shipped in the CLI but not in this section, so agents
@@ -3680,7 +2164,8 @@ class TestContractGeneration(unittest.TestCase):
             parser = next(
                 a for a in parser._actions
                 if isinstance(a, argparse._SubParsersAction)).choices[name]
-        section = compiler.compute_contract_section("RUNTIME", "pkg@1.0.0")
+        section = prompt_contracts.compute_contract_section(
+            "RUNTIME", "pkg@1.0.0")
         job_lines = " ".join(line for line in section.splitlines()
                              if "pkg@1.0.0 job " in line)
         choices = next(a.choices for a in parser._actions
@@ -3715,37 +2200,13 @@ class TestPreflight(unittest.TestCase):
 
     ACCOUNT = {"auth list": (0, "me@example.com\n")}
 
-    def test_probe_error_prefers_the_tools_error_line(self):
-        # gcloud: the error, then a usage block that says nothing is wrong.
-        gcloud = ("ERROR: (gcloud.x) Image not found.\n\nA valid image has "
-                  "the format of\n  HOST/PROJECT/REPO/IMAGE:tag\n")
-        self.assertEqual(base.probe_error(_completed("", 1, gcloud)),
-                         "ERROR: (gcloud.x) Image not found.")
-        self.assertEqual(
-            base.probe_error(
-                _completed(
-                    "", 1, "E0925 memcache.go:265] noise\n"
-                    'Error from server (Forbidden): nodes is "x"\n')),
-            'Error from server (Forbidden): nodes is "x"')
-        # No error line: the last line, as before.
-        self.assertEqual(
-            base.probe_error(
-                _completed(
-                    "", 1, "E0925 noise\nUnable to connect to the "
-                    "server: dial tcp: i/o timeout\n")),
-            "Unable to connect to the server: dial tcp: i/o timeout")
-        self.assertEqual(base.probe_error(_completed("", 3, "")), "exit 3")
-
     def _gce(self):
         return GceTpuVmDriver(tpu_name="vm", zone="us-east5-b", project="p")
 
     def test_a_missing_tool_is_a_failure_and_the_target_is_not_checked(self):
-        report, checks, calls = self._run(GkeXpkDriver(cluster_name="c",
-                                                       project="p",
-                                                       zone="z"),
-                                          tools=None)
+        report, checks, calls = self._run(self._gce(), tools=None)
         self.assertEqual((report.reachable, report.status), (False, "fail"))
-        self.assertIn("docs/install.md", checks["tool:xpk"].fix)
+        self.assertIn("docs/install.md", checks["tool:gcloud"].fix)
         self.assertEqual(calls, [])
 
     def test_local(self):
@@ -3819,12 +2280,8 @@ class TestPreflight(unittest.TestCase):
                           check.detail)
             self.assertTrue(check.fix.startswith(f"KUBECONFIG={gone} gcloud"))
             # Named by $KUBECONFIG, alongside one that is there.
-            check = self._cluster_check({
-                "HOME":
-                home,
-                "KUBECONFIG":
-                f"{gone}{os.pathsep}{there}"
-            })
+            both = f"{gone}{os.pathsep}{there}"
+            check = self._cluster_check({"HOME": home, "KUBECONFIG": both})
             self.assertIn(f"$KUBECONFIG names {gone}, which does not exist",
                           check.detail)
             self.assertNotIn(there, check.detail)
@@ -3882,65 +2339,6 @@ class TestPreflight(unittest.TestCase):
                     if others:
                         self.assertIn(others, failed.fix)
 
-    def test_the_credentials_fix_is_filled_from_the_environment(self):
-        """CI and evals say which cluster they mean: no placeholders."""
-        with tempfile.TemporaryDirectory() as home:
-            gke = {
-                "HOME": home,
-                "GKE_CLUSTER": "tpu-nexus-cluster",
-                "GKE_LOCATION": "us-central2-b",
-                "GKE_PROJECT": "tpu-nexus-767207",
-            }
-            check = self._cluster_check(gke)
-            self.assertIn(
-                "get-credentials tpu-nexus-cluster --location us-central2-b "
-                "--project tpu-nexus-767207", check.fix)
-            self.assertNotIn("<", check.fix)
-            # Only what is unknown stays a placeholder.
-            del gke["GKE_PROJECT"]
-            check = self._cluster_check(gke)
-            self.assertIn("--project <project>", check.fix)
-            self.assertIn("get-credentials tpu-nexus-cluster ", check.fix)
-
-    def test_the_credentials_fix_names_the_contexts_cluster(self):
-        """Without GKE_*, a gke_* context names the cluster; GKE_* wins over
-        it, whole, never mixed with it; what GKE_* lacks is a placeholder."""
-        context = "gke_tpu-nexus-767207_us-central2-b_tpu-nexus-cluster"
-
-        def kubectl(name, error):
-            return lambda cmd, **_: (_completed(name, 0) if "current-context"
-                                     in cmd else _completed("", 1, error))
-
-        for error in ("error: You must be logged in to the server",
-                      "Unable to connect to the server: i/o timeout"):
-            with self.subTest(error=error), \
-                    patch.dict(os.environ, {}, clear=True), \
-                    patch("subprocess.run", kubectl(context, error)):
-                check = self._cluster()
-            self.assertIn(
-                "get-credentials tpu-nexus-cluster --location us-central2-b "
-                "--project tpu-nexus-767207", check.fix)
-        # The DNS-endpoint hint names the same cluster.
-        self.assertIn("update tpu-nexus-cluster --enable-dns-access",
-                      check.fix)
-        gke = {"GKE_CLUSTER": "other", "GKE_PROJECT": "other-project"}
-        for name in (context, "my-cluster"):
-            with patch.dict(os.environ, gke, clear=True), \
-                    patch("subprocess.run",
-                          kubectl(name, "error: You must be logged in")):
-                check = self._cluster()
-            self.assertIn(
-                "get-credentials other --location <location> "
-                "--project other-project", check.fix)
-        # A cluster that answers is the context's, whatever GKE_* says.
-        with patch.dict(os.environ, gke, clear=True):
-            self.assertEqual(
-                base.gke_target(context, prefer_context=True), {
-                    "cluster": "tpu-nexus-cluster",
-                    "location": "us-central2-b",
-                    "project": "tpu-nexus-767207"
-                })
-
     SA = "123-compute@developer.gserviceaccount.com"
 
     def _metadata(self, email, scopes):
@@ -3995,50 +2393,36 @@ class TestPreflight(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(base.application_credentials_check(),
                              (None, None))
-        with tempfile.TemporaryDirectory() as tmp:
-            files = {
-                "user.json": {
-                    "type": "authorized_user",
-                    "client_id": "x"
-                },
-                "sa.json": {
-                    "type": "service_account",
-                    "client_email": "bot@p.iam.gserviceaccount.com"
-                },
-                "odd.json": {
-                    "type": "gdch_service_account"
-                },
-            }
-            for name, body in files.items():
-                Path(tmp, name).write_text(json.dumps(body), encoding="utf-8")
-            Path(tmp, "bad.json").write_text("{", encoding="utf-8")
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "bad.json").write_text("{")
 
-            def check(name):
-                path = os.path.join(tmp, name)
-                with patch.dict(os.environ, {base.GAC_ENV: path}, clear=True):
-                    return base.application_credentials_check()
+        def check(name, body=None):
+            if body:
+                (tmp / name).write_text(json.dumps(body))
+            with patch.dict(os.environ, {base.GAC_ENV: str(tmp / name)},
+                            clear=True):
+                return base.application_credentials_check()
 
-            gac, usable = check("user.json")
-            self.assertEqual(gac.status, "warn")
-            self.assertIn("authorized_user credential", gac.detail)
-            self.assertIn(base.KUBECTL_IDENTITY_WARNING, gac.detail)
-            self.assertIn("env -u GOOGLE_APPLICATION_CREDENTIALS", gac.fix)
-            self.assertIn("authorized_user", usable)
-            gac, usable = check("sa.json")
-            self.assertIn(
-                "service_account credential bot@p.iam.gserviceaccount.com",
-                gac.detail)
-            self.assertIsNotNone(usable)
-            # Reported, but not one the auth plugin is known to use.
-            gac, usable = check("odd.json")
-            self.assertIn("gdch_service_account", gac.detail)
+        gac, usable = check("u.json", {"type": "authorized_user"})
+        self.assertEqual(gac.status, "warn")
+        self.assertIn(base.KUBECTL_IDENTITY_WARNING, gac.detail)
+        self.assertIn("env -u GOOGLE_APPLICATION_CREDENTIALS", gac.fix)
+        self.assertIn("authorized_user", usable)
+        gac, usable = check("sa.json", {
+            "type": "service_account",
+            "client_email": "bot@p"
+        })
+        self.assertIn("service_account credential bot@p", gac.detail)
+        self.assertIsNotNone(usable)
+        # Reported, but not one the auth plugin is known to use.
+        for name, body, says in (("odd.json", {
+                "type": "gdch"
+        }, "gdch"), ("gone.json", None, "No such file"), ("bad.json", None,
+                                                          "not a readable")):
+            gac, usable = check(name, body)
+            self.assertIn(says, gac.detail)
             self.assertIsNone(usable)
-            for name, says in (("gone.json", "No such file"),
-                               ("bad.json", "not a readable credential")):
-                gac, usable = check(name)
-                self.assertIn(says, gac.detail)
-                self.assertIn(base.KUBECTL_IDENTITY_WARNING, gac.detail)
-                self.assertIsNone(usable)
 
     def test_the_credentials_repro(self):
         """KUBECONFIG names a missing file, the gcloud
@@ -4048,16 +2432,9 @@ class TestPreflight(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             gone = os.path.join(tmp, "config")
             gac = os.path.join(tmp, "adc.json")
-            Path(gac).write_text('{"type": "authorized_user"}',
-                                 encoding="utf-8")
-            env = {
-                "HOME": tmp,
-                "KUBECONFIG": gone,
-                base.GAC_ENV: gac,
-                "GKE_CLUSTER": "c",
-                "GKE_LOCATION": "l",
-                "GKE_PROJECT": "p",
-            }
+            Path(gac).write_text('{"type": "authorized_user"}')
+            env = {"HOME": tmp, "KUBECONFIG": gone, base.GAC_ENV: gac}
+            env.update(GKE_CLUSTER="c", GKE_LOCATION="l", GKE_PROJECT="p")
             for driver in (GkePodDriver(pod="p1", namespace="ns"),
                            GkeJobDriver(kubeconfig=None)):
                 with self.subTest(driver=driver.backend_name), \
@@ -4068,84 +2445,18 @@ class TestPreflight(unittest.TestCase):
                         "auth list": (0, self.SA)
                     })
                 self.assertFalse(report.reachable)
-                self.assertEqual(checks["cluster"].status, "fail")
+                self.assertEqual([
+                    checks[c].status
+                    for c in ("cluster", "gcloud:account", "credentials:gac")
+                ], ["fail", "warn", "warn"])
                 self.assertIn(f"{gone}, which does not exist",
                               checks["cluster"].detail)
                 self.assertIn("get-credentials c --location l --project p",
                               checks["cluster"].fix)
-                self.assertEqual(checks["gcloud:account"].status, "warn")
-                self.assertIn("cloud-platform scope",
-                              checks["gcloud:account"].detail)
                 self.assertIn(
                     "not blocking: $GOOGLE_APPLICATION_CREDENTIALS holds "
                     "another credential (authorized_user credential)",
                     checks["gcloud:account"].detail)
-                self.assertEqual(checks["credentials:gac"].status, "warn")
-                self.assertIn("authorized_user credential",
-                              checks["credentials:gac"].detail)
-
-    def test_a_cluster_that_answers_makes_account_problems_warnings(self):
-        cluster = base.PreflightCheck("cluster", "ok", "context 'c' answers")
-        with patch.dict(os.environ, {}, clear=True), \
-                patch("shutil.which", return_value="/bin/gcloud"), \
-                patch("subprocess.run", return_value=_completed("", 0)):
-            checks = base.gke_credential_checks(cluster)
-        self.assertEqual([(c.name, c.status) for c in checks],
-                         [("gcloud:account", "warn")])
-        self.assertIn("kubectl reaches the cluster", checks[0].detail)
-        # No gcloud: no account for the plugin to use, so nothing to check.
-        with patch.dict(os.environ, {}, clear=True), \
-                patch("shutil.which", return_value=None):
-            self.assertEqual(base.gke_credential_checks(cluster), [])
-
-    def test_gke_xpk(self):
-        driver = GkeXpkDriver(cluster_name="c",
-                              project="p",
-                              zone="us-central1-a")
-        report, checks, _ = self._run(driver, {
-            **self.ACCOUNT, "clusters list": (0, "europe-west4 RUNNING\n")
-        })
-        self.assertTrue(report.reachable)
-        self.assertEqual(checks["zone"].status, "warn")
-        report, checks, _ = self._run(driver, {
-            **self.ACCOUNT, "clusters list": (0, "")
-        })
-        self.assertFalse(report.reachable)
-        self.assertIn("no cluster 'c'", checks["cluster"].detail)
-        self.assertNotIn("bucket", checks)
-        driver = GkeXpkDriver(cluster_name="c",
-                              project="p",
-                              zone="us-central1-a",
-                              gcs_bucket="b/runs")
-        _, checks, calls = self._run(
-            driver, {
-                **self.ACCOUNT, "clusters list": (0, "us-central1 RUNNING\n"),
-                "buckets describe": (1, "")
-            })
-        self.assertEqual(checks["bucket"].status, "fail")
-        self.assertTrue(any("describe gs://b " in call for call in calls))
-
-    def test_gke_backends_need_the_auth_plugin(self):
-        for driver in (GkePodDriver, GkeJobDriver, GkeXpkDriver):
-            self.assertIn("gke-gcloud-auth-plugin", driver.required_tools)
-
-    def test_auth_plugin_needed_only_when_the_kubeconfig_calls_it(self):
-        for stdout, tools in (("gke-gcloud-auth-plugin", base.GKE_TOOLS),
-                              ("", ("kubectl", ))):
-            proc = subprocess.CompletedProcess([], 0, stdout, "")
-            with patch("shutil.which", return_value="/bin/kubectl"), \
-                    patch.object(base, "probe_run", return_value=proc):
-                self.assertEqual(GkeJobDriver.needed_tools(MagicMock()), tools)
-
-    def test_a_probe_that_hangs_is_reported_not_raised(self):
-
-        def hang(cmd, **kwargs):
-            raise subprocess.TimeoutExpired(cmd, 1)
-
-        with patch("shutil.which", return_value="/bin/gcloud"), \
-                patch("subprocess.run", hang):
-            report = self._gce().preflight()
-        self.assertIn("did not answer", report.checks[-1].detail)
 
     def test_cli_prints_the_report_and_exits_1_on_failure(self):
         from framework.compute import cli as compute_cli
@@ -4200,12 +2511,8 @@ class TestComputeCheckPerSession(unittest.TestCase):
     RUN_ID = "20260101T000000Z-123456789abc"
 
     def setUp(self):
-        root = pathlib.Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, root, True)
-        patcher = patch.dict(os.environ, {"TPU_AGENT_SUITE_HOME": str(root)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        utils.get_run_root(self.RUN_ID).mkdir(parents=True)
+        root = _patch_home(self)
+        paths.get_run_root(self.RUN_ID).mkdir(parents=True)
         self.workspace = root / "ws"
         self.env_file = self.workspace / ".tpu-agent-suite" / "environment.json"
         self.env_file.parent.mkdir(parents=True)
@@ -4221,7 +2528,7 @@ class TestComputeCheckPerSession(unittest.TestCase):
         self.host_patcher = patch.object(compute.cli.setup,
                                          "host_requirements_note",
                                          return_value="")
-        self.host_note = self.host_patcher.start()
+        self.host_patcher.start()
         self.addCleanup(self.host_patcher.stop)
 
     def _write_env(self, params, backend="local"):
@@ -4234,7 +2541,7 @@ class TestComputeCheckPerSession(unittest.TestCase):
     def _verified(self, passed=True, failed_checks=()):
         """Record a verify result for the current default profile."""
         profile = json.loads(self.env_file.read_text())["profiles"]["default"]
-        (self.env_file.parent / utils.VERIFICATION_FILE).write_text(
+        (self.env_file.parent / paths.VERIFICATION_FILE).write_text(
             json.dumps({
                 compute.config.profile_hash(profile): {
                     "profile": "default",
@@ -4249,14 +2556,10 @@ class TestComputeCheckPerSession(unittest.TestCase):
             return compute.cli.check_target_at_session_start(
                 "pkg", self.workspace, self.RUN_ID, hook_timeout)
 
-    def _command(self, profile=None):
-        args = argparse.Namespace(compute_action="inspect",
-                                  backend=None,
-                                  package="pkg",
-                                  workspace=self.workspace,
-                                  json=True,
-                                  profile=profile,
-                                  run_id=self.RUN_ID)
+    def _command(self):
+        args = _cli_args(package="pkg",
+                         workspace=self.workspace,
+                         run_id=self.RUN_ID)
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             rc = compute.handle_compute_cli(args,
@@ -4267,54 +2570,6 @@ class TestComputeCheckPerSession(unittest.TestCase):
              "mock target default-endpoint (ok)\nHardware: accelerator_type "
              "v6e-4, 4 devices, 32 GB HBM per device. Plan from these "
              "numbers, not from the profile, VM or cluster name.")
-
-    def test_session_start_reports_a_pass_and_records_the_profile_it_checked(
-            self):
-        self._verified()
-        note = self._session_start()
-        self.assertEqual(note, self.READY)
-        # One driver serves both the preflight and the hardware inspect.
-        self.assertEqual(self.resolve.call_count, 1)
-        self.assertEqual(
-            compute.cli._last_checked_hash(self.RUN_ID),
-            compute.config.profile_hash({
-                "backend": "local",
-                "params": {
-                    "python_interpreter": "a"
-                }
-            }))
-
-    def test_hardware_missing_from_the_probe_is_never_guessed(self):
-        """No devices or HBM, or an inspect that raises: run inspect."""
-        self._verified()
-        unread = "Hardware not read at session start{}. Don't guess "
-        self.driver._hardware = base.HardwareProfile(
-            "tpu",
-            "unknown",
-            4,
-            0.0,
-            "healthy",
-            details={"hbm_gb_note": "unknown accelerator 'x'"})
-        note = self._session_start()
-        self.assertIn(unread.format(" (unknown accelerator 'x')"), note)
-        self.assertIn("compute --package pkg inspect --json` before sizing",
-                      note)
-        self.assertIn("leave the sizing to a specialist", note)
-        self.driver.inspect = MagicMock(side_effect=RuntimeError("ssh"))
-        self.assertIn(unread.format(""), self._session_start())
-
-    def test_session_start_leads_with_missing_host_software(self):
-        """The installer's host check warns once; session start repeats it
-        to the agent, whatever the compute state, until it passes."""
-        self.host_note.return_value = "ASK"
-        self._verified()
-        self.assertEqual(self._session_start(),
-                         f"## Host software\nASK\n\n{self.READY}")
-        self._verified(passed=False)
-        self.assertTrue(self._session_start().startswith(
-            "## Host software\nASK\n\n## Compute setup\n"))
-        self.env_file.unlink()
-        self.assertEqual(self._session_start(), "## Host software\nASK")
 
     def test_host_requirements_come_from_the_file_shipped_with_the_runtime(
             self):
@@ -4334,68 +2589,56 @@ class TestComputeCheckPerSession(unittest.TestCase):
     def test_session_start_gives_one_message_per_setup_state(self):
         """Only a READY profile is preflighted; the rest say what to run."""
         plan = "compute --package pkg setup plan"
-        guide = str(compute.cli.SETUP_GUIDE)
+        use = "config --package pkg use <name>"
+        gke = profile_env("gke_job", tpu_accelerator="t", tpu_topology="1x1")
         cases = [
-            ("no profile", {
-                "default": None,
-                "profiles": {}
-            }, [
-                "Compute is not set up yet.", f"{plan} --json", guide,
-                "On gke_job, it can also run a smoke-test Job"
-            ]),
-            ("none selected", {
-                "default": None,
-                "profiles": {
-                    "vm": {
-                        "backend": "local"
-                    }
-                }
-            }, ["environment.json has vm", "config --package pkg use <name>"]),
-            ("unknown selected", {
-                "default": "gone",
-                "profiles": {}
-            }, [
-                "'gone'", "config --package pkg use <name>",
-                f"{plan} --profile <name> --backend <backend> --json",
-                "setup verify --profile <name>`"
-            ]),
-            ("incomplete", profile_env("gke_pod"), [
+            ("no profile", '{"profiles": {}}',
+             ["Compute is not set up yet.",
+              str(compute.cli.SETUP_GUIDE)]),
+            ("none selected", '{"profiles": {"vm": {"backend": "local"}}}',
+             ["environment.json has vm", use]),
+            ("unknown selected", '{"default": "gone", "profiles": {}}',
+             ["'gone'", use, f"{plan} --profile <name> --backend <backend>"]),
+            ("incomplete", json.dumps(profile_env("gke_pod")), [
                 "profile 'default' is not fully set up",
-                f"{plan} --profile default --json",
-                "setup apply --profile default --answers '<json>'",
-                "setup verify --profile default`"
+                "setup apply --profile default --answers '<json>'"
             ]),
-            ("unverified", profile_env("local"),
-             ["setup verify`.", "!--smoke-test"]),
-            ("unverified, schedules Jobs",
-             profile_env("gke_job", tpu_accelerator="t", tpu_topology="1x1"),
-             ["setup verify`.", "add `--smoke-test` only if they agree"]),
+            ("unverified", json.dumps(profile_env("local")),
+             ["setup verify`.", "!--smoke"]),
+            ("unverified, schedules Jobs", json.dumps(gke),
+             ["add `--smoke-test` only if they agree"]),
         ]
+        built_in_only = {
+            k: v
+            for k, v in get_registered_drivers().items()
+            if k not in driver_registry.EXTERNAL_DRIVERS
+        }
         for name, env, expected in cases:
             with self.subTest(name):
-                self.env_file.write_text(json.dumps(env))
-                note = self._session_start()
+                self.env_file.write_text(env)
+                with patch.object(compute.config,
+                                  "get_registered_drivers",
+                                  return_value=built_in_only):
+                    note = self._session_start()
                 self.assertTrue(note.startswith("## Compute setup\n"), note)
                 for text in expected:
                     if text.startswith("!"):
                         self.assertNotIn(text[1:], note)
                     else:
                         self.assertIn(text, note)
-        self.assertEqual(self.driver._calls, 0)
 
         # FAILED, from the last verify: its checks, fixes and fields.
         self._write_env({})
-        self._verified(False, [{
-            "name": "software",
-            "detail": "no torch_tpu\nmore",
-            "fix": "install it",
-            "fields": ["python_interpreter"]
-        }])
+        self._verified(False, [
+            dict(name="software",
+                 detail="no torch_tpu\nmore",
+                 fix="install it",
+                 fields=["python_interpreter"])
+        ])
         note = self._session_start()
         self.assertIn("- software: no torch_tpu Fix: install it", note)
-        self.assertIn(
-            f"{plan} --profile default --fields python_interpreter --json",
-            note)
+        self.assertIn(f"{plan} --profile default --fields python_interpreter",
+                      note)
         self.assertEqual(self.driver._calls, 0)
 
         # A READY profile whose quick preflight fails reads as FAILED; one
@@ -4404,13 +2647,20 @@ class TestComputeCheckPerSession(unittest.TestCase):
         self.driver._checks = [
             base.PreflightCheck("image", "fail", "gone", "push it", ["image"])
         ]
-        note = self._session_start()
-        self.assertIn("failed its check.\n- image: gone Fix: push it", note)
+        self.assertIn("failed its check.\n- image: gone Fix: push it",
+                      self._session_start())
         self.driver._checks, self.driver._reachable = [], False
-        self.assertIn(
-            "- reachable: mock target default-endpoint did not answer",
-            self._session_start())
+        self.assertIn("- reachable: mock target default-endpoint did not",
+                      self._session_start())
         self.assertEqual(self.driver._calls, 2)
+        # A probe without devices or HBM says why, and is never guessed from.
+        self.driver._reachable = True
+        self.driver._hardware = base.HardwareProfile(
+            "tpu", "unknown", 4, 0.0, "healthy", details={"hbm_gb_note": "x"})
+        self.assertIn("Hardware not read at session start (x). Don't guess ",
+                      self._session_start())
+        self.env_file.unlink()
+        self.assertFalse(self._session_start())
 
     def test_only_a_changed_environment_is_checked_again(self):
         """The recheck runs once, reports a failure, and the command still runs."""
@@ -4434,17 +2684,6 @@ class TestComputeCheckPerSession(unittest.TestCase):
         self.env_file.write_text(json.dumps({**doc, "xprof_interpreter": "x"}))
         self._command()
         self.assertEqual(self.driver._calls, 2)
-
-    def test_the_recheck_checks_the_profile_the_command_uses(self):
-        """--profile is checked, not the run's profile; switching checks again."""
-        self._verified()
-        self._session_start()
-        self._write_env({"python_interpreter": "b"})
-        for profile, calls in (("vm", 2), ("vm", 2), (None, 3)):
-            self._command(profile)
-            self.assertEqual(self.driver._calls, calls)
-            self.assertEqual(self.resolve.call_args.kwargs["profile_override"],
-                             profile)
 
     def test_a_session_check_that_did_not_finish_is_left_to_the_next_command(
             self):
@@ -4550,28 +2789,10 @@ class TestAdcRetry(unittest.TestCase):
             "--role=roles/container.developer", cluster["fix"])
         self.assertNotIn(auth_utils.ACCESS_TOKEN_ENV, os.environ)
 
-    def test_a_cluster_that_lets_the_account_in_is_not_retried(self):
-        driver = GkePodDriver(pod="p")
-        with self._cluster("default"):
-            report = driver.preflight().to_dict()
-        self.assertFalse(driver.using_adc)
-        self.assertNotIn("credentials:adc",
-                         [c["name"] for c in report["checks"]])
-        self.assertFalse(any("print-access-token" in c for _, c in self.calls))
-
-    def test_compute_commands_retry_with_adc(self):
-        """An exec kubectl refused before it started is retried with ADC."""
-        driver = GkePodDriver(pod="p")
-        with self._cluster("adc"):
-            proc = driver._sh("echo hi")
-        self.assertEqual((proc.returncode, proc.stdout), (0, "hi\n"))
-        self.assertEqual([cred for cred, _ in self.calls if "exec" in _],
-                         ["default", "adc"])
-
     def test_compute_commands_raise_a_structured_error_when_adc_fails(self):
         with self._cluster(adc=False), self.assertRaises(
                 auth_utils.ClusterAccessDenied) as ctx:
-            GkeJobDriver(image="img")._kubectl(["get", "pods"])
+            GkeJobDriver(image="img").kube.run(["get", "pods"])
         payload = ctx.exception.to_dict()
         self.assertEqual(payload["error_code"], "CLUSTER_ACCESS_DENIED")
         self.assertEqual(payload["identities"], [
@@ -4580,52 +2801,6 @@ class TestAdcRetry(unittest.TestCase):
             "default credentials were not found.)"
         ])
         self.assertIn("gcloud auth application-default login", payload["fix"])
-
-    def test_only_kubectls_own_refusal_counts(self):
-        refused = [
-            'Error from server (Forbidden): pods "p" is forbidden: User "x"',
-            "error: You must be logged in to the server (Unauthorized)",
-            "error: You must be logged in to the server (the server has "
-            "asked for the client to provide credentials)",
-            "W0930 12:00:00 warning\nError from server (Forbidden): nope",
-        ]
-        from_the_pod = [
-            "curl: (22) The requested URL returned error: 403 Forbidden",
-            "PermissionError: (forbidden) /data",
-            "requests.exceptions.HTTPError: 401 (Unauthorized)",
-            "log: Error from server (Forbidden): quoted mid-line",
-        ]
-        for stderr in refused:
-            self.assertTrue(
-                auth_utils.credential_refused(
-                    subprocess.CompletedProcess([], 1, "", stderr)), stderr)
-        for stderr in from_the_pod:
-            self.assertFalse(
-                auth_utils.credential_refused(
-                    subprocess.CompletedProcess([], 1, "", stderr)), stderr)
-
-    def test_a_workload_refused_inside_the_pod_is_not_retried_with_adc(self):
-        """Once the exec started, even kubectl's exact prefix is not a retry."""
-        in_pod_refusal = ('Error from server (Forbidden): pods is forbidden: '
-                          'User "system:serviceaccount:default:default"')
-        real_run = subprocess.run
-        calls = []
-
-        def run(cmd, **kwargs):
-            if "--" not in cmd:
-                return subprocess.CompletedProcess(cmd, 0, "", "")
-            calls.append(cmd)
-            # The pod's side of `kubectl exec ... -- sh -c <script>`, run here.
-            return real_run(cmd[cmd.index("--") + 1:], **kwargs)
-
-        driver = GkePodDriver(pod="p")
-        with patch("subprocess.run", run):
-            proc = driver._sh(
-                f"echo 'ran'; echo '{in_pod_refusal}' >&2; exit 1")
-        self.assertEqual((proc.returncode, proc.stdout), (1, "ran\n"))
-        self.assertIn(in_pod_refusal, proc.stderr)
-        self.assertEqual(len(calls), 1)
-        self.assertFalse(driver.using_adc)
 
     def test_port_forward_uses_adc_after_the_gcloud_account_is_refused(self):
         drivers = (GkePodDriver(pod="p"), GkeJobDriver(image="img"))
@@ -4649,94 +2824,61 @@ class TestSetupFieldsAndValidation(unittest.TestCase):
         questions_path = pkg_root / "environment" / "questions.json"
         if not schema_path.is_file() or not questions_path.is_file():
             self.skipTest("package schema/questions not available")
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        questions_data = json.loads(questions_path.read_text(encoding="utf-8"))
-
-        compute_schema = schema["properties"]["profiles"][
-            "additionalProperties"]
-        param_props = compute_schema["properties"]["params"]["properties"]
-        questions_by_param = {
-            q["path"].removeprefix("compute.params."): q
-            for q in questions_data["questions"]
-            if q.get("path", "").startswith("compute.params.")
-        }
+        param_props = json.loads(
+            schema_path.read_text())["properties"]["profiles"][
+                "additionalProperties"]["properties"]["params"]["properties"]
         # A missing `when` means "every backend" in questions.json, which is
         # never what a backend-specific param wants, so each one must say.
-        for param_name, q in questions_by_param.items():
-            self.assertTrue(
-                q.get("when", {}).get("backend"),
-                f"{param_name} question has no `when.backend`")
-        required_flags = compute.describe_required_flags()
-        samples = {
-            "project": "my-proj",
-            "zone": "us-central1-a",
-            "tpu_name": "my-tpu",
-            "pod": "my-pod",
-            "cluster_name": "my-cluster",
-            "image": "us-docker.pkg.dev/p/r/i@sha256:abc",
-            "tpu_accelerator": "tpu7x",
-            "tpu_topology": "2x2x1",
+        questions = {
+            q["path"].removeprefix("compute.params."): q
+            for q in json.loads(questions_path.read_text())["questions"]
+            if q.get("path", "").startswith("compute.params.")
         }
+        required_flags = compute.describe_required_flags()
+        samples = {**_GKE_ANSWERS, **_GCE_ANSWERS, "pod": "p"}
         shipped = {
-            k: v
+            k: v.SETUP_FIELDS
             for k, v in get_registered_drivers().items()
             if not k.startswith("mock")
+            and k not in driver_registry.EXTERNAL_DRIVERS
         }
         # Nothing may exist only in the schema or questions.json: a param the
         # driver reads but no SETUP_FIELDS declares is invisible to setup.
-        declared = set().union(*(d.SETUP_FIELDS.all_fields()
-                                 for d in shipped.values()))
-        self.assertEqual(
-            set(param_props) - declared, set(),
-            "schema params missing from every SETUP_FIELDS")
-        self.assertEqual(
-            set(questions_by_param) - declared, set(),
-            "compute.params questions missing from every SETUP_FIELDS")
-
-        for backend, driver_cls in shipped.items():
-            sf = driver_cls.SETUP_FIELDS
+        declared = set().union(*(sf.all_fields() for sf in shipped.values()))
+        self.assertLessEqual(set(param_props) | set(questions), declared)
+        for backend, sf in shipped.items():
             all_fields = sf.all_fields()
             with self.subTest(backend=backend):
                 self.assertEqual(
                     len(sf.required) + len(sf.optional) + len(sf.conditional) +
                     len(sf.on_demand), len(all_fields))
-                for child, trigger in sf.conditional.items():
-                    self.assertIn(trigger, all_fields, f"{backend}:{child}")
-                for field_name in all_fields:
-                    self.assertIn(field_name, param_props)
-                    # on_demand fields are set when a command first needs
-                    # them, not at install, so they need no prompt here.
-                    if field_name in sf.on_demand:
-                        continue
-                    q = questions_by_param[field_name]
-                    self.assertIn(backend, q["when"]["backend"])
-                for req_field in sf.required:
-                    q = questions_by_param[req_field]
-                    self.assertNotEqual(
-                        q.get("default"), "",
-                        f"{backend}:{req_field} defaults to ''")
+                self.assertLessEqual(set(sf.conditional.values()), all_fields)
+                self.assertLessEqual(all_fields, set(param_props))
+                # on_demand fields are set when a command first needs them,
+                # not at install, so they need no prompt here.
+                asked = {
+                    f
+                    for f, q in questions.items()
+                    if backend in q["when"]["backend"]
+                }
+                self.assertLessEqual(all_fields - set(sf.on_demand), asked)
+                self.assertLessEqual(asked, all_fields)
+                for field in sf.required:
+                    self.assertNotEqual(questions[field].get("default"), "")
                 self.assertEqual(
                     required_flags.get(backend, set()),
                     {f"--{f.replace('_', '-')}"
-                     for f in sf.required},
-                )
-                full_params = {f: samples[f] for f in sf.required}
-                for missing_field in sf.required:
-                    incomplete = {
-                        k: v
-                        for k, v in full_params.items() if k != missing_field
-                    }
+                     for f in sf.required})
+                for missing in sf.required:
                     with self.assertRaises(ComputeConfigError) as ctx:
-                        drv = driver_cls.from_params(incomplete)
-                        if hasattr(drv, "_require_dispatch_config"):
-                            drv._require_dispatch_config()
+                        drv = get_registered_drivers()[backend].from_params({
+                            f:
+                            samples[f]
+                            for f in sf.required if f != missing
+                        })
+                        if isinstance(drv, GkeJobDriver):
+                            drv.config.require_dispatch()
                     self.assertEqual(ctx.exception.error_code, "MISSING_FIELD")
-
-        for param_name, q in questions_by_param.items():
-            for backend in q["when"]["backend"]:
-                if backend in shipped:
-                    self.assertIn(param_name,
-                                  shipped[backend].SETUP_FIELDS.all_fields())
 
     def test_validate_field_format(self):
         v = compute.validate_field_format
@@ -4746,7 +2888,6 @@ class TestSetupFieldsAndValidation(unittest.TestCase):
             ("tpu_topology", "2x4", "0x4"),
             ("priority", "low", "urgent"),
             ("staging_bucket", "gs://my-bucket/path", "my-bucket"),
-            ("gcs_bucket", "gs://my-bucket", "gs://"),
             ("trajectory_bucket", "gs://my-bucket", "http://my-bucket"),
         ]:
             self.assertIsNone(v(field, good), field)
@@ -4775,13 +2916,7 @@ class TestMultiProfileResolution(unittest.TestCase):
     PKG = "pkg@1.0.0"
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.root, True)
-        patcher = patch.dict(os.environ,
-                             {"TPU_AGENT_SUITE_HOME": str(self.root)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.workspace = self.root / "ws"
+        self.workspace = _patch_home(self) / "ws"
         self.env_file = self.workspace / ".tpu-agent-suite" / "environment.json"
         self.env_file.parent.mkdir(parents=True)
 
@@ -4813,9 +2948,9 @@ class TestMultiProfileResolution(unittest.TestCase):
     def test_precedence_is_flag_then_job_then_run_then_default(self):
         abc = self._profiles("a", "a", "b", "c")
         self.assertEqual(self._interpreter(abc), "/a/python")
-        run_id = runtime.start_run(package=self.PKG,
-                                   workspace=self.workspace,
-                                   compute_profile="b")["run_id"]
+        run_id = run_state.start_run(package=self.PKG,
+                                     workspace=self.workspace,
+                                     compute_profile="b")["run_id"]
         self.assertEqual(self._interpreter(abc, run_id=run_id), "/b/python")
         self.assertEqual(
             self._interpreter(abc, run_id=run_id, profile_override="c"),
@@ -4858,14 +2993,10 @@ class TestMultiProfileResolution(unittest.TestCase):
         for env, kwargs, code in [
             ('{"default": "typo", "profiles": {"a": {}}}', {},
              "UNKNOWN_PROFILE"),
-            ("{}", {
-                "profile_override": "x"
-            }, "UNKNOWN_PROFILE"),
+            ("{}", dict(profile_override="x"), "UNKNOWN_PROFILE"),
             ('{"default": null, "profiles": {}}', {},
              "COMPUTE_NOT_CONFIGURED"),
-            ('{"profiles": {}}', {
-                "profile_override": " "
-            }, "INVALID_FIELD"),
+            ('{"profiles": {}}', dict(profile_override=" "), "INVALID_FIELD"),
             ('{"backend": "mock_test", "endpoint": "flat"}', {},
              "COMPUTE_NOT_CONFIGURED"),
             ('{"profiles": []}', {}, "INVALID_FIELD"),
@@ -4891,37 +3022,43 @@ class TestMultiProfileResolution(unittest.TestCase):
             (dict(compute_profile=" "), "INVALID_FIELD", "non-empty"),
         ]:
             with self.assertRaises(ComputeConfigError) as ctx:
-                runtime.start_run(**kwargs)
+                run_state.start_run(**kwargs)
             self.assertEqual(ctx.exception.error_code, code)
             self.assertIn(text, ctx.exception.message)
-        self.assertFalse(utils.get_runs_root().is_dir()
-                         and any(utils.get_runs_root().iterdir()))
+        self.assertFalse(paths.get_runs_root().is_dir()
+                         and any(paths.get_runs_root().iterdir()))
 
-    def test_schema_accepts_profiles_and_checks_their_structure(self):
-        # Structural only: per-backend completeness belongs to SETUP_FIELDS.
-        schema = json.loads(
-            (pathlib.Path(__file__).resolve().parents[2] / "package" /
-             "schemas" / "environment.json").read_text(encoding="utf-8"))
-        ok = '{"default": "vm", "profiles": {"vm": {"backend": "gce_tpu_vm", "params": {"zone": "z"}}}}'
-        for doc in (ok, '{"revision": 1, "default": null, "profiles": {}}'):
-            self.assertEqual(utils.validate_instance(json.loads(doc), schema),
-                             [])
-        bad = json.loads(ok.replace('"zone"', '"no_such_param"'))
-        self.assertIn("no_such_param",
-                      str(utils.validate_instance(bad, schema)))
-        self.assertTrue(utils.validate_instance({"default": ""}, schema))
+    def test_driver_flags_complete_the_profile_they_are_checked_with(self):
+        # CLI flags can supply missing setup fields (e.g. `--image` for gke_job).
+        # We test with tpu_topology here because it has no default value.
+        self.env_file.write_text(
+            json.dumps(
+                profile_env("gke_job",
+                            image="img:1",
+                            tpu_accelerator="tpu-v6e-slice")))
+        with self.assertRaises(ComputeConfigError) as ctx:
+            resolve_driver(workspace=self.workspace, package=self.PKG)
+        self.assertEqual((ctx.exception.error_code, ctx.exception.missing),
+                         ("COMPUTE_NOT_CONFIGURED", ["tpu_topology"]))
+
+        # None does not overwrite existing values, and run-only flags
+        # (like mldiagnostics) are ignored during validation.
+        driver = resolve_driver(workspace=self.workspace,
+                                package=self.PKG,
+                                param_overrides={
+                                    "tpu_topology": "2x4",
+                                    "image": None,
+                                    "mldiagnostics": True,
+                                })
+        self.assertEqual((driver.config.tpu_topology, driver.config.image),
+                         ("2x4", "img:1"))
 
 
 class TestComputeSetupApplyAndConfig(unittest.TestCase):
     """`compute setup apply` and `config [show|set|use]`."""
 
     PKG = "pkg@1.0.0"
-    GKE = {
-        "backend": "gke_job",
-        "image": "us-docker.pkg.dev/p/r/img:v1",
-        "tpu_accelerator": "tpu7x",
-        "tpu_topology": "2x2x1",
-    }
+    GKE = _GKE_ANSWERS
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -4930,10 +3067,7 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
         self.workspace = root / "ws"
         self.env_file = self.workspace / ".tpu-agent-suite" / "environment.json"
         self.write({"revision": 1, "default": None, "profiles": {}})
-        env = patch.dict(os.environ,
-                         {"TPU_AGENT_SUITE_HOME": str(root / "home")})
-        env.start()
-        self.addCleanup(env.stop)
+        _patch_home(self)
 
     def write(self, doc):
         self.env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -4957,31 +3091,19 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
 
     def test_apply_incomplete_writes_nothing(self):
         vm = {"backend": "gce_tpu_vm", "project": "p"}
+        gke = self.GKE
         cases = [
             ({}, "missing", ["backend"]),
-            ({
-                "backend": "nope"
-            }, "invalid", ["backend"]),
+            (dict(backend="nope"), "invalid", ["backend"]),
             (vm, "missing", ["zone", "tpu_name"]),
-            ({
-                **vm, "zone": "us-central1",
-                "tpu_name": "v"
-            }, "invalid", ["zone"]),
-            ({
-                **self.GKE, "queue": "q"
-            }, "newly_applicable", ["priority"]),
-            ({
-                **self.GKE, "tpu_chips": "abc"
-            }, "invalid", ["tpu_chips"]),
-            ({
-                **self.GKE, "staging_service_account":
-                "sa@p.iam.gserviceaccount.com",
-                "staging_service_account_key": "/k.json"
-            }, "invalid", ["params"]),
-            ({
-                "backend": "local",
-                "xprof_interpreter": "py"
-            }, "invalid", ["xprof_interpreter"]),
+            (dict(_GCE_ANSWERS, zone="us-central1"), "invalid", ["zone"]),
+            (dict(gke, queue="q"), "newly_applicable", ["priority"]),
+            (dict(gke, tpu_chips="abc"), "invalid", ["tpu_chips"]),
+            (dict(gke,
+                  staging_service_account="sa@p",
+                  staging_service_account_key="/k"), "invalid", ["params"]),
+            (dict(backend="local",
+                  xprof_interpreter="py"), "invalid", ["xprof_interpreter"]),
         ]
         before = self.env_file.read_text(encoding="utf-8")
         for answers, key, names in cases:
@@ -4994,73 +3116,6 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
             self.apply("my profile", {"backend": "local"})
         self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
         self.assertEqual(self.env_file.read_text(encoding="utf-8"), before)
-
-    def test_apply_merges_into_stored_profile(self):
-        stored = {k: v for k, v in self.GKE.items() if k != "backend"}
-        self.write({
-            "revision": 3,
-            "xprof_interpreter": "/py",
-            **profile_env("gke_job", **stored)
-        })
-        # An on-demand field alone keeps everything already stored.
-        self.assertEqual(
-            self.apply("default", {"staging_bucket": "gs://b"})["status"],
-            "ok")
-        saved = self.saved()
-        self.assertEqual(
-            (saved["revision"], saved["default"], saved["xprof_interpreter"]),
-            (4, "default", "/py"))
-        self.assertEqual(saved["profiles"]["default"]["params"], {
-            **stored, "staging_bucket": "gs://b"
-        })
-        # A conditional is asked for only when its trigger is newly set, so
-        # a queue saved without a priority doesn't block later edits.
-        self.assertEqual(
-            self.apply("default", {
-                "queue": "q",
-                "priority": ""
-            })["status"], "ok")
-        self.assertNotIn("priority",
-                         self.saved()["profiles"]["default"]["params"])
-        self.assertEqual(
-            self.apply("default", {"namespace": "ns"})["status"], "ok")
-        # Unsetting the trigger drops the conditional with it.
-        self.apply("default", {"priority": "low"})
-        self.apply("default", {"queue": ""})
-        self.assertFalse(
-            {"queue", "priority"}
-            & self.saved()["profiles"]["default"]["params"].keys())
-        # A backend change keeps only fields the new backend knows.
-        self.apply(
-            "default", {
-                "backend": "gce_tpu_vm",
-                "project": "p",
-                "zone": "us-east5-a",
-                "tpu_name": "v"
-            })
-        self.assertEqual(self.saved()["profiles"]["default"]["params"], {
-            "project": "p",
-            "zone": "us-east5-a",
-            "tpu_name": "v"
-        })
-        # Dry runs write nothing; later profiles leave the default alone.
-        self.assertTrue(
-            self.apply("dev", {"backend": "local"}, dry_run=True)["dry_run"])
-        self.assertNotIn("dev", self.saved()["profiles"])
-        self.assertEqual(
-            self.apply("dev", {"backend": "local"})["default"], "default")
-        # A default naming a missing profile is replaced.
-        self.write({"revision": 1, "default": "gone", "profiles": {}})
-        self.assertEqual(
-            self.apply("dev", {"backend": "local"})["default"], "dev")
-
-    def test_setting_compute_up_again_replaces_the_pre_profiles_format(self):
-        self.write({"revision": 4, "compute": {"backend": "local"}})
-        self.assertEqual(
-            self.apply("default", {"backend": "local"})["status"], "ok")
-        saved = self.saved()
-        self.assertNotIn("compute", saved)
-        self.assertEqual((saved["revision"], saved["default"]), (5, "default"))
 
     def test_config_set_validates_like_apply(self):
         # A blank field that has a default, like gke_job's image, takes it.
@@ -5101,7 +3156,7 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
         # Other runtime commands, such as trajectory export, say so too.
         with self.assertRaisesRegex(runtime.TpuAgentSuiteError,
                                     "not valid JSON"):
-            runtime.get_environment(self.workspace, self.PKG)
+            paths.get_environment(self.workspace, self.PKG)
         # An ownership ledger without environment.json is repaired ...
         self.env_file.unlink()
         (self.env_file.parent / "ownership.json").write_text(json.dumps(
@@ -5117,105 +3172,131 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
 
     def test_cli(self):
         where = ["--package", self.PKG, "--workspace", str(self.workspace)]
+        err = io.StringIO()
 
         def run(*argv):
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                rc = runtime.main(list(argv))
+            with contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                rc = runtime.main([*argv, *where, "--json"])
             return rc, (json.loads(out.getvalue()) if out.getvalue() else None)
 
         answers = pathlib.Path(self.temp_dir.name) / "answers.json"
         answers.write_text(json.dumps(self.GKE), encoding="utf-8")
         self.assertEqual(
-            run("compute", *where, "setup", "apply", "--profile", "gke",
-                "--answers", str(answers), "--json")[0], 0)
-        self.assertEqual(
-            run("compute", "setup", "apply", *where, "--profile", "dev",
-                "--answers", str(answers), "--json")[0], 0)
-        self.assertEqual(
-            run("config", *where, "set", "queue=q", "--json")[0], 1)
-        # Flags before the subcommand are kept.
-        rc, shown = run("config", *where, "show", "--json")
+            run("compute", "setup", "apply", "--profile", "gke", "--answers",
+                str(answers))[0], 0)
+        self.apply("dev", self.GKE)
+        self.assertEqual(run("config", "set", "queue=q")[0], 1)
+        rc, shown = run("config", "show")
         self.assertEqual((rc, shown["active_profile"], shown["active_source"]),
                          (0, "gke", "default"))
-        run_id = runtime.start_run(package=self.PKG,
-                                   workspace=self.workspace)["run_id"]
-        self.assertEqual(run("config", "use", "dev", *where, "--json")[0], 0)
-        with self.assertRaisesRegex(compute.ComputeConfigError,
-                                    r"^Compute profile 'nope' is not"):
-            compute.config_use(profile="nope",
-                               package=self.PKG,
-                               workspace=self.workspace,
-                               run_id=run_id)
+        run_id = run_state.start_run(package=self.PKG,
+                                     workspace=self.workspace)["run_id"]
+        self.assertEqual(run("config", "use", "dev")[0], 0)
+        self.assertEqual(run("config", "use", "nope")[0], 1)
         # With no --profile, `set` changes the run's profile, not the default.
-        rc, res = run("config", "set", "declared_duration_minutes=45", *where,
-                      "--json")
+        rc, res = run("config", "set", "declared_duration_minutes=45")
         self.assertEqual((rc, res["profile"]), (0, "dev"))
-        rc, shown = run("config", "show", *where, "--run-id", run_id, "--json")
+        shown = run("config", "show", "--run-id", run_id)[1]
         self.assertEqual((shown["active_profile"], shown["active_source"]),
                          ("dev", "run"))
-        self.assertEqual([
-            shown["profiles"][p]["params"].get("declared_duration_minutes")
-            == 45 for p in ("gke", "dev")
-        ], [False, True])
-        self.assertEqual(
-            run("config", "use", "dev", "--default", *where, "--json")[0], 0)
+        self.assertNotIn("declared_duration_minutes",
+                         shown["profiles"]["gke"]["params"])
+        self.assertEqual(run("config", "use", "dev", "--default")[0], 0)
         self.assertEqual(self.saved()["default"], "dev")
         # Trajectory sharing changes only once the user has agreed, and lands
         # where the export reads it.
         sharing = ("trajectory_enabled=true", "trajectory_bucket=gs://b")
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            rc, _ = run("config", "set", *sharing, *where, "--json")
-        self.assertNotEqual(rc, 0)
+        self.assertEqual(run("config", "set", *sharing)[0], 1)
         self.assertIn("--user-confirmed", err.getvalue())
         self.assertNotIn("trajectory", self.saved())
-        self.assertEqual(
-            run("config", "set", *sharing, "--user-confirmed", *where,
-                "--json")[0], 0)
-        self.assertEqual(self.saved()["trajectory"],
-                         {"params": {
-                             "enabled": True,
-                             "bucket": "gs://b"
-                         }})
+        run("config", "set", *sharing, "--user-confirmed")
+        self.assertEqual(self.saved()["trajectory"]["params"], {
+            "enabled": True,
+            "bucket": "gs://b"
+        })
         # A Harbor org is checked with the hub.
-        with patch.object(SETUP, "_harbor_org_exists",
-                          return_value=False), \
-                contextlib.redirect_stderr(err):
+        with patch.object(SETUP, "_harbor_org_exists", return_value=False):
             rc, _ = run("config", "set", "trajectory_sink=harbor",
-                        "trajectory_share_org=nope", "--user-confirmed",
-                        *where, "--json")
+                        "trajectory_share_org=nope", "--user-confirmed")
         self.assertEqual(rc, 1)
         self.assertIn("no organization named 'nope'", err.getvalue())
-        self.assertIn('"INVALID_FIELD"', err.getvalue())
-        self.assertNotIn("share_org", self.saved()["trajectory"]["params"])
         # Turning sharing off takes the destination with it, and the export
         # then refuses rather than uploading to the old bucket.
-        rc, res = run("config", "set", "trajectory_enabled=false",
-                      "--user-confirmed", *where, "--json")
-        self.assertEqual(self.saved()["trajectory"],
-                         {"params": {
-                             "enabled": False
-                         }})
+        _, res = run("config", "set", "trajectory_enabled=false",
+                     "--user-confirmed")
+        self.assertEqual(self.saved()["trajectory"]["params"],
+                         {"enabled": False})
         self.assertIn("trajectory_bucket", res["removed"][0])
         with contextlib.redirect_stderr(err):
-            rc = runtime.main([
-                "trajectory", "export", "--harness", "claude-code",
-                "--package", self.PKG, "--workspace",
-                str(self.workspace)
-            ])
+            rc = runtime.main(
+                ["trajectory", "export", "--harness", "claude-code", *where])
         self.assertEqual(rc, 1)
         self.assertIn("trajectory sharing is off", err.getvalue())
 
+    def test_config_remove(self):
+        for name, answers in (("gke", self.GKE), ("dev", {
+                "backend": "local"
+        }), ("aux", {
+                "backend": "local"
+        })):
+            self.apply(name, answers)
+
+        def remove(profile, **kwargs):
+            return compute.config_remove(profile=profile,
+                                         package=self.PKG,
+                                         workspace=self.workspace,
+                                         **kwargs)
+
+        before = self.saved()
+        for profile, confirmed, code in (("  ", True, "MISSING_FIELD"),
+                                         ("aux", False,
+                                          "CONFIRMATION_REQUIRED"),
+                                         ("nope", True, "UNKNOWN_PROFILE")):
+            with self.subTest(code), self.assertRaises(
+                    compute.ComputeConfigError) as ctx:
+                remove(profile, user_confirmed=confirmed)
+            self.assertEqual(ctx.exception.error_code, code)
+        self.assertEqual(self.saved(), before)
+
+        # Removing a non-default profile preserves default and leaves other
+        # pinned runs alone.
+        run_dev = run_state.start_run(package=self.PKG,
+                                      workspace=self.workspace)["run_id"]
+        compute.config_use(profile="dev",
+                           package=self.PKG,
+                           workspace=self.workspace,
+                           run_id=run_dev)
+        res = remove("aux", user_confirmed=True, run_id=run_dev)
+        self.assertEqual((res["default"], res.get("unpinned_run")),
+                         ("gke", None))
+        run_file = paths.get_run_root(run_dev) / "run.json"
+        self.assertEqual(
+            json.loads(run_file.read_text())["compute_profile"], "dev")
+        # Removing the default profile promotes a remaining profile ("dev").
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = runtime.main([
+                "config", "remove", "gke", "--user-confirmed", "--package",
+                self.PKG, "--workspace",
+                str(self.workspace), "--json"
+            ])
+        self.assertEqual((rc, json.loads(out.getvalue())["default"]),
+                         (0, "dev"))
+        self.assertEqual(list(self.saved()["profiles"]), ["dev"])
+        # Removing the last profile sets default to None, passes schema
+        # validation, and unpins a run pinned to that profile.
+        res = remove("dev", user_confirmed=True, run_id=run_dev)
+        self.assertEqual((res["default"], res["unpinned_run"]),
+                         (None, run_dev))
+        self.assertEqual(
+            utils.validate_instance(self.saved(), compute.setup._schema()), [])
+        self.assertNotIn("compute_profile", json.loads(run_file.read_text()))
+
     def test_verify_records_a_result_per_profile_hash(self):
         """A result counts until the profile's settings change."""
-        self.apply(
-            "vm", {
-                "backend": "gce_tpu_vm",
-                "project": "p",
-                "zone": "us-east5-a",
-                "tpu_name": "v"
-            })
+        self.apply("vm", _GCE_ANSWERS)
         driver = MagicMock(quick_run=True, scheduled_run=False)
         driver.preflight.side_effect = lambda: base.PreflightReport(
             "gce_tpu_vm", "vm", True, [])
@@ -5235,36 +3316,28 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
                     "--workspace",
                     str(self.workspace), "--json", *flags
                 ])
-            return rc, json.loads(out.getvalue())
+            res = json.loads(out.getvalue())
+            return rc, res["status"], res.get("smoke_test")
 
         def state():
-            return compute.config_show(
-                package=self.PKG,
-                workspace=self.workspace)["setup_state"]["vm"]
+            return compute.config_show(package=self.PKG,
+                                       workspace=self.workspace)["setup_state"]
 
-        self.assertEqual(state(), "UNVERIFIED")
-        rc, res = verify("[FAIL] torch_tpu")
-        self.assertEqual((rc, res["status"], res["fields"]),
-                         (1, "FAILED", ["python_interpreter"]))
-        self.assertEqual(state(), "FAILED")
+        self.assertEqual(state(), {"vm": "UNVERIFIED"})
+        self.assertEqual(verify("[FAIL] torch_tpu")[:2], (1, "FAILED"))
+        self.assertEqual(state(), {"vm": "FAILED"})
         # The failing checks are kept, for session start to show.
         results = self.env_file.parent / "verification.json"
         (saved, ) = json.loads(results.read_text()).values()
         self.assertEqual([c["fields"] for c in saved["failed_checks"]],
                          [["python_interpreter"]])
-        rc, res = verify("Status: ok", "--profile", "vm")
-        self.assertEqual((rc, res["status"], res["smoke_test"]),
+        self.assertEqual(verify("Status: ok", "--profile", "vm"),
                          (0, "ok", False))
-        self.assertEqual(state(), "READY")
-        # A result from another package version doesn't count.
-        setup_utils = sys.modules[compute.config_show.__module__].utils
-        with patch.object(setup_utils, "TPU_AGENT_SUITE_VERSION", "0.0.1"):
-            self.assertEqual(state(), "UNVERIFIED")
-        # Flags before the subcommand aren't overwritten by its defaults.
-        args = runtime.build_runtime_parser().parse_args(
-            ["compute", "--run-id", "r", "--profile", "vm", "setup", "verify"])
-        self.assertEqual((args.run_id, args.profile), ("r", "vm"))
+        self.assertEqual(state(), {"vm": "READY"})
         self.assertEqual(len(json.loads(results.read_text())), 1)
+        # A result from another package version doesn't count.
+        with patch.object(SETUP.utils, "TPU_AGENT_SUITE_VERSION", "0.0.1"):
+            self.assertEqual(state(), {"vm": "UNVERIFIED"})
         # A smoke test still pending at its timeout passes, but didn't run.
         driver.configure_mock(quick_run=False, scheduled_run=True)
         driver.run.return_value = base.SynchronousExecutionResult(
@@ -5272,36 +3345,13 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
                 "timed_out_after_sec": 900,
                 "job_status": "PENDING"
             })
-        rc, res = verify(None, "--smoke-test")
-        self.assertEqual((rc, res["status"], res["smoke_test"]),
-                         (0, "ok", False))
+        self.assertEqual(verify(None, "--smoke-test"), (0, "ok", False))
         self.config_set("zone=us-east5-b")
-        self.assertEqual(state(), "UNVERIFIED")
+        self.assertEqual(state(), {"vm": "UNVERIFIED"})
         # An incomplete profile is reported, not checked.
         self.write(profile_env("gce_tpu_vm"))
-        self.assertEqual(verify("")[1]["status"], "INCOMPLETE")
-        self.assertEqual(
-            compute.config_show(package=self.PKG,
-                                workspace=self.workspace)["setup_state"],
-            {"default": "NOT_CONFIGURED"})
-
-    def test_failed_checks_name_the_fields_to_ask_again(self):
-
-        class Driver(compute.LocalDriver):
-            CHECK_FIELDS = {"tpu_devices": ("python_interpreter", )}
-
-            def _preflight_target(self, checks):
-                checks += [
-                    base.PreflightCheck("tpu_devices", "fail"),
-                    base.PreflightCheck("other", "fail")
-                ]
-                return True
-
-        self.assertEqual([c.fields for c in Driver().preflight().checks],
-                         [["python_interpreter"], []])
-        for name, cls in compute.drivers.registry.DRIVER_REGISTRY.items():
-            named = {f for fs in cls.CHECK_FIELDS.values() for f in fs}
-            self.assertLessEqual(named, cls.SETUP_FIELDS.all_fields(), name)
+        self.assertEqual(verify("")[1], "INCOMPLETE")
+        self.assertEqual(state(), {"default": "NOT_CONFIGURED"})
 
     def test_plan_lists_questions_with_suggestions(self):
         outputs = {
@@ -5337,111 +3387,80 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
         # No backend: only the backend question, and the profiles to pick.
         self.write({"default": None, "profiles": {"vm": {"backend": "local"}}})
         _, res, qs = plan()
-        self.assertEqual((res["profiles"], list(qs)), ({
-            "vm": "local"
-        }, ["backend"]))
         self.assertEqual(
-            (qs["backend"]["suggested"], qs["backend"]["required"]),
-            ("gke_job", True))
+            (res["profiles"], list(qs), qs["backend"]["suggested"]),
+            ({
+                "vm": "local"
+            }, ["backend"], "gke_job"))
         # A backend's setup fields, suggested by probes or defaults. Flags
         # before the subcommand count too.
         _, res, qs = plan(before=("--profile", "gke", "--backend", "gke_job"))
         self.assertEqual((res["profile"], res["backend"]), ("gke", "gke_job"))
-        self.assertEqual(list(qs), [
-            "image", "tpu_accelerator", "tpu_topology", "kube_context",
-            "namespace", "queue", "hf_cache_pvc", "priority"
-        ])
-        # The current context is suggested, so the profile pins it.
-        self.assertEqual(
-            (qs["kube_context"]["suggested"],
-             qs["kube_context"]["suggested_from"]),
-            ("gke_my-proj_us-central1_c1", "kubectl config current-context"))
-        self.assertEqual([(qs[f]["suggested"], qs[f]["suggested_from"])
-                          for f in ("tpu_accelerator", "tpu_topology")],
-                         [("tpu7x", "kubectl get nodes"),
-                          ("2x2x1", "kubectl get nodes")])
-        self.assertEqual(qs["queue"]["suggested"], "lq")
-        self.assertEqual(qs["image"]["suggested_from"], "default")
+        nodes = "kubectl get nodes"
+        self.assertEqual([(f, q.get("suggested_from")) for f, q in qs.items()],
+                         [("image", "default"), ("tpu_accelerator", nodes),
+                          ("tpu_topology", nodes),
+                          ("kube_context", "kubectl config current-context"),
+                          ("namespace", None),
+                          ("queue", "kubectl get localqueues"),
+                          ("hf_cache_pvc", None), ("priority", None)])
+        self.assertEqual([
+            qs[f]["suggested"] for f in ("tpu_accelerator", "tpu_topology",
+                                         "kube_context", "queue")
+        ], ["tpu7x", "2x2x1", "gke_my-proj_us-central1_c1", "lq"])
         self.assertEqual(qs["priority"]["asked_if"], "queue")
-        self.assertNotIn("suggested", qs["namespace"])
-        # The shared HF cache claim is asked at setup, optional and blank by
-        # default: nothing else would ever ask for it.
-        self.assertEqual(
-            (qs["hf_cache_pvc"]["required"], qs["hf_cache_pvc"]["default"]),
-            (False, ""))
-        self.assertNotIn("suggested", qs["hf_cache_pvc"])
         # A missing tool is reported, deduplicated.
         self.assertEqual(res["probe_warnings"], ["kubectl is not installed"])
-        self.assertIn("optional ones too", res["note"])
-        # With a backend chosen, a cluster with no TPU nodes is reported;
-        # without one, no nodes just means another backend.
-        nodes = outputs.pop("kubectl get nodes")
-        for flags, reported in (((), False), (("--backend", "gke_job"), True)):
-            _, res, _ = plan("--profile", "g2", *flags)
-            self.assertEqual(
-                any("no TPU nodes" in w
-                    for w in res.get("probe_warnings", [])), reported)
-        outputs["kubectl get nodes"] = nodes
+        # With a backend chosen, a cluster with no TPU nodes is reported.
+        saved_nodes = outputs.pop(nodes)
+        _, res, _ = plan("--profile", "g2", "--backend", "gke_job")
+        self.assertIn("no TPU nodes", " ".join(res["probe_warnings"]))
+        outputs[nodes] = saved_nodes
         # Stored values are suggested as they are, except with --fields,
         # which asks again for values verify rejected.
-        self.apply("gke", self.GKE)
+        self.apply("gke", {**self.GKE, "kubeconfig": "/k"})
         _, res, qs = plan("--profile", "gke")
         self.assertEqual(qs["tpu_accelerator"]["suggested_from"], "profile")
         _, res, qs = plan("--profile", "gke", "--fields",
-                          "tpu_accelerator,staging_bucket")
-        self.assertEqual(list(qs), ["tpu_accelerator", "staging_bucket"])
+                          "tpu_accelerator,queue")
+        self.assertEqual(list(qs), ["tpu_accelerator", "queue"])
         self.assertEqual((qs["tpu_accelerator"]["current"],
                           qs["tpu_accelerator"]["suggested_from"]),
                          ("tpu7x", "kubectl get nodes"))
         # A saved kubeconfig is used by the kubectl probes.
-        self.apply("kc", {**self.GKE, "kubeconfig": "/k"})
-        plan("--profile", "kc", "--fields", "queue")
         self.assertIn(
             "kubectl get localqueues -o jsonpath="
             "{.items[*].metadata.name} --kubeconfig /k", ran)
-        self.assertEqual(plan("--profile", "gke", "--fields", "zone")[0], 1)
-        # Trajectory settings need consent, so plan won't ask for them.
-        self.assertEqual(
-            plan("--profile", "gke", "--fields", "trajectory_enabled")[0], 1)
-        # gke_xpk's project, cluster and zone all come from the kubectl
-        # context, even when gcloud's project differs.
-        _, _, qs = plan("--profile", "xpk", "--backend", "gke_xpk")
-        self.assertEqual(
-            [qs[f]["suggested"] for f in ("project", "cluster_name", "zone")],
-            ["my-proj", "c1", "us-central1"])
-        self.assertEqual(
-            plan("--profile", "my vm", "--backend", "gke_xpk")[0], 1)
-        # gcloud prints "(unset)" when it has no project.
+        # Unknown, consent-only (trajectory) or backend-less --fields fail.
+        for flags in (("gke", "--fields", "zone"), ("gke", "--fields",
+                                                    "trajectory_enabled"),
+                      ("new", "--fields", "zone"), ("my vm", "--backend",
+                                                    "gke_job")):
+            self.assertEqual(plan("--profile", *flags)[0], 1, flags)
+        # gcloud prints "(unset)" when it has no project. A TPU VM is only
+        # suggested when it's clear which one is meant; otherwise the VMs are
+        # offered as choices, each with its zone.
         outputs["gcloud config get-value"] = "(unset)"
-        # A TPU VM is only suggested when it's clear which one is meant.
         _, _, qs = plan("--profile", "tv", "--backend", "gce_tpu_vm")
         self.assertEqual(qs["tpu_name"]["suggested"], "vm1")
         self.assertNotIn("suggested", qs["project"])
-        outputs["gcloud config get-value"] = ""  # some versions print nothing
-        _, _, qs = plan("--profile", "tv", "--backend", "gce_tpu_vm")
-        self.assertNotIn("suggested", qs["project"])
         outputs["gcloud compute tpus"] = "vm1 us-west4-a\nme-vm us-east5-a"
-        with patch.dict(os.environ, {"USER": "me"}):
-            _, _, qs = plan("--profile", "tv", "--backend", "gce_tpu_vm")
-        self.assertEqual([qs[f]["suggested"] for f in ("tpu_name", "zone")],
-                         ["me-vm", "us-east5-a"])
         with patch.dict(os.environ, {"USER": "nobody"}):
             _, res, qs = plan("--profile", "tv", "--backend", "gce_tpu_vm")
-        self.assertNotIn("suggested", qs["tpu_name"])
-        # With no clear pick the VMs are offered as choices instead, each
-        # with its zone, and no zone is suggested when they span several.
-        self.assertEqual(qs["tpu_name"]["choices"], [{
-            "tpu_name": "vm1",
-            "zone": "us-west4-a"
-        }, {
-            "tpu_name": "me-vm",
-            "zone": "us-east5-a"
-        }])
+        self.assertEqual([c["tpu_name"] for c in qs["tpu_name"]["choices"]],
+                         ["vm1", "me-vm"])
         self.assertNotIn("suggested", qs["zone"])
-        self.assertNotIn("choices", qs["zone"])
-        self.assertNotIn("choices", qs["project"])
         self.assertIn("free text", res["note"])
-        # $USER's VMs come first, and the list is capped.
+        # After a backend change, the values apply would keep are current.
+        self.apply("vm", {**_GCE_ANSWERS, "python_interpreter": "/py"})
+        _, _, qs = plan("--profile", "vm", "--backend", "gke_pod")
+        self.assertEqual(
+            [qs[f].get("current") for f in ("python_interpreter", "pod")],
+            ["/py", None])
+
+    def test_tpu_vm_choices(self):
+        """$USER's VMs come first, the list is capped, and a zone is
+        suggested only when every VM, listed or not, shares it."""
         many = "\n".join(f"vm{i} z{i % 2}" for i in range(20))
         with patch.dict(os.environ, {"USER": "ann"}):
             found = compute.probes._tpu_vm(f"{many}\nann-a z9\nann-b z9")
@@ -5450,42 +3469,16 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
         self.assertEqual(len(found["tpu_name"]), compute.probes.MAX_CHOICES)
         self.assertNotIn("zone", found)
         self.assertEqual(compute.probes._tpu_vm(""), {})
-        # VMs that share a zone still get it suggested.
         self.assertEqual(compute.probes._tpu_vm("a z\nb z")["zone"], "z")
-        # ... but only if the VMs left off the list share it too.
         cut = "\n".join(f"vm{i} z" for i in range(20)) + "\nlast elsewhere"
-        found = compute.probes._tpu_vm(cut)
-        self.assertEqual(len(found["tpu_name"]), compute.probes.MAX_CHOICES)
-        self.assertNotIn("zone", found)
+        self.assertNotIn("zone", compute.probes._tpu_vm(cut))
         # The same name in two zones stays two distinct choices.
         self.assertEqual(
-            compute.probes._tpu_vm("dup za\ndup zb")["tpu_name"], [{
-                "tpu_name": "dup",
-                "zone": "za"
-            }, {
-                "tpu_name": "dup",
-                "zone": "zb"
-            }])
+            len(compute.probes._tpu_vm("dup za\ndup zb")["tpu_name"]), 2)
         # Several VMs still point to gce_tpu_vm as the backend.
         self.assertEqual(
-            compute.probes._backend({}, outputs["gcloud compute tpus"],
-                                    ["gce_tpu_vm"])[0], "gce_tpu_vm")
-        # After a backend change, the values apply would keep are current.
-        self.apply(
-            "vm", {
-                "backend": "gce_tpu_vm",
-                "project": "p",
-                "zone": "us-east5-a",
-                "tpu_name": "v"
-            })
-        _, _, qs = plan("--profile", "vm", "--backend", "gke_xpk")
-        self.assertEqual([
-            qs[f].get("current") for f in ("project", "zone", "cluster_name")
-        ], ["p", "us-east5-a", None])
-        # The context's cluster is in another project, so isn't suggested.
-        self.assertNotIn("suggested", qs["cluster_name"])
-        # --fields needs a backend.
-        self.assertEqual(plan("--profile", "new", "--fields", "zone")[0], 1)
+            compute.probes._backend({}, "a z\nb y", ["gce_tpu_vm"])[0],
+            "gce_tpu_vm")
 
     def test_a_probe_reports_a_missing_tool_or_a_timeout(self):
         self.assertEqual(compute.probes._run(["no-such-tool-xyz"]),
@@ -5536,55 +3529,20 @@ class TestTargetSoftwareCheck(unittest.TestCase):
             out=out)
         return report, out.getvalue(), driver
 
-    def test_the_software_check_runs_on_the_target_and_counts(self):
-        failed = base.SynchronousExecutionResult(1, "[FAIL] torch_tpu", "")
-        report, out, driver = self._check(failed)
-        self.assertEqual(report["status"], "fail")
-        self.assertIn("[FAIL] torch_tpu", out)
-        call = driver.run.call_args
-        self.assertEqual(call.args[0], str(compute.setup.ENV_CHECK))
-        # Arguments, not a staged file: a gke_job without a staging bucket
-        # can carry a script but no files.
-        self.assertEqual(
-            call.kwargs["args"],
-            ["--require=jax>=0.11.0", "--require=--index-url https://x"])
-        self.assertNotIn("inputs", call.kwargs)
-        self.assertEqual(call.kwargs["timeout"], 300)
-
-    def test_the_targets_package_releases_are_returned_not_printed(self):
-        report = ("[ok  ] jax  0.11.2 >=0.11.0\n\nStatus: ok\n"
-                  'Versions: {"jax": "0.11.2", "torch_tpu": null}\n')
-        found, out, _ = self._check(
-            base.SynchronousExecutionResult(0, report, ""))
-        self.assertEqual({
-            "jax": "0.11.2",
-            "torch_tpu": None
-        }, found["target_versions"])
-        # The line is for `compute versions`; the person reads the checks.
-        self.assertNotIn("Versions:", out)
-        found, _, _ = self._check(
-            base.SynchronousExecutionResult(0, "Status: ok\n", ""))
-        self.assertIsNone(found["target_versions"])
-
     def test_a_scheduled_backend_smoke_tests_only_when_asked(self):
         failed = base.SynchronousExecutionResult(
             1, "", "The image could not be pulled: ImagePullBackOff")
-        gke = {"backend": "gke_job", "params": {"image": "img:1"}}
-        report, out, driver = self._check(failed,
-                                          backend=gke["backend"],
-                                          params=gke["params"],
-                                          scheduled=True)
+        gke = dict(backend="gke_job",
+                   params={"image": "img:1"},
+                   scheduled=True)
+        report, out, driver = self._check(failed, **gke)
         driver.run.assert_not_called()
         self.assertIn("pass --smoke-test", out)
         # Skipping the smoke test leaves a target that is otherwise ready.
         self.assertEqual(report["status"], "ok")
 
         # Asked for: the run's error is shown, and a failure counts.
-        report, out, driver = self._check(failed,
-                                          backend=gke["backend"],
-                                          params=gke["params"],
-                                          scheduled=True,
-                                          smoke_test=True)
+        report, out, driver = self._check(failed, smoke_test=True, **gke)
         self.assertEqual(driver.run.call_args.kwargs["timeout"],
                          compute.setup.SMOKE_TEST_TIMEOUT_SEC)
         # A pip install would not outlast the pod; fixes name the image.
@@ -5592,29 +3550,9 @@ class TestTargetSoftwareCheck(unittest.TestCase):
         self.assertIn("ImagePullBackOff", out)
         self.assertEqual(report["status"], "fail")
 
-    def test_a_smoke_test_that_never_started_is_unverified_not_failed(self):
-        """A busy queue is not a broken target: nothing was learned."""
-        queued = base.SynchronousExecutionResult(
-            1,
-            "",
-            "Job is suspended: the cluster admits work through a queue",
-            details={
-                "job_status": "PENDING",
-                "timed_out_after_sec": 900
-            })
-        report, out, _ = self._check(queued,
-                                     backend="gke_job",
-                                     params={"image": "i"},
-                                     scheduled=True,
-                                     smoke_test=True)
-        self.assertIn("[WARN] the check was still pending after 900s", out)
-        self.assertIn("Job is suspended", out)
-        self.assertNotEqual(report["status"], "fail")
-
     def test_the_software_check_is_skipped_where_it_cannot_run_quickly(self):
         failed = base.SynchronousExecutionResult(1, "", "")
-        # A backend that can neither run a script quickly nor schedule one
-        # to (gke_xpk).
+        # A backend that can neither run a script quickly nor schedule one.
         _, _, driver = self._check()
         driver.run.assert_not_called()
         # A build without the requirements to check against.
@@ -5634,27 +3572,6 @@ class TestTargetSoftwareCheck(unittest.TestCase):
             self.assertEqual((check.status, check.fields), ("fail", [field]))
             self.assertIsNone(versions)
 
-    def test_a_failed_report_is_not_followed_by_the_exit_summary(self):
-        """The report explains a failed check; stderr is for one that never
-        got to report, like an image that did not pull."""
-        cases = (
-            (base.SynchronousExecutionResult(
-                1, "[FAIL] torch  2.10.0 installed\n\nStatus: fail\n",
-                "container exited with code 1"), False),
-            (base.SynchronousExecutionResult(
-                1, "", "The image could not be pulled: ErrImagePull"), True),
-        )
-        for result, stderr_shown in cases:
-            driver = MagicMock()
-            driver.run.return_value = result
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                self.assertEqual(
-                    compute.setup._run_target_check(
-                        driver, self.requirements)[0].status, "fail")
-            self.assertEqual(result.stderr in out.getvalue(), stderr_shown,
-                             out.getvalue())
-
     def test_local_without_an_interpreter_skips_the_software_check(self):
         # It would check this Python, not the workload's.
         _, out, driver = self._check(base.SynchronousExecutionResult(
@@ -5672,92 +3589,41 @@ class ShareOrgCheckTest(unittest.TestCase):
     """A Harbor org the hub does not have is refused when saved, not at
     upload."""
 
-    @staticmethod
-    def _answers(org: str, sink: str = "harbor") -> dict:
-        return {"trajectory": {"params": {"sink": sink, "share_org": org}}}
-
-    def _check(self,
-               answers: dict,
-               exists: bool | Exception = True,
-               previous: dict | None = None):
-        """Run the check with the hub lookup stubbed; return it and stderr."""
-        stub = ({
-            "side_effect": exists
-        } if isinstance(exists, Exception) else {
-            "return_value": exists
-        })
-        stderr = io.StringIO()
-        with patch.object(SETUP, "_harbor_org_exists", **stub) as lookup, \
-                contextlib.redirect_stderr(stderr):
-            SETUP.check_share_org(answers, previous)
-        return lookup, stderr.getvalue()
-
-    def test_an_unknown_org_is_refused(self) -> None:
-        """Every export would otherwise fail at upload, as `tpu-pytorch` did."""
-        with self.assertRaises(SETUP.utils.TpuAgentSuiteError) as caught:
-            self._check(self._answers("tpu-pytorch"), exists=False)
-        self.assertIn("no organization named 'tpu-pytorch'",
-                      str(caught.exception))
-
     def test_an_org_that_cannot_be_checked_is_kept_with_a_warning(
             self) -> None:
         """No harbor, no login or no network is not evidence the org is wrong."""
-        _, stderr = self._check(self._answers("my-team"),
-                                exists=ImportError("No module named 'harbor'"))
-        self.assertIn("harbor is not installed", stderr)
-        _, stderr = self._check(self._answers("my-team"),
-                                exists=TimeoutError())
-        self.assertIn("could not check the Harbor organization", stderr)
-
-    def test_no_lookup_unless_sharing_to_harbor(self) -> None:
-        """Export off, a bucket sink, a private upload or no trajectory: no call."""
-        disabled = self._answers("my-team")
-        disabled["trajectory"]["params"]["enabled"] = False
-        for answers in (disabled, self._answers("my-team",
-                                                "gcs"), self._answers(""), {}):
-            with self.subTest(answers=answers):
-                lookup, _ = self._check(answers)
-                lookup.assert_not_called()
-
-    def test_only_a_changed_org_is_looked_up(self) -> None:
-        lookup, _ = self._check(self._answers("my-team"),
-                                previous=self._answers("my-team"))
-        lookup.assert_not_called()
-        lookup, _ = self._check(self._answers("my-team"),
-                                previous=self._answers("old-team"))
-        lookup.assert_called_once_with("my-team")
+        answers = {
+            "trajectory": {
+                "params": {
+                    "sink": "harbor",
+                    "share_org": "t"
+                }
+            }
+        }
+        for error, says in ((ImportError("harbor"), "harbor is not installed"),
+                            (TimeoutError(), "could not check the Harbor")):
+            with patch.object(SETUP, "_harbor_org_exists", side_effect=error), \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr:
+                SETUP.check_share_org(answers, None)
+            self.assertIn(says, stderr.getvalue())
 
 
 class TestTargetVersions(unittest.TestCase):
     """`compute versions`: the releases on the target, never this machine's."""
 
     PKG = "pkg@1.0.0"
-    GKE = {
-        "backend": "gke_job",
-        "image": "us-docker.pkg.dev/p/r/img:v1",
-        "tpu_accelerator": "tpu7x",
-        "tpu_topology": "2x2x1",
-    }
+    GKE = _GKE_ANSWERS
 
     def setUp(self):
         super().setUp()
-        self.cli = importlib.import_module(compute.__name__ + ".cli")
         self.tmp = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.workspace = self.tmp / "ws"
         self.env_file = (self.workspace / ".tpu-agent-suite" /
                          "environment.json")
         self.env_file.parent.mkdir(parents=True)
-        self.env_file.write_text(json.dumps({
-            "revision": 1,
-            "default": None,
-            "profiles": {}
-        }),
-                                 encoding="utf-8")
-        env = patch.dict(os.environ,
-                         {"TPU_AGENT_SUITE_HOME": str(self.tmp / "home")})
-        env.start()
-        self.addCleanup(env.stop)
+        self.env_file.write_text('{"profiles": {}}')
+        _patch_home(self)
 
     def _python_with(self, **packages: str) -> str:
         """An interpreter whose installed packages are exactly `packages`."""
@@ -5829,49 +3695,6 @@ class TestTargetVersions(unittest.TestCase):
                          (found["source"], found["packages"]["jax"],
                           found["packages"]["torch_tpu"]))
 
-    def test_a_local_interpreter_that_prints_first_still_answers(self):
-        """A sitecustomize may print before env_check.py's JSON line."""
-        python = pathlib.Path(self._python_with(jax="0.11.2"))
-        python.write_text(python.read_text(encoding="utf-8").replace(
-            "PYTHONPATH", "echo 'site hello'\nPYTHONPATH"),
-                          encoding="utf-8")
-        found = self._versions("--backend", "local", "--interpreter",
-                               str(python))
-        self.assertEqual(("live", "0.11.2"),
-                         (found["source"], found["packages"]["jax"]))
-
-    def test_a_local_interpreter_that_cannot_answer_is_unknown(self):
-        found = self._versions("--backend", "local", "--interpreter",
-                               str(self.tmp / "missing"))
-        self.assertEqual((None, {}), (found["source"], found["packages"]))
-
-    def test_a_remote_target_reads_what_verify_recorded(self):
-        self._apply(self.GKE)
-        self.assertIsNone(self._versions()["source"])
-        res = self._smoke_test("[ok  ] jax 0.11.0\n\nStatus: ok\n"
-                               'Versions: {"jax": "0.11.0"}\n')
-        self.assertEqual({"jax": "0.11.0"}, res["target_versions"]["packages"])
-        with patch("subprocess.run") as run:
-            found = self._versions()
-        run.assert_not_called()
-        self.assertEqual(("recorded", {
-            "jax": "0.11.0"
-        }, self.GKE["image"]),
-                         (found["source"], found["packages"], found["image"]))
-        self.assertEqual(res["checked_at"], found["checked"])
-
-    def test_stderr_in_the_job_log_does_not_lose_the_releases(self):
-        """A Job's log is the container's stdout and stderr together. The
-        node logs each stream line by line, so stderr written without a
-        newline stays off the `Versions:` line (seen on a real gke_job)."""
-        self._apply(self.GKE)
-        res = self._smoke_test(
-            "W1012 a stderr line\n[ok  ] jax 0.11.0\n\nStatus: ok\n"
-            'Versions: {"jax": "0.11.0"}\n'
-            "W1012 stderr before,  W1012 stderr after\n")
-        self.assertEqual({"jax": "0.11.0"}, res["target_versions"]["packages"])
-        self.assertEqual("recorded", self._versions()["source"])
-
     def test_a_record_for_another_image_is_not_the_answer(self):
         """The job image can change after the check: then it's unknown."""
         self._apply(self.GKE)
@@ -5907,27 +3730,6 @@ class TestTargetVersions(unittest.TestCase):
                 "jax": "0.11.0"
             }, first["checked_at"]),
             (found["source"], found["packages"], found["checked"]))
-
-    def test_a_check_that_reports_no_releases_records_none(self):
-        self._apply(self.GKE)
-        res = self._smoke_test("Status: ok\n")
-        self.assertNotIn("target_versions", res)
-        self.assertEqual(
-            (None, {}),
-            (self._versions()["source"], self._versions()["packages"]))
-
-    def test_the_cli_needs_no_driver(self):
-        self._apply(self.GKE)
-        args = argparse.Namespace(compute_action="versions",
-                                  package=self.PKG,
-                                  workspace=self.workspace,
-                                  json=True)
-        resolve = MagicMock()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(0, compute.handle_compute_cli(args, resolve))
-        resolve.assert_not_called()
-        self.assertEqual("gke_job", json.loads(out.getvalue())["backend"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,127 @@
+{
+ "case": "gemma4_tp4dp2_8k1k_c128",
+ "framework": "vllm_torchtpu",
+ "profiles": [
+  {
+   "key": "prefill-only",
+   "role": "prefill",
+   "session_id": "session-7075122320044191907",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 15.0,
+      "idle_frac": 0.008233169,
+      "mean_bucket": 2496.0,
+      "mean_dur_ms": 125.5385877,
+      "p90_dur_ms": 127.5654652
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 15.0,
+      "idle_frac": 0.008233169,
+      "mean_bucket": 2496.0,
+      "mean_dur_ms": 125.5385877,
+      "p90_dur_ms": 127.5654652
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D7_collective_bound",
+      "title": "Step is collective-bound",
+      "phase": "prefill_or_mixed",
+      "summary": "Collectives are 43.1% of the prefill_or_mixed step (exposed on the TensorCore timeline). Review the mesh / collective overlap.",
+      "evidence": [
+       {
+        "metric": "collective share",
+        "value": 43.08288552885586,
+        "unit": "%",
+        "detail": "",
+        "xprof_link": null
+       },
+       {
+        "metric": "top op `distributed_all_reduce.1079`",
+        "value": 455.08573333333334,
+        "unit": " \u00b5s/step",
+        "detail": "1\u00d7/step",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "low",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": "Hand off to the mesh step (mesh) and xla_flag_optimizer (collective-matmul / async collective flags). Subtract the D6 barrier excess first: part of this may be imbalance wait.",
+      "source_refs": [],
+      "lever": "mesh",
+      "couples_with": [
+       "mesh"
+      ],
+      "score": 0.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "decode-only",
+   "role": "decode",
+   "session_id": "session-3960827499981274547",
+   "result": {
+    "phase_stats": [
+     {
+      "phase": "decode",
+      "n_steps_per_device": 15.0,
+      "idle_frac": 0.0017909846,
+      "mean_bucket": 64.0,
+      "mean_dur_ms": 16.9959877333,
+      "p90_dur_ms": 17.0132538
+     },
+     {
+      "phase": "prefill_or_mixed",
+      "n_steps_per_device": 1.0,
+      "idle_frac": 0.0003605461,
+      "mean_bucket": 2048.0,
+      "mean_dur_ms": 87.157157,
+      "p90_dur_ms": 87.157157
+     },
+     {
+      "phase": "all",
+      "n_steps_per_device": 15.5,
+      "idle_frac": 0.0015752227,
+      "mean_bucket": 128.0,
+      "mean_dur_ms": 19.2592512581,
+      "p90_dur_ms": 17.013414
+     }
+    ],
+    "findings": [
+     {
+      "detector_id": "D14_profile_hygiene",
+      "title": "Profile quality limits confidence",
+      "phase": "all",
+      "summary": "Re-profile to raise confidence: 1 prefill_or_mixed step(s) ignored as a minority phase.",
+      "evidence": [
+       {
+        "metric": "prefill_or_mixed steps per device (skipped)",
+        "value": 1.0,
+        "unit": "",
+        "detail": "",
+        "xprof_link": null
+       }
+      ],
+      "knob_changes": [],
+      "risk": "diagnostic",
+      "confidence": "high",
+      "est_step_fraction_saved": 0.0,
+      "validation": "",
+      "kernel_followup": null,
+      "source_refs": [],
+      "lever": "diagnostic",
+      "couples_with": [],
+      "score": 0.0
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -13,20 +13,14 @@
 # limitations under the License.
 
 [judge]
-judge = "vertex_ai/gemini-3.5-flash"
+judge = "vertex_ai/gemini-3.8-flash"
 atif-trajectory = "/logs/agent/trajectory.json"
 timeout = 600
 
 [[criterion]]
-description = "Identifies and reports top 5 popular HuggingFace models under 8B parameters using smart_hf_search."
+description = "Identifies and reports top 5 popular HuggingFace models under 8B parameters using smart-hf-search."
 type = "binary"
 weight = 1.0
-
-[[criterion]]
-description = "Routes the request from tpu-agent to tpu-model-onboarding to search HuggingFace models."
-type = "binary"
-weight = 1.0
-
 
 [scoring]
 aggregation = "weighted_mean"

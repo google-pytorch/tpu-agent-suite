@@ -1,0 +1,8 @@
+{
+  "healthy": true,
+  "url": "http://localhost:8000/health",
+  "status_code": 200,
+  "detail": "",
+  "attempts": 1,
+  "waited_seconds": 1
+}

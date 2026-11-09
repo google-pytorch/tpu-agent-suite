@@ -88,13 +88,33 @@ class CostModel(unittest.TestCase):
         roles = {g["cell"]: g for g in c["guardrails"]}
         self.assertEqual(set(roles), {"d1", "m"})  # heaviest decode + mixed
         self.assertTrue(roles["m"]["regressed"])
+        self.assertAlmostEqual(c["covered_share"], 1.0)
         self.assertAlmostEqual(c["served_output_gain_modelled"],
                                100.0 / (90.0 / (24.0 / 23.0) + 10.0),
                                places=4)
+        self.assertIn("covered_share / speedup + 1 - covered_share",
+                      c["served_gain_rule"])
         self.assertTrue(c["significant"])
         noisy = evaluate(self.CELLS, self._t(8.0, 20.0, 1100.0, jitter=0.5))
         self.assertFalse(
             compare(self.CELLS, base, noisy, 90.0, 10.0)["significant"])
+
+    def test_compare_partial_coverage_leaves_unmeasured_busy_unchanged(self):
+        from core.costmodel import compare, evaluate
+        tb = self._t(10.0, 20.0, 1000.0)
+        tc = self._t(5.0, 10.0, 1000.0)
+        del tb["m"], tc["m"]  # d1 (0.6) + d4 (0.2) = 0.8 covered, 2.0x speedup
+        base = evaluate(self.CELLS, tb)
+        cand = evaluate(self.CELLS, tc)
+        c = compare(self.CELLS, base, cand, busy_s=90.0, idle_s=10.0)
+        self.assertEqual(c["cells_compared"], 2)
+        self.assertAlmostEqual(c["covered_share"], 0.8)
+        self.assertAlmostEqual(c["speedup"], 2.0)
+        # busy_after = 90 * (0.8 / 2.0 + 0.2) = 54.0 -> 100 / (54 + 10) = 1.5625
+        # (vs full-extrapolation 100 / (45 + 10) = 1.8182)
+        self.assertAlmostEqual(c["served_output_gain_modelled"],
+                               100.0 / (90.0 * (0.8 / 2.0 + 0.2) + 10.0),
+                               places=4)
 
     def test_a_missing_cell_is_listed_not_zero(self):
         from core.costmodel import evaluate

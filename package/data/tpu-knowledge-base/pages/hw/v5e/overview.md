@@ -10,6 +10,7 @@ source_ids:
 - xla-scoped-vmem
 - openxla-tiled-layout
 - openxla-sparsecore
+- tpu-info-chips
 generation_recipe: overview.recipe.json
 ---
 
@@ -32,7 +33,7 @@ The generic OpenXLA layout reference describes 32-bit values using an `8x128` ve
 
 Each TPU v5e chip is provisioned with High Bandwidth Memory (HBM) alongside dedicated on-chip scratchpad storage [^cloud-tpu-v5e], [^xla-scoped-vmem].
 
-* **High Bandwidth Memory (HBM):** 16 GB capacity per chip with an interconnect bandwidth of 800 GiBps [^cloud-tpu-v5e].
+* **High Bandwidth Memory (HBM):** 16 GiB capacity per chip with an interconnect bandwidth of 800 GiBps [^cloud-tpu-v5e] [^tpu-info-chips]. *(knowledge base note: the v5e page writes 16 GB; HBM capacities are binary, and the tpu_info chip table gives 16 GiB.)*
 * **Host DRAM:** 512 GiB of main memory per physical 8-chip host [^cloud-tpu-v5e].
 * **Vector Memory (VMEM):** Local on-chip scratchpad memory utilized exclusively by the TensorCore for instruction-scoped temporaries (such as register spills and double-buffered operand spans) and program-scoped values (intermediate HLO arrays) [^xla-scoped-vmem].
 * **Usable Scoped VMEM Limit:** 131,072 KiB / 134,217,728 bytes (128 MiB, derived) [^xla-scoped-vmem].
@@ -117,3 +118,5 @@ See [the generation-specific memory and buffer reference](memory-buffers.md) for
 [^openxla-sparsecore]: [OpenXLA SparseCore](https://github.com/openxla/xla/blob/main/docs/sparsecore.md). architecture-reference. SparseCore organization, scratch sizing and embedding stack estimates. URL checked 2026-10-03.
 
 <!-- sources:generated:end -->
+
+[^tpu-info-chips]: [tpu_info chip table](https://github.com/AI-Hypercomputer/cloud-accelerator-diagnostics/blob/main/tpu_info/tpu_info/device.py). code-reference. `TpuChip`: HBM per chip in GiB (`hbm_gib`) and devices per chip, the table `compute inspect` sizes from; checked at commit 35b5377566aa. URL checked 2026-10-27.

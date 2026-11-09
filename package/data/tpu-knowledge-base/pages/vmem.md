@@ -54,6 +54,12 @@ Compute–communication overlap (`index.py get concept-compute-communication-ove
   its own (`index.py get hw-tpu-v6e`, `index.py get hw-tpu-7x`, …).
 - What raising it does and does not buy — including that a flag win does not carry over to
   `vmem_limit_bytes` — is in BRIEFS (`index.py get briefs`).
+- A value above the usable limit is not an error on TPU7x: libtpu 0.0.44 clamped it to the usable
+  limit (`index.py get pallas-core-mental-model`). Recipes that pass 131072 on TPU7x, such as
+  torchtitan's Ironwood Llama 3 70B ones, run at the cap (`index.py get torchtitan-doc-errata`).
+- The default is not one number across sources: 32 MiB measured for a Pallas kernel on TPU7x,
+  64 MB on v6e / v7x in torchtitan's onboarding notes. Read the limit from the compile log before
+  tuning against it.
 
 ## In practice
 

@@ -340,6 +340,154 @@ class TestPlanParallelism(unittest.TestCase):
                 self.assertFalse(plan["ok"])
                 self.assertIn(words, plan["reason"])
 
+    def test_sglang_engine_plan_and_rejections(self):
+        plan = check.plan_parallelism(8,
+                                      32.0,
+                                      32,
+                                      8,
+                                      15.0,
+                                      rejected={8: "unsupported"},
+                                      engine="sglang")
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["recommended_engine"], "sglang")
+        self.assertEqual(plan["tensor_parallel_size"], 4)
+        self.assertEqual(plan["data_parallel_size"], 2)
+        self.assertEqual(plan["smallest_fitting_tp"], 1)
+        self.assertIn("SGLang rejected TP 8: unsupported", plan["reason"])
+
+        user_plan = check.plan_parallelism(8,
+                                           32.0,
+                                           32,
+                                           8,
+                                           15.0,
+                                           user_tp=3,
+                                           engine="sglang")
+        self.assertFalse(user_plan["ok"])
+        self.assertIn("SGLang will refuse it", user_plan["reason"])
+
+    def test_sglang_main_validates_registry_topology_and_trust_remote_code(
+            self):
+        resolved_calls = []
+        seen_trust = []
+
+        class FakeServerArgs:
+
+            def __init__(self,
+                         model_path,
+                         tp_size=1,
+                         dp_size=1,
+                         device="tpu",
+                         trust_remote_code=False):
+                self.model_path = model_path
+                self.tp_size = tp_size
+                self.dp_size = dp_size
+                self.device = device
+                self.trust_remote_code = trust_remote_code
+                seen_trust.append(trust_remote_code)
+
+            def resolve_once(self):
+                resolved_calls.append((self.tp_size, self.dp_size))
+                if self.tp_size == 8:
+                    raise ValueError("TP 8 not supported for this test")
+
+        class FakeAttentionArch:
+            MLA = "MLA"
+            MHA = "MHA"
+
+        class FakeModelConfig:
+            arch_name = "Qwen3MoeForCausalLM"
+
+            @classmethod
+            def from_server_args(cls, server_args):
+                hf_cfg = types.SimpleNamespace(
+                    architectures=[cls.arch_name],
+                    text_config=types.SimpleNamespace(
+                        num_attention_heads=32,
+                        num_key_value_heads=8,
+                    ),
+                    to_dict=lambda: {"architectures": [cls.arch_name]},
+                )
+                return types.SimpleNamespace(
+                    hf_config=hf_cfg,
+                    hf_text_config=hf_cfg.text_config,
+                    num_attention_heads=32,
+                    get_total_num_kv_heads=lambda: 8,
+                    attention_arch=FakeAttentionArch.MHA,
+                    context_len=32768,
+                    quantization=None,
+                )
+
+        class FakeModelRegistry:
+            models = {"Qwen3MoeForCausalLM": object}
+
+            @classmethod
+            def get_supported_archs(cls):
+                return cls.models.keys()
+
+        sglang_mod = types.ModuleType("sglang")
+        srt_mod = types.ModuleType("sglang.srt")
+        configs_mod = types.ModuleType("sglang.srt.configs")
+        mc_mod = types.ModuleType("sglang.srt.configs.model_config")
+        mc_mod.AttentionArch = FakeAttentionArch
+        mc_mod.ModelConfig = FakeModelConfig
+        models_mod = types.ModuleType("sglang.srt.models")
+        reg_mod = types.ModuleType("sglang.srt.models.registry")
+        reg_mod.ModelRegistry = FakeModelRegistry
+        sa_mod = types.ModuleType("sglang.srt.server_args")
+        sa_mod.ServerArgs = FakeServerArgs
+        sglang_tpu_mod = types.ModuleType("sglang_tpu")
+        patches_mod = types.ModuleType("sglang_tpu.patches")
+        patches_mod._resolve_single_host_tpu_topology = _layouts({1, 4, 8})
+
+        modules = {
+            "sglang": sglang_mod,
+            "sglang.srt": srt_mod,
+            "sglang.srt.configs": configs_mod,
+            "sglang.srt.configs.model_config": mc_mod,
+            "sglang.srt.models": models_mod,
+            "sglang.srt.models.registry": reg_mod,
+            "sglang.srt.server_args": sa_mod,
+            "sglang_tpu": sglang_tpu_mod,
+            "sglang_tpu.patches": patches_mod,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "model.safetensors"), "wb") as f:
+                f.write(b"0" * 1024)
+            plan_path = os.path.join(tmp, "plan.json")
+            argv = [
+                "check", "--engine", "sglang", "--model", tmp, "--devices",
+                "8", "--hbm-gb-per-device", "32", "--plan-json", plan_path
+            ]
+            with unittest.mock.patch.dict(sys.modules, modules), \
+                    unittest.mock.patch.object(sys, "argv", argv), \
+                    contextlib.redirect_stdout(io.StringIO()) as out, \
+                    self.assertRaises(SystemExit) as cm:
+                check.main()
+            self.assertEqual(cm.exception.code, 0, out.getvalue())
+            self.assertTrue(resolved_calls)
+            self.assertEqual(set(seen_trust), {False})
+            with open(plan_path, encoding="utf-8") as f:
+                plan = json.load(f)
+            # TP 8 rejected by ServerArgs.resolve_once(), TP 2 rejected by
+            # sglang_tpu topology lookup -> selects TP 4 x DP 2.
+            self.assertEqual(plan["recommended_engine"], "sglang")
+            self.assertEqual(plan["tensor_parallel_size"], 4)
+            self.assertEqual(plan["data_parallel_size"], 2)
+            self.assertIn("SGLang rejected TP 8", plan["reason"])
+            self.assertIn("torch_tpu has no device layout for TP 2",
+                          plan["reason"])
+
+            # Unsupported architecture in ModelRegistry fails pre-flight.
+            FakeModelConfig.arch_name = "UnsupportedArchForCausalLM"
+            with unittest.mock.patch.dict(sys.modules, modules), \
+                    unittest.mock.patch.object(sys, "argv", argv + ["--trust-remote-code"]), \
+                    contextlib.redirect_stdout(io.StringIO()) as out2, \
+                    self.assertRaises(SystemExit) as cm2:
+                check.main()
+            self.assertEqual(cm2.exception.code, 1)
+            self.assertIn("not supported by SGLang", out2.getvalue())
+            self.assertIn(True, seen_trust)
+
 
 APPLIER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "vllm_patches", "apply_vllm_patch.sh")
@@ -504,6 +652,11 @@ class TestGcsModel(unittest.TestCase):
         self.assertTrue(seen)
         self.assertEqual(set(seen), {self.tmp})
         self.assertIn("Base Model Size on Disk: ~7.0 GiB", out.getvalue())
+        # No --points: nothing to size --max-num-seqs by.
+        with open(plan, encoding="utf-8") as f:
+            written = json.load(f)
+        self.assertIsNone(written["max_num_seqs"])
+        self.assertEqual(written["max_num_seqs_other_layouts"], [])
 
     def test_main_fails_clearly_when_the_folder_cannot_be_read(self):
 
@@ -527,6 +680,285 @@ class TestGcsModel(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
         self.assertIn("could not read gs://b/m", out.getvalue())
         self.assertIn("no permission", out.getvalue())
+
+
+_CONFIGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata",
+                        "oss_configs")
+# tpu7x: 8 devices of 94.75 GiB.
+_DEVICES, _HBM = 8, 94.75
+
+
+def _shape(rules, name):
+    with open(os.path.join(_CONFIGS, name), encoding="utf-8") as f:
+        return rules.ModelShape.from_hf_config(json.load(f))
+
+
+class TestKvCheck(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rules = check.load_mesh_rules()
+
+    def test_kv_warning_when_a_point_does_not_fit(self):
+        shape = _shape(self.rules, "gemma-4-31B-it.json")
+        short = check.kv_warnings(self.rules, shape, 8, 1, _HBM, 58.0,
+                                  [(8192, 1024, 2048)])
+        self.assertEqual(len(short), 1)
+        self.assertGreater(short[0]["kv_gib_needed"], short[0]["kv_gib_free"])
+        self.assertEqual(
+            check.kv_warnings(self.rules, shape, 8, 1, _HBM, 58.0,
+                              [(1024, 1024, 1)]), [])
+
+    def test_max_num_seqs_covers_the_top_point_per_replica(self):
+        shape = _shape(self.rules, "gemma-4-31B-it.json")
+        sized = check.max_num_seqs_plan(self.rules, shape, 4, 2, _HBM, 58.0,
+                                        [(1024, 1024, 1), (1024, 1024, 256)])
+        self.assertEqual(sized["target_per_replica"], 128)
+        self.assertEqual(sized["value"], 128)
+        self.assertFalse(sized["capped"])
+        # A DP that does not divide the concurrency rounds up.
+        sized = check.max_num_seqs_plan(self.rules, shape, 4, 3, _HBM, 58.0,
+                                        [(1024, 1024, 100)])
+        self.assertEqual(sized["value"], 34)
+
+    def test_max_num_seqs_is_capped_by_the_kv_cache(self):
+        shape = _shape(self.rules, "gemma-4-31B-it.json")
+        sized = check.max_num_seqs_plan(self.rules, shape, 8, 1, _HBM, 58.0,
+                                        [(8192, 1024, 2048)])
+        fit = sized["points"][0]["kv_fit_per_replica"]
+        self.assertLess(fit, 2048)
+        self.assertEqual(sized["value"], fit)
+        self.assertTrue(sized["capped"])
+
+    def test_a_long_point_does_not_cap_a_short_one(self):
+        shape = _shape(self.rules, "gemma-4-31B-it.json")
+        long_only = check.max_num_seqs_plan(self.rules, shape, 8, 1, _HBM,
+                                            58.0, [(8192, 1024, 256)])
+        self.assertLess(long_only["value"], 256)
+        both = check.max_num_seqs_plan(self.rules, shape, 8, 1, _HBM, 58.0,
+                                       [(8192, 1024, 256), (1024, 1024, 256)])
+        self.assertEqual(both["value"], 256)
+        self.assertFalse(both["capped"])
+
+    def test_no_value_when_no_point_asks_for_more_than_the_floor(self):
+        shape = _shape(self.rules, "gemma-4-31B-it.json")
+        # One measurement at c1, or c16 over two replicas: vLLM's default
+        # holds them, and a server sized for them would cap a later sweep.
+        for dp, points in ((1, [(1024, 128, 1)]), (2, [(1024, 1024, 16)])):
+            with self.subTest(points=points):
+                self.assertIsNone(
+                    check.max_num_seqs_plan(self.rules, shape, 8 // dp, dp,
+                                            _HBM, 58.0, points))
+        self.assertIsNone(
+            check.max_num_seqs_plan(self.rules, shape, 8, 1, _HBM, 58.0, []))
+
+    def test_floor_when_one_point_fits_fewer_and_another_more(self):
+        shape = _shape(self.rules, "gemma-4-31B-it.json")
+        # 40 GiB devices: the 256k point holds 3, the short one asks for 4.
+        sized = check.max_num_seqs_plan(self.rules, shape, 8, 1, 40.0, 58.0,
+                                        [(262144, 1024, 100), (1024, 128, 4)])
+        fits = [p["kv_fit_per_replica"] for p in sized["points"]]
+        self.assertLess(fits[0], check.MIN_MAX_NUM_SEQS)
+        self.assertGreater(fits[1], check.MIN_MAX_NUM_SEQS)
+        self.assertEqual(sized["value"], check.MIN_MAX_NUM_SEQS)
+        self.assertTrue(sized["capped"])
+
+    def test_no_value_when_the_kv_cache_holds_fewer_than_the_floor(self):
+        shape = _shape(self.rules, "gemma-4-31B-it.json")
+        # 16 GiB devices with 58 GiB of weights at TP 8: little cache left.
+        self.assertIsNone(
+            check.max_num_seqs_plan(self.rules, shape, 8, 1, 16.0, 58.0,
+                                    [(131072, 1024, 64)]))
+
+    def test_linear_attention_adds_no_cap(self):
+        shape = self.rules.ModelShape(num_layers=4,
+                                      num_heads=8,
+                                      num_kv_heads=8,
+                                      head_dim=128,
+                                      layer_types=("linear_attention", ) * 4)
+        sized = check.max_num_seqs_plan(self.rules, shape, 8, 1, _HBM, 58.0,
+                                        [(8192, 1024, 512)])
+        self.assertEqual(sized["value"], 512)
+        self.assertIsNone(sized["points"][0]["kv_fit_per_replica"])
+        # Hybrid: only the full-attention layer takes per-token cache, so
+        # the value is the largest any point asks for.
+        hybrid = self.rules.ModelShape(num_layers=4,
+                                       num_heads=8,
+                                       num_kv_heads=8,
+                                       head_dim=128,
+                                       layer_types=("linear_attention", ) * 3 +
+                                       ("full_attention", ))
+        sized = check.max_num_seqs_plan(self.rules, hybrid, 8, 1, _HBM, 58.0,
+                                        [(8192, 1024, 512), (1024, 128, 64)])
+        self.assertEqual(sized["value"], 512)
+        self.assertFalse(sized["capped"])
+
+    def test_other_layouts_one_replica_and_the_passed_over_one(self):
+        plan = {
+            "tensor_parallel_size": 4,
+            "data_parallel_size": 2,
+            "traffic_rule": {
+                "instead_of": {
+                    "tensor_parallel_size": 8,
+                    "data_parallel_size": 1
+                }
+            }
+        }
+        layouts = check.max_num_seqs_layouts(
+            plan, lambda tp, dp: {"value": 256 // dp})
+        self.assertEqual(
+            [(x["tensor_parallel_size"], x["data_parallel_size"], x["value"])
+             for x in layouts], [(4, 1, 256), (8, 1, 256)])
+        # TP 8 x DP 1 already is one replica: nothing else to size.
+        self.assertEqual(
+            check.max_num_seqs_layouts(
+                {
+                    "tensor_parallel_size": 8,
+                    "data_parallel_size": 1
+                }, lambda tp, dp: None), [])
+
+    def test_the_halving_is_short_only_where_the_larger_tp_is_not(self):
+        plan = {
+            "tensor_parallel_size": 4,
+            "data_parallel_size": 2,
+            "traffic_rule": {
+                "instead_of": {
+                    "tensor_parallel_size": 8,
+                    "data_parallel_size": 1
+                }
+            }
+        }
+        a = {"isl": 8192, "osl": 1024, "concurrency": 256}
+        b = {"isl": 8192, "osl": 1024, "concurrency": 512}
+        # Both points short at TP 4 x DP 2; TP 8 is short at the larger too.
+        short = {(4, 2): [a, b], (8, 1): [b]}
+        self.assertEqual(
+            check.halving_kv_short(plan, lambda tp, dp: short[tp, dp]), [a])
+        # Short in both layouts: TP 8 would not fix it, so the rule stays.
+        short = {(4, 2): [b], (8, 1): [b]}
+        self.assertEqual(
+            check.halving_kv_short(plan, lambda tp, dp: short[tp, dp]), [])
+
+
+class TestTrafficLayout(unittest.TestCase):
+    """One TP halving for long prompts at high concurrency, measured."""
+
+    # Gemma-4-31B on tpu7x 2x2x1: 32 heads, 16 KV heads, ~58 GiB weights.
+    GEMMA4 = (8, 94.75, 32, 16, 58.0)
+
+    def test_long_prompts_at_high_concurrency_halve_tp(self):
+        plan = check.plan_parallelism(*self.GEMMA4,
+                                      points=[(1024, 1024, 32),
+                                              (8192, 1024, 128)])
+        self.assertEqual(
+            (plan["tensor_parallel_size"], plan["data_parallel_size"]), (4, 2))
+        rule = plan["traffic_rule"]
+        self.assertEqual(rule["points"], ["8192:1024:128"])
+        self.assertEqual(rule["instead_of"]["tensor_parallel_size"], 8)
+        self.assertIn("time to first token", plan["reason"])
+
+    def test_latency_keeps_the_largest_tp(self):
+        plan = check.plan_parallelism(*self.GEMMA4,
+                                      points=[(8192, 1024, 128)],
+                                      objective="latency")
+        self.assertEqual(plan["tensor_parallel_size"], 8)
+        self.assertNotIn("traffic_rule", plan)
+
+    def test_short_prompts_or_few_users_keep_the_largest_tp(self):
+        for points in ([(1024, 1024, 256)], [(8192, 1024, 32)], None):
+            with self.subTest(points=points):
+                plan = check.plan_parallelism(*self.GEMMA4, points=points)
+                self.assertEqual(plan["tensor_parallel_size"], 8)
+                self.assertNotIn("traffic_rule", plan)
+
+    def test_halving_needs_the_smaller_tp_to_fit_and_run(self):
+        # Weights too big for TP 4: stay at TP 8.
+        plan = check.plan_parallelism(8,
+                                      94.75,
+                                      32,
+                                      16,
+                                      400.0,
+                                      points=[(8192, 1024, 128)])
+        self.assertEqual(plan["tensor_parallel_size"], 8)
+        # Qwen3.8-27B: TP 8 ruled out, so TP 4 x DP 2 is planned; a plan
+        # that already runs replicas is not halved again.
+        plan = check.plan_parallelism(8,
+                                      94.75,
+                                      24,
+                                      4,
+                                      51.75,
+                                      rejected={8: "qwen38_tp8_engine_init"},
+                                      linear_heads=(16, 48),
+                                      points=[(8192, 1024, 128)])
+        self.assertEqual(plan["tensor_parallel_size"], 4)
+        self.assertNotIn("traffic_rule", plan)
+
+    def test_a_stated_tp_still_wins(self):
+        plan = check.plan_parallelism(*self.GEMMA4,
+                                      user_tp=8,
+                                      points=[(8192, 1024, 128)])
+        self.assertEqual(plan["tensor_parallel_size"], 8)
+        self.assertNotIn("traffic_rule", plan)
+
+
+class TestValidatedPlan(unittest.TestCase):
+    """Review on #898: every plan, the KV fallback included, goes to vLLM."""
+
+    GEMMA4 = (8, 94.75, 32, 16, 58.0)
+    POINTS = [(1024, 1024, 32), (8192, 1024, 256)]
+
+    def _run(self, kv_short, refuse=()):
+        rejected, accepted, validated = {}, set(), []
+
+        def make_plan(use_traffic):
+            return check.plan_parallelism(
+                *self.GEMMA4,
+                rejected=rejected,
+                points=self.POINTS if use_traffic else None)
+
+        def validate(tp, dp):
+            validated.append((tp, dp))
+            if tp in refuse:
+                raise ValueError(f"TP {tp} refused")
+
+        plan = check.validated_plan(make_plan, validate, rejected, accepted,
+                                    kv_short)
+        return plan, validated, rejected
+
+    def test_the_kv_fallback_is_validated_by_vllm(self):
+        plan, validated, _ = self._run(
+            lambda p: p["tensor_parallel_size"] == 4)
+        self.assertEqual(
+            (plan["tensor_parallel_size"], plan["data_parallel_size"]), (8, 1))
+        self.assertIn("traffic_rule_dropped", plan)
+        self.assertNotIn("traffic_rule", plan)
+        self.assertIn((8, 1), validated)  # the fallback went through vLLM
+
+    def test_a_fallback_vllm_refuses_is_replanned(self):
+        plan, validated, rejected = self._run(
+            lambda p: p["tensor_parallel_size"] == 4, refuse=(8, ))
+        self.assertIn(8, rejected)
+        self.assertNotEqual(plan["tensor_parallel_size"], 8)
+        self.assertIn((8, 1), validated)
+
+    def test_the_rule_stays_when_the_kv_cache_holds(self):
+        plan, validated, _ = self._run(lambda p: False)
+        self.assertEqual(
+            (plan["tensor_parallel_size"], plan["data_parallel_size"]), (4, 2))
+        self.assertIn("traffic_rule", plan)
+        self.assertEqual(set(validated), {(4, 2), (4, 1)})
+
+
+class TestParsePoints(unittest.TestCase):
+
+    def test_points(self):
+        self.assertEqual(check.parse_points("1024:1024:128, 8192:1024:64"),
+                         [(1024, 1024, 128), (8192, 1024, 64)])
+        self.assertEqual(check.parse_points(None), [])
+
+    def test_bad_point(self):
+        with self.assertRaises(ValueError):
+            check.parse_points("1024:0:8")
 
 
 if __name__ == "__main__":

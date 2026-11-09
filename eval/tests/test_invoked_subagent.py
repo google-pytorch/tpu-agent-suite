@@ -48,20 +48,24 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = REPO / "eval" / "verifiers" / "common" / "invoked_subagent.py"
 NIGHTLY_ONBOARD_OPTIMIZE = (REPO / "eval" / "datasets" /
                             "nightly-onboard-optimize")
+TPU_INFERENCE_VLLM = REPO / "eval" / "datasets" / "tpu-inference-vllm"
 NIGHTLY_FUNCTIONAL = REPO / "eval" / "datasets" / "nightly-functional"
 FIXTURES = pathlib.Path(
     __file__).resolve().parent / "fixtures" / "invoked_subagent"
 CSAT006_TESTS = (REPO / "eval" / "datasets" / "smoke-check" /
                  "knowledge-qa-csat006" / "tests")
-CARRIERS = (
+ONBOARD_CARRIERS = (
     "onboarding-gemma-4-31b-it",
     "onboarding-gpt-oss-20b",
     "onboarding-mistral-small-24b",
     "onboarding-qwen3-8-27b",
+)
+TPU_INFERENCE_CARRIERS = (
     "tpu-inference-gemma-4-31b-it-vllm",
     "tpu-inference-gpt-oss-20b-vllm",
     "tpu-inference-qwen3-8-27b-vllm",
 )
+CARRIERS = ONBOARD_CARRIERS + TPU_INFERENCE_CARRIERS
 
 
 def _load():
@@ -143,8 +147,12 @@ class CopiesTest(unittest.TestCase):
 
     def test_tpu_inference_tasks_carry_the_check(self):
         source = SOURCE.read_bytes()
-        for task in CARRIERS:
-            tests = NIGHTLY_ONBOARD_OPTIMIZE / task / "tests"
+        task_roots = [
+            *((NIGHTLY_ONBOARD_OPTIMIZE, t) for t in ONBOARD_CARRIERS),
+            *((TPU_INFERENCE_VLLM, t) for t in TPU_INFERENCE_CARRIERS),
+        ]
+        for dataset_root, task in task_roots:
+            tests = dataset_root / task / "tests"
             copy = tests / "invoked_subagent" / "check.py"
             with self.subTest(task=task):
                 self.assertTrue(copy.is_file(), f"{copy} is missing")
@@ -170,6 +178,7 @@ class CopiesTest(unittest.TestCase):
     def test_no_other_nightly_task_carries_it(self):
         carriers = sorted(p.parents[2].name for root in (
             NIGHTLY_ONBOARD_OPTIMIZE,
+            TPU_INFERENCE_VLLM,
             NIGHTLY_FUNCTIONAL,
         ) for p in root.glob("**/tests/invoked_subagent/check.py"))
         self.assertEqual(carriers, sorted(CARRIERS))

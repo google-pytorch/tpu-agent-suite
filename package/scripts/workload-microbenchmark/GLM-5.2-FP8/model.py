@@ -150,9 +150,19 @@ PROJECTION_ROWS = [
 #:    be present; every other family must be absent. Kernel names are vllm-torchtpu's.
 #:  drafter_topk_pair: (kind with an indexer, same kind without): their difference models the
 #:    MTP drafter's step-0 sparse top-k (IndexShare), which the drafter replay can't show.
+#:  boundary_regex: small decode TP all-reduces can lower to Pallas
+#:    `small_all_reduce_{oneshot,twoshot}_r<rows>` or fused `fp8_oproj_all_reduce*` kernels, while
+#:    large steps can lower to async `all-reduce.N.cloned.M.call-done` (with optional XLA
+#:    `.refs_k_` suffixes).
 TRACE = {
-    "embed_all_reduces": 1,
-    "all_reduces_per_layer": 2,
+    "embed_all_reduces":
+    1,
+    "all_reduces_per_layer":
+    2,
+    "boundary_regex":
+    (r"^(?:all-reduce\.\d+(?:\.cloned\.\d+\.call-done)?"
+     r"|small_all_reduce_(?:oneshot|twoshot)_r\d+(?:\.\d+)?"
+     r"|fp8_oproj_all_reduce\w*(?:\.\d+)?)(?:\.refs_\d+_)*$"),
     "census": {
         "families": {
             "indexer": {

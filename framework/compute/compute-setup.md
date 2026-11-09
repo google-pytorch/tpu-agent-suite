@@ -95,7 +95,7 @@ fail with `COMPUTE_NOT_CONFIGURED` until setup is done.
 ## Fields set later
 
 Some fields only matter to some workflows, so setup does not ask for them
-(for example `staging_bucket`, `gcs_bucket`, `pod_service_account`). A
+(for example `staging_bucket`, `pod_service_account`). A
 command that needs one fails with an error like:
 
 ```json
@@ -127,6 +127,8 @@ job: the output went with the pod, so only a rerun produces it.
   `{{runtime}} config --package {{package_tag}} set <field>=<value>`;
   otherwise plan with `--fields <field>` and ask, then apply. Verify after
   either.
+- Remove a profile the user asked to delete:
+  `{{runtime}} config --package {{package_tag}} remove <name> --user-confirmed`.
 
 Never create, copy, move or edit `environment.json` by hand: apply validates
 every change before it is saved.

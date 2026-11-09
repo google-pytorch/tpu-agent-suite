@@ -1,0 +1,6 @@
+# The onboarding's job records and logs keep their original names, because the
+# compute tool reads them by job ID. Re-include the paths that eval/.gitignore
+# (jobs/, *.log) and the root .gitignore (job-*/) would otherwise ignore.
+!jobs/
+!jobs/job-*/
+!**/*.log

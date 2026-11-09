@@ -32,10 +32,9 @@
               "local",
               "gce_tpu_vm",
               "gke_pod",
-              "gke_job",
-              "gke_xpk"
+              "gke_job"
             ],
-            "description": "Compute transport to use. 'local' runs on this machine. 'gce_tpu_vm' reaches a Cloud TPU VM via `gcloud ... tpu-vm ssh` (requires tpu_name/zone/project). 'gke_xpk' dispatches multi-node cluster workloads via xpk. 'gke_pod' execs into an already-running TPU pod via kubectl; 'gke_job' creates a single-host TPU Job via kubectl."
+            "description": "Compute transport to use. 'local' runs on this machine. 'gce_tpu_vm' reaches a Cloud TPU VM via `gcloud ... tpu-vm ssh` (requires tpu_name/zone/project). 'gke_pod' execs into an already-running TPU pod via kubectl; 'gke_job' creates a single-host TPU Job via kubectl."
           },
           "params": {
             "type": "object",
@@ -47,11 +46,11 @@
               },
               "zone": {
                 "type": "string",
-                "description": "gce_tpu_vm and gke_xpk backends: GCP zone of the TPU VM or GKE cluster."
+                "description": "gce_tpu_vm backend: GCP zone of the TPU VM."
               },
               "project": {
                 "type": "string",
-                "description": "gce_tpu_vm and gke_xpk backends: GCP project of the TPU VM or GKE cluster."
+                "description": "gce_tpu_vm backend: GCP project of the TPU VM."
               },
               "namespace": {
                 "type": "string",
@@ -126,14 +125,6 @@
               "job_name_prefix": {
                 "type": "string",
                 "description": "gke_job backend (optional): prefix for the name of every Job it creates, e.g. \"agent\" gives agent-job-20260930120000-1a2b3c. At most 30 characters; lowercase letters, digits and '-'."
-              },
-              "cluster_name": {
-                "type": "string",
-                "description": "gke_xpk backend: GKE cluster name for xpk workload creation."
-              },
-              "gcs_bucket": {
-                "type": "string",
-                "description": "gke_xpk backend (optional): GCS bucket URI for logs and artifacts."
               },
               "staging_bucket": {
                 "type": "string",

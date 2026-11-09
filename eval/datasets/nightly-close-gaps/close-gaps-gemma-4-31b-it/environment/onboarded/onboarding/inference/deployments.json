@@ -1,0 +1,24 @@
+{
+  "deployments": [
+    {
+      "model_id": "google/gemma-4-31B-it",
+      "engine": "vllm",
+      "port": 8000,
+      "max_model_len": 10240,
+      "tensor_parallel_size": 2,
+      "data_parallel_size": 1,
+      "enable_prefix_caching": false,
+      "language_model_only": true,
+      "attention_backend": "CUSTOM",
+      "parallelism": {
+        "source": "recommended",
+        "reason": "largest TP that divides 32 heads and whose weight shard (29.1 GiB) fits 80% of 96 GiB, leaving the most HBM for the KV cache and compiling one engine; torch_tpu has no device layout for TP 1 (No TPU topology found for count: 1). Fixed by request: no sharding search.",
+        "smallest_fitting_tp": 2,
+        "caveats": [
+          "vllm-tp-dp-plan: fit check counts weights only, not KV cache or activations; no throughput comparison between TP choices exists",
+          "vllm-tp-dp-plan / custom-attention-backend: no recorded evidence for Gemma-4-31B-it on a single tpu7x chip at TP 2 x DP 1 (prior evidence was tpu7x-4, TP 2 x DP 4, max-model-len 2048)"
+        ]
+      }
+    }
+  ]
+}

@@ -1,9 +1,5 @@
-You are acting as `tpu-agent`. Load the `tpu-agent` skill into your session.
-
-Run tpu-model-onboarding's preflight compatibility check for the model `openai/gpt-oss-20b` on the GKE TPU cluster configured for this package, and report whether it is compatible with Cloud TPU. Proceed without checking in. Accept all suggested defaults and do not stop to confirm the plan.
+Run the preflight compatibility check for the model `openai/gpt-oss-20b` on the GKE TPU cluster configured for this package, and report whether it is compatible with Cloud TPU. Proceed without checking in. Accept all suggested defaults and do not stop to confirm the plan.
 
 Important execution instructions:
-- Delegate to `tpu-model-onboarding` to run the preflight check.
 - Only the preflight check: do not deploy, serve or benchmark the model.
 - Do not install packages or modify the environment to make a check pass.
-- Do not run shell `sleep` commands while waiting on subagents.

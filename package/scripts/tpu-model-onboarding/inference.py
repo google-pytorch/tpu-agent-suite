@@ -42,7 +42,24 @@ class FastAPIDeployment(DeploymentBase):
     max_model_len: Optional[int] = None
 
 
-Deployment = Annotated[Union[FastAPIDeployment], Field(discriminator="engine")]
+class VLLMDeployment(DeploymentBase):
+    engine: Literal["vllm"] = "vllm"
+    max_model_len: Optional[int] = None
+    tensor_parallel_size: int = 1
+    data_parallel_size: Optional[int] = None
+
+
+class SGLangDeployment(DeploymentBase):
+    engine: Literal["sglang"] = "sglang"
+    context_length: Optional[int] = None
+    tp_size: int = 1
+    dp_size: Optional[int] = None
+
+
+Deployment = Annotated[
+    Union[FastAPIDeployment, VLLMDeployment, SGLangDeployment],
+    Field(discriminator="engine"),
+]
 
 
 class DeploymentsConfig(BaseModel):

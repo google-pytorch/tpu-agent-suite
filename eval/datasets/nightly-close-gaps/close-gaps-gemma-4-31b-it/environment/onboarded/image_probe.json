@@ -1,0 +1,65 @@
+{
+  "dependencies": {
+    "pip_check": {
+      "detail": "/opt/onboarding-host/venvs/vllm-torchtpu/bin/python3: No module named pip",
+      "status": "unavailable"
+    },
+    "vllm_stack": {
+      "legacy_calls": [],
+      "problems": [
+        "no published image was tested with torch 2.13.0, vllm 0.30.1rc1.dev385+g8039d3cbf.empty, jax 0.11.2, jaxlib 0.11.2"
+      ],
+      "verdict": "untested"
+    }
+  },
+  "device": {
+    "detail": "allocated on torch.device('tpu')",
+    "loaded_by": "autoload",
+    "status": "ok"
+  },
+  "distributions": {
+    "diffusers": "0.41.0",
+    "huggingface_hub": "1.33.0",
+    "jax": "0.11.2",
+    "jaxlib": "0.11.2",
+    "libtpu": "0.0.50",
+    "safetensors": "0.9.0rc1",
+    "tokenizers": "0.23.0rc0",
+    "torch": "2.13.0",
+    "torch_tpu": "0.1.1+release.2026.9.22.20261003154636",
+    "transformers": "5.14.1",
+    "vllm": "0.30.1rc1.dev385+g8039d3cbf.empty"
+  },
+  "executable": "/opt/onboarding-host/venvs/vllm-torchtpu/bin/python3",
+  "modules": {
+    "absl": true,
+    "huggingface_hub": true,
+    "torch": true,
+    "torch_tpu": true,
+    "transformers": true,
+    "vllm": true,
+    "vllm_torchtpu": true,
+    "yaml": true
+  },
+  "preflight_runnable": true,
+  "python": "3.12.3",
+  "torch_tpu_present": true,
+  "tpu_env": {},
+  "vllm_platform": {
+    "entry_points": [
+      "torchtpu = vllm_torchtpu.platforms:register_tpu_platform"
+    ],
+    "load": {
+      "platform": "vllm_torchtpu.platforms.tpu_platform.TpuPlatform",
+      "status": "ok"
+    },
+    "problems": [],
+    "registered": true,
+    "vllm_plugins_env": null
+  },
+  "vllm_timeout_envs": {
+    "VLLM_ENGINE_ITERATION_TIMEOUT_S": true,
+    "VLLM_ENGINE_READY_TIMEOUT_S": true,
+    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": true
+  }
+}

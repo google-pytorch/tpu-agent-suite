@@ -25,11 +25,14 @@ themselves, each weighted by how much of the job it was.
 
 How a step is classified (from `snapshot["step_slices"]`, `jobdata.read_step_slices`)
 =====================================================================================
-`vllm:iteration_tokens_total` is observed when a step ENDS, one row per second:
-  <= 32 tokens   decode. Under MTP k a request is 1+k tokens: <=8 / <=16 / <=32 are the
-                 D 1-2 / 3-4 / 5-8 classes. A class's mean D is the number of requests in
-                 their decode phase (the snapshot's requests) during its seconds.
-  > 32 tokens    a prefill chunk rides the step (mixed).
+`vllm:iteration_tokens_total` is observed when a step ENDS, one row per second, in the
+histogram's own bins (`step_slices["edges"]`). A decoding request is 1+k tokens under MTP k
+(1 without), so the decode classes follow from the job (`decode_classes`): each bin whose
+tokens fit mns x (1+k) requests is the class of the requests it can hold. Under MTP 3 with
+mns 8 that is <=8 / <=16 / <=32 tokens = D 1-2 / 3-4 / 5-8; without MTP, <=1 / <=8 = D1 /
+D2-8. A class's mean D is the number of requests in their decode phase (the snapshot's
+requests) during its seconds.
+  above them     a prefill chunk rides the step (mixed).
   step time      class times fitted on fully busy decode-only seconds (1 s = sum n_j t_j);
                  the rest of a second is mixed when a long step is in flight, else idle.
 Validated on j-c964a8b6, which also logged every scheduler step (corrected for async
@@ -54,14 +57,39 @@ from typing import Any
 
 from .cells import with_hit
 from .deploy import Deploy
-from .jobdata import prefix_chain
+from .jobdata import SLICE_EDGES, prefix_chain
 
-CLASSES = (("D1-2", 1, 2), ("D3-4", 3, 4), ("D5-8", 5, 8))
 BINS = ((0.0, 0.5, "p0-50"), (0.5, 0.9, "p50-90"), (0.9, 1.0001, "p90-100"))
 
 
-def _small(n: list[int]) -> list[int]:
-    return [n[0] + n[1], n[2], n[3]]
+def decode_classes(edges: list[str],
+                   d: Deploy) -> list[tuple[str, int, int, list[int]]]:
+    """(name, fewest requests, most requests, histogram bins) per decode class. A bin is decode
+    when it starts below mns x (1+k) tokens and ends below the step budget; a bin too narrow to
+    hold a whole request (<=1 token under MTP) joins the next class."""
+    rows = 1 + (d.spec_tokens if d.spec_method else 0)
+    out, pending, lo = [], [], 0.0
+    for i, e in enumerate(edges):
+        hi = math.inf if e == "+Inf" else float(e)
+        if not (lo < d.mns * rows and hi < d.mnbt):
+            break
+        pending.append(i)
+        dlo, dhi = math.floor(lo / rows) + 1, min(math.floor(hi / rows), d.mns)
+        if dhi >= dlo:
+            out.append((f"D{dlo}" if dlo == dhi else f"D{dlo}-{dhi}", dlo, dhi,
+                        pending))
+            pending = []
+        lo = hi
+    return out
+
+
+def _per_class(n: list[float], classes) -> list[float]:
+    return [sum(n[i] for i in c[3]) for c in classes]
+
+
+def _long(n: list[float], classes) -> float:
+    """Steps in the bins past the decode classes: a prefill chunk rode them."""
+    return sum(n[classes[-1][3][-1] + 1:]) if classes else sum(n)
 
 
 def _lsq(A: list[list[float]], b: list[float]) -> dict[int, float]:
@@ -100,47 +128,49 @@ def _slices(snap: dict) -> list[dict]:
         raise ValueError(
             "the snapshot has no step_slices (aiperf's server-metrics scrape); "
             "re-snapshot the job with the current jobdata, or pass --point")
+    e = len(ss.get("edges") or SLICE_EDGES)
     return [{
         "t0": r[0],
-        "n": list(r[1:7]),
-        "running": r[7],
-        "rmin": r[8],
-        "run_avg": r[9]
+        "n": list(r[1:1 + e]),
+        "running": r[1 + e],
+        "rmin": r[2 + e],
+        "run_avg": r[3 + e]
     } for r in ss["rows"]]
 
 
-def class_times(sl: list[dict]) -> tuple[dict[int, float], int]:
+def class_times(sl: list[dict], classes) -> tuple[dict[int, float], int]:
     """Step seconds per D class, fitted on fully busy decode-only seconds: gauge never 0,
-    and no > 32-token step in the second or its neighbours."""
+    and no step past the decode classes in the second or its neighbours."""
     A, b = [], []
     for i in range(1, len(sl) - 1):
         if sl[i]["rmin"] > 0 and all(
-                sum(x["n"][4:]) == 0 and sum(x["n"]) > 0
+                _long(x["n"], classes) == 0 and sum(x["n"]) > 0
                 for x in sl[i - 1:i + 2]):
-            A.append(_small(sl[i]["n"]))
+            A.append(_per_class(sl[i]["n"], classes))
             b.append(1.0)
     fit = _lsq(A, b) if A else {}
     known = list(fit.values()) or [0.05]
-    t = {j: fit.get(j, statistics.median(known)) for j in range(3)}
-    for j in (1, 2):  # a bigger batch never runs faster
+    t = {j: fit.get(j, statistics.median(known)) for j in range(len(classes))}
+    for j in range(1, len(classes)):  # a bigger batch never runs faster
         t[j] = max(t[j], t[j - 1])
     return t, len(A)
 
 
-def classify(sl: list[dict], t: dict[int, float]) -> None:
+def classify(sl: list[dict], t: dict[int, float], classes) -> None:
     """Split each second into decode class j / "mixed" / "idle" (s["f"])."""
     for i, s in enumerate(sl):
         n = s["n"]
-        w = [c * t[j] for j, c in enumerate(_small(n))]
+        w = [c * t[j] for j, c in enumerate(_per_class(n, classes))]
         dec = min(sum(w), 1.0)
         f: collections.Counter = collections.Counter()
-        for j in range(3):
+        for j in range(len(classes)):
             if w[j]:
                 f[j] = dec * w[j] / sum(w)
         nxt = sl[i + 1] if i + 1 < len(sl) else None
-        long_step = sum(n[4:]) > 0 or (sum(n) == 0 and s["running"] > 0) or (
-            nxt is not None and nxt["running"] > 0 and
-            (sum(nxt["n"][4:]) > 0 or sum(nxt["n"]) == 0))
+        long_step = _long(
+            n, classes) > 0 or (sum(n) == 0 and s["running"] > 0) or (
+                nxt is not None and nxt["running"] > 0 and
+                (_long(nxt["n"], classes) > 0 or sum(nxt["n"]) == 0))
         f["mixed" if long_step and s["running"] > 0 else "idle"] += 1 - dec
         s["f"] = f
 
@@ -181,8 +211,10 @@ def _split(mean: float, lo: int, hi: int) -> list[tuple[int, float]]:
 
 def build(snap: dict, d: Deploy, cache_hit=None) -> dict[str, Any]:
     sl = _slices(snap)
-    t, nfit = class_times(sl)
-    classify(sl, t)
+    classes = decode_classes((snap.get("step_slices") or {}).get("edges")
+                             or list(SLICE_EDGES), d)
+    t, nfit = class_times(sl, classes)
+    classify(sl, t, classes)
     rows = 1 + (d.spec_tokens if d.spec_method else 0)
     # requests, in the slices' time origin; the prefilling request's cache hit per this deploy
     hits = {
@@ -204,9 +236,9 @@ def build(snap: dict, d: Deploy, cache_hit=None) -> dict[str, Any]:
         return q["isl"] + q["osl"] * (at - q["ft"]) / max(
             q["t1"] - q["ft"], 1e-9)
 
-    steps = [sum(s["n"][j] for s in sl) for j in range(6)]
-    cls_steps = [steps[0] + steps[1], steps[2], steps[3]]
-    n_mixed = steps[4] + steps[5]
+    steps = [sum(s["n"][j] for s in sl) for j in range(len(sl[0]["n"]))]
+    cls_steps = _per_class(steps, classes)
+    n_mixed = _long(steps, classes)
     secs: collections.Counter = collections.Counter()
     dsum: collections.Counter = collections.Counter()
     cctx: dict[Any, list] = collections.defaultdict(list)
@@ -236,7 +268,7 @@ def build(snap: dict, d: Deploy, cache_hit=None) -> dict[str, Any]:
     t_mixed = secs["mixed"] / n_mixed if n_mixed else 0.0
 
     cells = []
-    for j, (name, dlo, dhi) in enumerate(CLASSES):
+    for j, (name, dlo, dhi, _) in enumerate(classes):
         if not cls_steps[j] or not secs[j]:
             continue
         mean_d = dsum[j] / secs[j]
@@ -284,7 +316,7 @@ def build(snap: dict, d: Deploy, cache_hit=None) -> dict[str, Any]:
                     round(secs["mixed"] * share * bshare / busy, 4)
                 })
     wall = sum(secs.values())
-    names = {j: "decode " + CLASSES[j][0] for j in range(3)}
+    names = {j: "decode " + c[0] for j, c in enumerate(classes)}
     return {
         "_what":
         "the steps the job's engine ran (core/mix.py): one cell per step shape, "
@@ -303,15 +335,15 @@ def build(snap: dict, d: Deploy, cache_hit=None) -> dict[str, Any]:
         },
         "measured_step_ms": {
             **{
-                CLASSES[j][0]: round(1e3 * t[j], 1)
-                for j in range(3)
+                c[0]: round(1e3 * t[j], 1)
+                for j, c in enumerate(classes)
             }, "mixed": round(1e3 * t_mixed, 1)
         },
         "steps": {
-            "D1-2": cls_steps[0],
-            "D3-4": cls_steps[1],
-            "D5-8": cls_steps[2],
-            "mixed": n_mixed
+            **{
+                c[0]: cls_steps[j]
+                for j, c in enumerate(classes)
+            }, "mixed": n_mixed
         },
         "fit_seconds":
         nfit,

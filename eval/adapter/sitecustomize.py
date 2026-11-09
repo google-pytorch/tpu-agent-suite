@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import json
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
 
 try:
@@ -293,6 +295,15 @@ if GKEEnvironment is not None and stream is not None and not getattr(
     class _TarExitError(RuntimeError):
         """tar ran to completion and failed: retrying would not help."""
 
+    def _validate_tar_bytes(raw: bytes) -> bytes:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
+            tar.getmembers()
+            last_end = tar.offset
+        if len(raw) - last_end < 1024 or any(raw[last_end:last_end + 1024]):
+            raise tarfile.ReadError(
+                "incomplete tar archive (missing EOF blocks)")
+        return raw
+
     def _read_tar_bytes(self, resp, command: list[str]) -> bytes:
         stdout = bytearray()
         stderr = bytearray()
@@ -308,11 +319,21 @@ if GKEEnvironment is not None and stream is not None and not getattr(
         finally:
             resp.close()
         if return_code != 0:
+            err_text = stderr.decode("utf-8", "replace").strip()
+            # GNU tar exits 1 ("Some files differed" / "file changed as we read
+            # it") when a live log or SQLite WAL file is appended to during
+            # archiving. The tar stream on stdout is still valid and complete.
+            if return_code == 1 and stdout:
+                self.logger.warning(
+                    f"[GKE-Download-Adapter] `{' '.join(command)}` exited 1"
+                    f" (live file modified during read) in pod"
+                    f" '{self.pod_name}'; keeping {len(stdout)} archive bytes:"
+                    f" {err_text}")
+                return _validate_tar_bytes(bytes(stdout))
             raise _TarExitError(
                 f"`{' '.join(command)}` exited {return_code} in pod"
-                f" {self.pod_name}: {stderr.decode('utf-8', 'replace').strip()}"
-            )
-        return bytes(stdout)
+                f" {self.pod_name}: {err_text}")
+        return _validate_tar_bytes(bytes(stdout))
 
     def _write_tar_bytes(self, resp, tar_data: bytes,
                          command: list[str]) -> None:
@@ -377,16 +398,19 @@ if GKEEnvironment is not None and stream is not None and not getattr(
 
     async def _upload_tar(self, tar_data: bytes, target_dir: str) -> None:
         await self._ensure_client()
-        await self._wait_for_container_exec_ready()
-        mkdir_result = await self.exec(f"mkdir -p {shlex.quote(target_dir)}",
-                                       user="root")
-        if mkdir_result.return_code != 0:
-            raise RuntimeError(
-                f"Failed to create target directory {target_dir}:"
-                f" {mkdir_result.stderr}")
         command = ["tar", "xf", "-", "-C", target_dir]
+        dir_created = False
         for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
             try:
+                if not dir_created:
+                    await self._wait_for_container_exec_ready()
+                    mkdir_result = await self.exec(
+                        f"mkdir -p {shlex.quote(target_dir)}", user="root")
+                    if mkdir_result.return_code != 0:
+                        raise _TarExitError(
+                            f"Failed to create target directory {target_dir}:"
+                            f" {mkdir_result.stderr}")
+                    dir_created = True
                 resp = await asyncio.to_thread(
                     stream,
                     self._api.connect_get_namespaced_pod_exec,
@@ -424,7 +448,7 @@ if GKEEnvironment is not None and stream is not None and not getattr(
         if self._compose_mode:
             return await _orig_gke_download_dir(self, source_dir, target_dir)
         tar_data = await _download_tar(
-            self, ["sh", "-c", f"cd {source_dir} && tar cf - ."])
+            self, ["sh", "-c", f"cd {shlex.quote(source_dir)} && tar cf - ."])
         extract_dir_from_bytes(tar_data, target_dir)
 
     @functools.wraps(_orig_gke_download_file)
@@ -441,7 +465,9 @@ if GKEEnvironment is not None and stream is not None and not getattr(
                 if member.name == source_path or member.name.startswith(
                         source_path.lstrip("/")):
                     member.name = target_path.name
-                    tar.extract(member, path=str(target_path.parent))
+                    tar.extract(member,
+                                path=str(target_path.parent),
+                                filter="data")
                     break
 
     @functools.wraps(_orig_gke_upload_dir)
@@ -520,9 +546,9 @@ if GKEEnvironment is not None and not getattr(
         return (
             f"mkdir -p -m 1777 {exec_dir} && (chmod 1777 {exec_dir} 2>/dev/null"
             f" || true) && if mkdir {d} 2>/dev/null; then"
-            f" if command -v setsid >/dev/null 2>&1; then s=setsid; else s=;"
-            f" fi; $s bash -c {shlex.quote(body)} </dev/null >{d}/out"
-            f" 2>{d}/err & echo $! > {d}/pid; fi")
+            f" if command -v setsid >/dev/null 2>&1; then s=setsid; else"
+            f" set -m; s=; fi; $s bash -c {shlex.quote(body)} </dev/null"
+            f" >{d}/out 2>{d}/err & echo $! > {d}/pid; fi")
 
     def _durable_wait_script(run_dir: str, sentinel: str, missing: str,
                              max_wait_sec: int) -> str:
@@ -608,7 +634,9 @@ if GKEEnvironment is not None and not getattr(
                         self,
                         f"p=$(cat {d}/pid 2>/dev/null) && {{ kill -TERM -- -$p"
                         f" 2>/dev/null || {{ pkill -TERM -P $p; kill -TERM $p;"
-                        f" }} 2>/dev/null; }}; true",
+                        f" }} 2>/dev/null; for _ in $(seq 1 30); do"
+                        f" kill -0 -- -$p 2>/dev/null || kill -0 $p"
+                        f" 2>/dev/null || break; sleep 0.5; done; }}; true",
                         user=user), 30)
             except Exception as e:
                 self.logger.warning(
@@ -746,39 +774,18 @@ if GKEEnvironment is not None and not getattr(
 # Antigravity CLI Version Pin
 # ------------------------------------------------------------------------------
 # Harbor's antigravity-cli agent installs whatever the CLI's installer serves
-# as the latest release, so a CLI release changes every trial without a change
-# here. Starting in 1.3.3, in a fresh container with an empty flag cache, the
-# CLI leaves snapshot flag evaluation off in ADC mode and reads each
-# customization kind's feature flag as disabled, which hides subagents, skills,
-# rules, and hooks alike ("not found or not allowed to be invoked").
-#
-# This installs pinned release 1.4.0 (which adds built-in Gemini 4 model
-# support), checked against its published SHA-512, and reorders the 27-byte
-# instruction sequence in applyModelBackendSelection so snapshot flag evaluation
-# is enabled unconditionally in ADC mode. The container turns the CLI's
-# self-update off (AGY_CLI_DISABLE_AUTO_UPDATE, set by mount_advisor.py and the
-# session supervisor) so the pin holds for the whole trial. The nightly
-# subagent-reachability task tells whether a release is safe to move to.
-# EVAL_ANTIGRAVITY_CLI_VERSION=latest restores Harbor's own install.
-ANTIGRAVITY_CLI_PIN = {
-    "version":
-    "1.4.0",
-    "url":
-    ("https://storage.googleapis.com/antigravity-public/antigravity-cli/"
-     "1.4.0-5281842794987520/linux-x64/cli_linux_x64.tar.gz"),
-    "sha512":
-    ("6c4b298c2a69b6bd0f58567031cc56d8097a32be54c4b633aa80ad395871b389"
-     "618ab3860d4ba0a12599831b8226b51b03e258ee2ec7fae105a45b8e0fce2188"),
-    # In 1.4.0's applyModelBackendSelection:
-    #   before: test %al,%al; je +0x17; mov 0x78(%rsp),%rdx;
-    #           movq $1,0x218(%rdx); movb $1,0x121(%rdx)
-    #   after:  mov 0x78(%rsp),%rdx; movb $1,0x121(%rdx);
-    #           test %al,%al; je +0x0b; movq $1,0x218(%rdx)
-    "patch_before":
-    "84c07417488b54247848c7821802000001000000c6822101000001",
-    "patch_after":
-    "488b542478c682210100000184c0740b48c7821802000001000000",
-}
+# as the latest release, so a CLI release would change every trial without a
+# change here. Instead each trial container runs .ci/install-agy.sh with the
+# pin from .ci/pins.conf: the same script and pin the harness E2E presubmit job
+# installs from, so presubmit and the evals exercise one binary. pins.conf
+# explains the release choice and the byte patch the script applies. The
+# container turns the CLI's self-update off (AGY_CLI_DISABLE_AUTO_UPDATE, set
+# by mount_advisor.py and the session supervisor) so the pin holds for the
+# whole trial. EVAL_ANTIGRAVITY_CLI_VERSION=latest restores Harbor's own
+# install.
+CI_PINS_DIR = Path(__file__).resolve().parents[2] / ".ci"
+HARNESS_PINS_FILE = CI_PINS_DIR / "pins.conf"
+ANTIGRAVITY_CLI_INSTALL_SCRIPT = CI_PINS_DIR / "install-agy.sh"
 ANTIGRAVITY_CLI_VERSION_ENV = "EVAL_ANTIGRAVITY_CLI_VERSION"
 
 
@@ -788,53 +795,31 @@ def antigravity_cli_pin_requested() -> bool:
     return requested.strip().lower() != "latest"
 
 
-def antigravity_cli_install_command(pin: dict[str, str] | None = None) -> str:
-    """A shell script that installs `pin` where Harbor expects the CLI.
+def read_harness_pins(path: Path = HARNESS_PINS_FILE) -> dict[str, str]:
+    """The KEY=VALUE pairs of .ci/pins.conf, without comments or blank lines."""
+    pins: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"{path}: expected KEY=VALUE, got {raw!r}")
+        pins[key.strip()] = value.strip()
+    return pins
 
-    It does what the upstream installer does -- download, verify, extract to
-    ~/.local/bin, then the CLI's own `install` step -- for one fixed release,
-    applies any binary patch configured on `pin`, and fails unless the installed
-    binary reports that release.
+
+def antigravity_cli_install_command(
+        pins_file: Path = HARNESS_PINS_FILE,
+        script: Path = ANTIGRAVITY_CLI_INSTALL_SCRIPT) -> str:
+    """The shell script a trial container runs to install the pinned CLI.
+
+    install-agy.sh sources pins.conf from beside itself, and the container has
+    neither file, so the pin's assignments are prepended and the script finds
+    its AGY_* variables already set.
     """
-    pin = pin or ANTIGRAVITY_CLI_PIN
-    patch_step = ""
-    if pin.get("patch_before") and pin.get("patch_after"):
-        patch_step = f"""python3 - "$staging/antigravity" <<'PY'
-import pathlib, sys
-p = pathlib.Path(sys.argv[1])
-data = p.read_bytes()
-before = bytes.fromhex('{pin["patch_before"]}')
-after = bytes.fromhex('{pin["patch_after"]}')
-if len(before) != len(after):
-    sys.exit("Antigravity CLI patch length mismatch")
-count = data.count(before)
-if count != 1:
-    sys.exit(f"Expected 1 occurrence of patch_before in Antigravity CLI binary, found {{count}}")
-p.write_bytes(data.replace(before, after, 1))
-PY
-"""
-    return f"""set -euo pipefail
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64|Linux-amd64) ;;
-  *) echo "Antigravity CLI {pin['version']} is pinned for linux-x64 only," \\
-       "not $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-esac
-export AGY_CLI_DISABLE_AUTO_UPDATE=true
-staging=$(mktemp -d)
-trap 'rm -rf "$staging"' EXIT
-curl -fsSL -o "$staging/cli.tar.gz" '{pin['url']}'
-echo '{pin['sha512']}  '"$staging/cli.tar.gz" | sha512sum -c - >/dev/null
-tar -xzf "$staging/cli.tar.gz" -C "$staging" antigravity
-{patch_step}mkdir -p "$HOME/.local/bin"
-install -m 0755 "$staging/antigravity" "$HOME/.local/bin/agy"
-"$HOME/.local/bin/agy" install || true
-installed=$("$HOME/.local/bin/agy" --version)
-if [ "$installed" != '{pin['version']}' ]; then
-  echo "Antigravity CLI reports $installed, expected {pin['version']}" >&2
-  exit 1
-fi
-echo "Installed pinned Antigravity CLI {pin['version']}"
-"""
+    return (pins_file.read_text(encoding="utf-8") + "\n" +
+            script.read_text(encoding="utf-8"))
 
 
 try:
@@ -955,10 +940,18 @@ def _patch_trial_agent_user(trial_cls: object) -> None:
 
     @functools.wraps(orig_prepare)
     async def _agent_user_prepare(self) -> None:
-        agent_cfg = getattr(getattr(self, "task", None), "config", None)
-        agent_cfg = getattr(agent_cfg, "agent", None)
+        task_cfg = getattr(getattr(self, "task", None), "config", None)
+        agent_cfg = getattr(task_cfg, "agent", None)
         if agent_cfg is not None and getattr(agent_cfg, "user", None) is None:
             agent_cfg.user = os.environ.get("EVAL_AGENT_USER", "agent")
+        task_env = getattr(getattr(task_cfg, "environment", None), "env",
+                           None) or {}
+        task_persona = task_env.get("TASK_AGENT_PERSONA")
+        agent_obj = getattr(self, "agent", None)
+        extra_env = getattr(agent_obj, "extra_env", None)
+        if (task_persona and isinstance(extra_env, dict)
+                and "AGENT_PERSONA" in extra_env):
+            extra_env["TASK_AGENT_PERSONA"] = str(task_persona)
         await orig_prepare(self)
 
     trial_cls._prepare = _agent_user_prepare
@@ -1049,3 +1042,709 @@ def _patch_trial_stage_suite_artifacts(trial_cls: object) -> None:
 
 
 _patch_trial_stage_suite_artifacts(_HarborTrial)
+
+# ------------------------------------------------------------------------------
+# Trial Fallback Trajectory Adapter (RC5 / RC6)
+# ------------------------------------------------------------------------------
+# 1. When an agent CLI crashes early (auth/model/quota/startup failure) before
+#    writing its native session transcript (`antigravity-cli.trajectory.jsonl`
+#    or `sessions/projects/<slug>/<sid>.jsonl`), Harbor's
+#    `populate_context_post_run` returns without writing
+#    `agent/trajectory.json` even though stream/stderr logs exist in
+#    `agent_dir`.
+# 2. When `Trial._prepare()` fails before `_run_agent_phase()`
+#    (`EnvironmentStartTimeoutError`, `AgentSetupTimeoutError`, Cloud Build or
+#    image pull `RuntimeError`), `self.result.agent_result` remains `None` and
+#    `Trial._populate_agent_context` returns immediately without producing
+#    `agent/trajectory.json`.
+#
+# This adapter:
+# - Initializes `target.agent_result = AgentContext()` in `_sync_agent_output`
+#   if `None` so `_recover_outputs()` does not skip `_populate_agent_context`.
+# - Stages fallback native transcripts from `antigravity-stream.jsonl` /
+#   `antigravity-cli.err` or `claude-code.txt` before
+#   `populate_context_post_run` executes so Harbor's native ATIF converters run
+#   whenever stream logs are present.
+# - Synthesizes a valid ATIF v1.7 diagnostic `trajectory.json` when no
+#   `trajectory.json` exists after `populate_context_post_run` (including
+#   pre-agent environment/setup failures).
+_FALLBACK_TAIL_CHARS = 4000
+
+
+def _iso_utc_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _trial_instruction(trial: object) -> str:
+    task = getattr(trial, "task", None)
+    instruction = getattr(task, "instruction", None)
+    if isinstance(instruction, str) and instruction.strip():
+        return instruction
+    return "[Trial task instruction unavailable]"
+
+
+def _agy_file_has_valid_transcript(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if path.suffix == ".json":
+        try:
+            obj = json.loads(text)
+            if (isinstance(obj, dict) and isinstance(obj.get("messages"), list)
+                    and obj["messages"]):
+                return True
+        except Exception:
+            pass
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if (isinstance(rec, dict) and isinstance(rec.get("step_index"), int)
+                and not isinstance(rec.get("step_index"), bool)
+                and str(rec.get("type")
+                        or "").upper() in ("USER_INPUT", "PLANNER_RESPONSE")):
+            return True
+    return False
+
+
+def _stage_agy_fallback_transcript(trial: object, logs_dir: Path) -> None:
+    for candidate in ("antigravity-cli.trajectory.jsonl",
+                      "antigravity-cli.trajectory.json"):
+        if _agy_file_has_valid_transcript(logs_dir / candidate):
+            return
+
+    existing_jsonl = logs_dir / "antigravity-cli.trajectory.jsonl"
+    stream_path = logs_dir / "antigravity-stream.jsonl"
+    err_path = logs_dir / "antigravity-cli.err"
+    sup_path = logs_dir / "session_supervisor.log"
+    if not any(p.is_file() and p.stat().st_size > 0
+               for p in (stream_path, err_path, sup_path, existing_jsonl)):
+        return
+
+    now_ts = _iso_utc_now()
+    records: list[dict[str, object]] = [{
+        "step_index": 0,
+        "type": "USER_INPUT",
+        "source": "USER_EXPLICIT",
+        "status": "DONE",
+        "created_at": now_ts,
+        "content": _trial_instruction(trial),
+    }]
+
+    stream_errors: list[str] = []
+    if existing_jsonl.is_file() and existing_jsonl.stat().st_size > 0:
+        for raw_line in existing_jsonl.read_text(
+                encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(rec, dict) and str(rec.get("type")
+                                             or "").upper() == "SYSTEM_ERROR":
+                err_val = rec.get("error") or rec.get("content")
+                if isinstance(err_val, str) and err_val.strip():
+                    stream_errors.append(err_val.strip())
+
+    if stream_path.is_file():
+        for raw_line in stream_path.read_text(encoding="utf-8",
+                                              errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            ev_type = ev.get("event")
+            if ev_type == "step_update" and isinstance(ev.get("step_update"),
+                                                       dict):
+                su = ev["step_update"]
+                step_type = str(su.get("step_type") or "").lower()
+                text_delta = su.get("text_delta")
+                tool_name = su.get("tool_name")
+                if step_type == "agent_response" or tool_name:
+                    tool_calls = None
+                    if tool_name:
+                        tool_info = su.get("tool_info")
+                        args = tool_info if isinstance(tool_info, dict) else {}
+                        tool_calls = [{"name": str(tool_name), "args": args}]
+                    records.append({
+                        "step_index": len(records),
+                        "type": "PLANNER_RESPONSE",
+                        "source": "MODEL",
+                        "status": str(su.get("state") or "DONE"),
+                        "created_at": now_ts,
+                        "content": str(text_delta or ""),
+                        "tool_calls": tool_calls,
+                    })
+            elif ev_type == "result" and isinstance(ev.get("result"), dict):
+                res = ev["result"]
+                for key in ("error", "response"):
+                    val = res.get(key)
+                    if isinstance(val, str) and val.strip():
+                        stream_errors.append(val.strip())
+
+    err_parts = list(stream_errors)
+    for p in (err_path, sup_path):
+        if p.is_file() and p.stat().st_size > 0:
+            txt = p.read_text(encoding="utf-8", errors="replace").strip()
+            if txt:
+                err_parts.append(txt[-_FALLBACK_TAIL_CHARS:])
+
+    if err_parts or len(records) == 1:
+        err_msg = "\n".join(err_parts)[-_FALLBACK_TAIL_CHARS:] or (
+            "Antigravity CLI exited before writing a native transcript.")
+        records.append({
+            "step_index": len(records),
+            "type": "SYSTEM_ERROR",
+            "source": "SYSTEM",
+            "status": "ERROR",
+            "created_at": now_ts,
+            "content": f"[Early CLI Crash / Error Output]\n{err_msg}",
+            "error": err_msg,
+        })
+
+    existing_jsonl.write_text("\n".join(json.dumps(r) for r in records) + "\n",
+                              encoding="utf-8")
+
+
+def _claude_file_has_message_step(jsonl_path: Path) -> bool:
+    if not jsonl_path.is_file() or jsonl_path.stat().st_size == 0:
+        return False
+    try:
+        for raw_line in jsonl_path.read_text(encoding="utf-8",
+                                             errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if (isinstance(ev, dict)
+                    and ev.get("type") in ("user", "assistant")
+                    and isinstance(ev.get("message"), dict)):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _claude_file_has_user_step(jsonl_path: Path) -> bool:
+    if not jsonl_path.is_file() or jsonl_path.stat().st_size == 0:
+        return False
+    try:
+        for raw_line in jsonl_path.read_text(encoding="utf-8",
+                                             errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if not (isinstance(ev, dict) and ev.get("type") == "user"
+                    and isinstance(ev.get("message"), dict)):
+                continue
+            content = ev["message"].get("content")
+            if isinstance(content, str) and content.strip():
+                return True
+            if isinstance(content, list) and any(not (
+                    isinstance(b, dict) and b.get("type") == "tool_result")
+                                                 for b in content):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _ensure_claude_user_step(trial: object, jsonl_path: Path) -> None:
+    if _claude_file_has_user_step(jsonl_path):
+        return
+    try:
+        raw_lines = [
+            ln for ln in jsonl_path.read_text(encoding="utf-8",
+                                              errors="replace").splitlines()
+            if ln.strip()
+        ]
+    except OSError:
+        return
+
+    parsed_events: list[dict[str, object]] = []
+    for ln in raw_lines:
+        try:
+            ev = json.loads(ln)
+            if isinstance(ev, dict):
+                parsed_events.append(ev)
+        except Exception:
+            continue
+
+    min_ts = min(
+        (str(ev.get("timestamp") or "")
+         for ev in parsed_events if isinstance(ev.get("message"), dict)),
+        default="",
+    )
+    user_ev: dict[str, object] = {
+        "type": "user",
+        "sessionId": jsonl_path.stem,
+        "message": {
+            "role": "user",
+            "content": _trial_instruction(trial),
+        },
+    }
+    if min_ts:
+        user_ev["timestamp"] = min_ts
+
+    jsonl_path.write_text(
+        "\n".join([json.dumps(user_ev), *raw_lines]) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _stage_claude_fallback_transcript(trial: object, logs_dir: Path) -> None:
+    projects_root = logs_dir / "sessions" / "projects"
+    if projects_root.is_dir():
+        for jsonl_file in list(projects_root.rglob("*.jsonl")):
+            try:
+                if jsonl_file.is_file() and jsonl_file.stat().st_size == 0:
+                    jsonl_file.unlink()
+            except OSError:
+                pass
+
+    root_files = ([
+        f for f in projects_root.rglob("*.jsonl")
+        if "subagents" not in f.parent.parts
+    ] if projects_root.is_dir() else [])
+    if len(root_files) > 1 and any(
+            _claude_file_has_user_step(f) for f in root_files):
+        kept_roots: list[Path] = []
+        for f in root_files:
+            if _claude_file_has_user_step(f):
+                kept_roots.append(f)
+            else:
+                try:
+                    f.unlink()
+                except OSError:
+                    kept_roots.append(f)
+        root_files = kept_roots
+    subagent_files = ([
+        f for f in projects_root.rglob("subagents/*.jsonl")
+        if _claude_file_has_message_step(f)
+    ] if projects_root.is_dir() else [])
+
+    for f in root_files:
+        if _claude_file_has_message_step(f):
+            _ensure_claude_user_step(trial, f)
+            return
+
+    raw_txt_path = logs_dir / "claude-code.txt"
+    sup_path = logs_dir / "session_supervisor.log"
+    has_raw_txt = raw_txt_path.is_file() and raw_txt_path.stat().st_size > 0
+    if not has_raw_txt and not subagent_files:
+        return
+
+    # Choose the single project directory Harbor's ClaudeCode._get_session_dir expects.
+    proj_dir: Path | None = None
+    if root_files:
+        proj_dir = root_files[0].parent
+    elif subagent_files:
+        # `<projects_root>/<slug>/<session_id>/subagents/agent-xxx.jsonl`
+        candidate = subagent_files[0].parent.parent
+        proj_dir = (candidate.parent
+                    if candidate.parent != projects_root else candidate)
+    elif projects_root.is_dir():
+        existing_dirs = sorted(d for d in projects_root.iterdir()
+                               if d.is_dir())
+        if len(existing_dirs) == 1:
+            proj_dir = existing_dirs[0]
+    if proj_dir is None:
+        proj_dir = projects_root / "-workspace"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+
+    target_jsonl = (root_files[0] if root_files else proj_dir /
+                    "fallback-session.jsonl")
+    extracted_lines: list[str] = []
+    plain_errors: list[str] = []
+    if has_raw_txt:
+        for raw_line in raw_txt_path.read_text(encoding="utf-8",
+                                               errors="replace").splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                ev = json.loads(stripped)
+            except Exception:
+                plain_errors.append(stripped)
+                continue
+            if isinstance(ev, dict) and ev.get("type") is not None:
+                extracted_lines.append(json.dumps(ev))
+                for key in ("result", "error", "message"):
+                    val = ev.get(key)
+                    if isinstance(val, str) and val.strip():
+                        plain_errors.append(val.strip())
+
+    if extracted_lines and not target_jsonl.exists():
+        target_jsonl.write_text("\n".join(extracted_lines) + "\n",
+                                encoding="utf-8")
+
+    if not _claude_file_has_message_step(target_jsonl):
+        if sup_path.is_file() and sup_path.stat().st_size > 0:
+            plain_errors.append(
+                sup_path.read_text(
+                    encoding="utf-8",
+                    errors="replace").strip()[-_FALLBACK_TAIL_CHARS:])
+        err_body = "\n".join(plain_errors)[-_FALLBACK_TAIL_CHARS:] or (
+            "Claude Code exited before writing any user/assistant session steps."
+        )
+        now_ts = _iso_utc_now()
+        user_ev = {
+            "type": "user",
+            "sessionId": target_jsonl.stem,
+            "timestamp": now_ts,
+            "message": {
+                "role": "user",
+                "content": _trial_instruction(trial),
+            },
+        }
+        asst_ev = {
+            "type": "assistant",
+            "sessionId": target_jsonl.stem,
+            "timestamp": now_ts,
+            "message": {
+                "role":
+                "assistant",
+                "content": [{
+                    "type":
+                    "text",
+                    "text":
+                    f"[Early CLI Crash / Error Output]\n{err_body}",
+                }],
+            },
+        }
+        with target_jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(user_ev) + "\n")
+            handle.write(json.dumps(asst_ev) + "\n")
+    else:
+        _ensure_claude_user_step(trial, target_jsonl)
+
+
+def _stage_native_fallback_inputs(
+    trial: object,
+    logs_dir: Path,
+    agent_obj: object | None = None,
+) -> None:
+    running_agent = (agent_obj or getattr(trial, "user_agent", None)
+                     or getattr(trial, "agent", None))
+    agent_name = ""
+    if running_agent is not None and callable(
+            getattr(running_agent, "name", None)):
+        try:
+            agent_name = str(running_agent.name() or "")
+        except Exception:
+            agent_name = ""
+    cls_name = type(running_agent).__name__.lower() if running_agent else ""
+
+    if "antigravity" in agent_name or "antigravity" in cls_name or (
+            logs_dir / "antigravity-stream.jsonl").exists() or (
+                logs_dir / "antigravity-cli.err").exists():
+        _stage_agy_fallback_transcript(trial, logs_dir)
+    if "claude" in agent_name or "claude" in cls_name or (
+            logs_dir / "claude-code.txt").exists() or (logs_dir / "sessions" /
+                                                       "projects").exists():
+        _stage_claude_fallback_transcript(trial, logs_dir)
+
+
+def _trial_has_exception_source(trial: object) -> bool:
+    result = getattr(trial, "result", None)
+    if getattr(result, "exception_info", None) is not None:
+        return True
+    if sys.exc_info()[1] is not None:
+        return True
+    paths = getattr(trial, "paths", None)
+    exc_path = getattr(paths, "exception_message_path", None)
+    return (isinstance(exc_path, Path) and exc_path.is_file()
+            and exc_path.stat().st_size > 0)
+
+
+def _should_write_fallback_trajectory(traj_path: Path, trial: object) -> bool:
+    if not traj_path.is_file() or traj_path.stat().st_size == 0:
+        return True
+    if not _trial_has_exception_source(trial):
+        return False
+    try:
+        existing = json.loads(
+            traj_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return False
+    if not isinstance(existing, dict):
+        return False
+    steps = existing.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return False
+    last_step = steps[-1]
+    if not isinstance(last_step, dict):
+        return False
+    extra = last_step.get("extra")
+    return (isinstance(extra, dict)
+            and extra.get("fallback_trajectory") is True
+            and extra.get("exception_type") is None)
+
+
+def _write_fallback_atif_trajectory(
+    trial: object,
+    logs_dir: Path,
+    agent_obj: object | None = None,
+) -> None:
+    traj_path = logs_dir / "trajectory.json"
+    if not _should_write_fallback_trajectory(traj_path, trial):
+        return
+
+    running_agent = (agent_obj or getattr(trial, "user_agent", None)
+                     or getattr(trial, "agent", None))
+    agent_name = "unknown"
+    agent_version = "unknown"
+    model_name = getattr(running_agent, "model_name", None)
+    session_id = str(
+        getattr(running_agent, "session_id", None)
+        or getattr(getattr(trial, "result", None), "id", None)
+        or "fallback-session")
+    if running_agent is not None:
+        if callable(getattr(running_agent, "name", None)):
+            try:
+                agent_name = str(running_agent.name() or "unknown")
+            except Exception:
+                pass
+        if callable(getattr(running_agent, "version", None)):
+            try:
+                agent_version = str(running_agent.version() or "unknown")
+            except Exception:
+                pass
+
+    diag_parts: list[str] = []
+    result = getattr(trial, "result", None)
+    exc_info = getattr(result, "exception_info", None)
+    active_exc = sys.exc_info()[1] if exc_info is None else None
+    exc_type_name: str | None = None
+    if exc_info is not None:
+        exc_type_name = getattr(exc_info, "exception_type",
+                                None) or "Exception"
+        exc_msg = getattr(exc_info, "exception_message", None) or ""
+        diag_parts.append(f"{exc_type_name}: {exc_msg}".strip())
+    elif active_exc is not None:
+        exc_type_name = type(active_exc).__name__
+        exc_msg = str(active_exc)
+        diag_parts.append(f"{exc_type_name}: {exc_msg}".strip())
+
+    paths = getattr(trial, "paths", None)
+    exc_path = getattr(paths, "exception_message_path", None)
+    if (not diag_parts and isinstance(exc_path, Path) and exc_path.is_file()
+            and exc_path.stat().st_size > 0):
+        diag_parts.append(
+            exc_path.read_text(
+                encoding="utf-8",
+                errors="replace").strip()[-_FALLBACK_TAIL_CHARS:])
+
+    candidate_logs = [
+        logs_dir / "antigravity-cli.err",
+        logs_dir / "antigravity-stream.jsonl",
+        logs_dir / "claude-code.txt",
+        logs_dir / "session_supervisor.log",
+        logs_dir / "setup" / "stderr.txt",
+        logs_dir / "setup" / "stdout.txt",
+        *(sorted(logs_dir.glob("command-*/stderr.txt"))
+          if logs_dir.is_dir() else []),
+        *(sorted(logs_dir.glob("command-*/stdout.txt"))
+          if logs_dir.is_dir() else []),
+        logs_dir.parent / "setup" / "stderr.txt",
+        logs_dir.parent / "setup" / "stdout.txt",
+    ]
+    for p in candidate_logs:
+        if p.is_file() and p.stat().st_size > 0:
+            snippet = p.read_text(encoding="utf-8", errors="replace").strip()
+            if snippet:
+                label = (f"{p.parent.name}/{p.name}"
+                         if p.parent != logs_dir else p.name)
+                diag_parts.append(
+                    f"[{label}]\n{snippet[-_FALLBACK_TAIL_CHARS:]}")
+
+    diag_message = "\n\n".join(diag_parts)[-_FALLBACK_TAIL_CHARS:] or (
+        "Trial terminated before the agent produced a native trajectory.")
+    now_ts = _iso_utc_now()
+
+    payload = {
+        "schema_version":
+        "ATIF-v1.7",
+        "session_id":
+        session_id,
+        "agent": {
+            "name": agent_name,
+            "version": agent_version,
+            **({
+                "model_name": model_name
+            } if model_name else {}),
+        },
+        "steps": [
+            {
+                "step_id": 1,
+                "timestamp": now_ts,
+                "source": "user",
+                "message": _trial_instruction(trial),
+            },
+            {
+                "step_id": 2,
+                "timestamp": now_ts,
+                "source": "system",
+                "message": f"[Fallback Diagnostic Trajectory]\n{diag_message}",
+                "extra": {
+                    "fallback_trajectory": True,
+                    "exception_type": exc_type_name,
+                },
+            },
+        ],
+        "final_metrics": {
+            "total_steps": 2,
+        },
+    }
+
+    try:
+        from harbor.models.trajectories import Trajectory
+        validated = Trajectory.model_validate(payload)
+        payload = validated.to_json_dict()
+    except Exception:
+        pass
+
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    traj_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                         encoding="utf-8")
+
+
+def _patch_trial_fallback_trajectory(trial_cls: object) -> None:
+    if trial_cls is None or getattr(
+            trial_cls, "_eval_fallback_trajectory_patched", False):
+        return
+    import logging as _logging
+
+    orig_sync = getattr(trial_cls, "_sync_agent_output", None)
+    orig_populate = getattr(trial_cls, "_populate_agent_context", None)
+    if not callable(orig_sync) or not callable(orig_populate):
+        return
+
+    @functools.wraps(orig_sync)
+    async def _fallback_sync_agent_output(self, target) -> None:
+        if target is not None and getattr(target, "agent_result",
+                                          None) is None:
+            try:
+                from harbor.models.agent.context import AgentContext
+                target.agent_result = AgentContext()
+            except Exception:
+                pass
+        await orig_sync(self, target)
+
+    def _populate_role_trajectory(
+        trial: object,
+        agent_obj: object | None,
+        logs_path: Path | None,
+        populate_fn: object,
+        logger: object,
+    ) -> None:
+        if logs_path is not None:
+            traj_path = logs_path / "trajectory.json"
+            if not traj_path.is_file() or traj_path.stat().st_size == 0:
+                try:
+                    logs_path.mkdir(parents=True, exist_ok=True)
+                    _stage_native_fallback_inputs(trial,
+                                                  logs_path,
+                                                  agent_obj=agent_obj)
+                except Exception as e:
+                    logger.warning(
+                        f"[Trial-Trajectory-Adapter] Staging fallback inputs"
+                        f" failed: {e}")
+
+        populate_fn()
+
+        if logs_path is not None:
+            traj_path = logs_path / "trajectory.json"
+            if _should_write_fallback_trajectory(traj_path, trial):
+                try:
+                    _write_fallback_atif_trajectory(trial,
+                                                    logs_path,
+                                                    agent_obj=agent_obj)
+                    logger.info(
+                        f"[Trial-Trajectory-Adapter] Synthesized fallback"
+                        f" trajectory at {traj_path}")
+                except Exception as e:
+                    logger.warning(
+                        f"[Trial-Trajectory-Adapter] Failed to write fallback"
+                        f" trajectory at {traj_path}: {e}")
+
+    @functools.wraps(orig_populate)
+    def _fallback_populate_agent_context(self, agent_result) -> None:
+        logger = getattr(self, "logger", None) or _logging.getLogger(__name__)
+        user_agent = getattr(self, "user_agent", None)
+        coding_agent = getattr(self, "agent", None)
+        running_agent = user_agent or coding_agent
+        logs_dir = (getattr(running_agent, "logs_dir", None) or getattr(
+            getattr(self, "paths", None), "agent_dir", None))
+        logs_path = Path(logs_dir) if logs_dir is not None else None
+
+        _populate_role_trajectory(
+            self,
+            running_agent,
+            logs_path,
+            lambda: orig_populate(self, agent_result),
+            logger,
+        )
+
+        # In bridged trials Harbor's Trial._populate_agent_context only calls
+        # populate_context_post_run on user_agent, leaving agent/trajectory.json
+        # unwritten even though Uploader archives agent/trajectory.json.
+        if user_agent is not None and coding_agent is not None:
+            coding_dir = (getattr(coding_agent, "logs_dir", None) or getattr(
+                getattr(self, "paths", None), "agent_dir", None))
+            coding_path = Path(coding_dir) if coding_dir is not None else None
+            if coding_path is not None and coding_path != logs_path:
+
+                def _populate_coding() -> None:
+                    pop = getattr(coding_agent, "populate_context_post_run",
+                                  None)
+                    if not callable(pop):
+                        return
+                    try:
+                        from harbor.models.agent.context import AgentContext
+                        ctx = AgentContext()
+                    except Exception:
+                        ctx = type("_DummyContext", (), {})()
+                    try:
+                        pop(ctx)
+                    except Exception as e:
+                        logger.warning(
+                            f"[Trial-Trajectory-Adapter] Coding agent"
+                            f" populate_context_post_run failed: {e}")
+
+                _populate_role_trajectory(
+                    self,
+                    coding_agent,
+                    coding_path,
+                    _populate_coding,
+                    logger,
+                )
+
+    trial_cls._sync_agent_output = _fallback_sync_agent_output
+    trial_cls._populate_agent_context = _fallback_populate_agent_context
+    trial_cls._eval_fallback_trajectory_patched = True
+
+
+_patch_trial_fallback_trajectory(_HarborTrial)

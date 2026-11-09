@@ -1,0 +1,6 @@
+{
+  "check_task_grade": {},
+  "check_agent_utilized": {
+    "target_agent": "tpu-diagnostics"
+  }
+}

@@ -73,6 +73,10 @@ agents:
     # do not honour this variable, so a value that disagrees with ~
     # breaks them.
     TPU_AGENT_SUITE_HOME: /root/.tpu-agent-suite
+    # Which package the agent-suite arm installs: a manifest in package/, by its
+    # file name (package.experimental.json adds the vLLM optimization skills).
+    # It also names the run's system under test for the dashboards.
+    PACKAGE_MANIFEST: ${PACKAGE_MANIFEST:-package.release.json}
     # --- Unified Compute Backend Configuration ---
     COMPUTE_BACKEND: ${COMPUTE_BACKEND:-gke_job}
     TASK_DOCKER: ${TASK_DOCKER:-us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-tpu:latest}

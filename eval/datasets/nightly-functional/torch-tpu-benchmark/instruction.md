@@ -1,0 +1,4 @@
+Onboard and benchmark the model `HuggingFaceTB/SmolLM2-135M-Instruct` on TPU using the benchmark workflow (`torch-tpu-benchmark`). Run `onboarding_preflight.py` directly on the TPU node without `--cpu-requests`, and skip numerical parity (`capture_parity.py` / `compare_parity.py`) since the model is unmodified (`STATUS: COMPATIBLE`). Benchmark on TPU only (`devices: ["tpu"]`, omit the CPU baseline pass) with context length 128, `num_tokens: 16`, batch size 1, 1 warmup iteration (`--warmup_iters 1`), and 2 benchmark iterations (`--bench_iters 2`) so the functional run completes quickly. Proceed without checking in. Accept all suggested defaults and do not stop to confirm the plan.
+
+Important execution instructions:
+- Proceed without checking in; do not stop or wait for user confirmation before executing on TPU.

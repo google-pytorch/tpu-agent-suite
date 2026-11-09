@@ -59,6 +59,7 @@ sys.path.insert(0, SCRIPTS)
 
 from core import cachelocal  # noqa: E402
 from core import jobdata  # noqa: E402
+from core import jobdata_agentx  # noqa: E402
 from core import report  # noqa: E402
 from core import derive as derive_mod  # noqa: E402
 from core import mix as mix_mod  # noqa: E402
@@ -138,7 +139,7 @@ def _snapshot(job: str, model_dir: str, cache_dir: str) -> tuple[dict, str]:
         s = json.load(open(p))
         if s.get("job_id") == job:
             return s, os.path.relpath(p, os.path.dirname(mdir))
-    snap = jobdata.snapshot(job)
+    snap = jobdata_agentx.snapshot(job)
     os.makedirs(cache_dir, exist_ok=True)
     p = os.path.join(cache_dir, f"{job}.source.json")
     with open(p, "w") as fh:
@@ -154,7 +155,7 @@ def cmd_onboard(a) -> int:
             f"model.py as the template), then re-run onboard.",
             file=sys.stderr)
         return 2
-    snap = jobdata.snapshot(a.job)
+    snap = jobdata_agentx.snapshot(a.job)
     cfg = derive_mod.derive(snap, a.model_dir)
     name = a.name or _name(cfg, {})
     cdir = os.path.join(mdir, "config")
@@ -336,21 +337,29 @@ OUT_TGZ = "wmb_out.tgz"
 _RECIPE = '''#!/usr/bin/env python3
 """workload-microbenchmark recipe, written by `cli.py forward-cmd` for {plan}.
 
-Runs forward_run.py on the TPU host (inputs beside this file) and packs its output directory
-into {out}, the job's one output. Exits with forward_run's exit code."""
+Runs forward_run.py on the TPU host and packs its output directory into {out}, the
+job's one output. The inputs of the job are in the same directory as this file. The
+recipe exits with the exit code of forward_run.py.
+
+The recipe runs forward_run.py through forward_run.supervise, which stops a run whose
+engine start-up fails or lasts longer than START_TIMEOUT_S seconds. supervise writes
+failure.json if the run ends without result.json."""
 import os
-import subprocess
 import sys
 import tarfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(HERE)
+sys.path.insert(0, HERE)
+from forward_run import supervise  # noqa: E402
+
 IMAGE = {image!r}
 ARGS = {args!r}
+START_TIMEOUT_S = {start_timeout_s!r}
 os.makedirs("wmb_out", exist_ok=True)
 with open(os.path.join("wmb_out", "image.txt"), "w") as f:
     f.write(IMAGE + "\\n")
-rc = subprocess.call([sys.executable, "forward_run.py", *ARGS])
+rc = supervise(ARGS, os.path.join("wmb_out", "wmb", "forward"), START_TIMEOUT_S)
 with tarfile.open({out!r}, "w:gz", compresslevel=1) as t:
     t.add("wmb_out", arcname=".")
 sys.exit(rc)
@@ -385,7 +394,8 @@ def cmd_forward_cmd(a) -> int:
     The image is the code under test. Default `job`: the image the source job ran, so the run
     reproduces the workload's own code. For an A/B, pass each arm's build explicitly (SKILL.md
     "Change -> build -> microbenchmark"). No moving tag is a default. Tags are pinned to their
-    digest."""
+    digest. On a backend that runs jobs on the host, the arm is an environment there
+    (`--interpreter`), not an image."""
     from core import steps as steps_mod
     from core.forward_run import engine_argv
     pl = json.load(open(a.steps))
@@ -414,22 +424,39 @@ def cmd_forward_cmd(a) -> int:
                 file=sys.stderr)
             return 2
     src = pl.get("source_image")
-    image = src if a.image == "job" else a.image
-    if not image:
+    if a.interpreter and a.image != "job":
         raise SystemExit(
-            "--image job: this plan does not record the source job's image; pass a path"
+            "Pass only one of --image or --interpreter, not both. Use --image when the "
+            "benchmark runs as a container job on GKE (gke_job); use --interpreter "
+            "when it runs directly on a machine (local, a TPU VM, or an existing GKE pod)."
         )
-    tag = image
-    image = _pin_digest(image)
-    print(f"# image: {image}" + (
-        "  (the source job's image)" if tag == src else
-        f"\n#   source job ran {src}: the plan's engine args and env come from that job. Flags"
-        " the new image lacks are translated or reported by forward_run (result.json 'compat')."
-    ))
+    if a.interpreter:
+        # the arm is an environment on the host; its label keys the compile cache and is
+        # what `collect` files the job's cache under (outputs/image.txt)
+        tag = image = f"interpreter:{a.interpreter}"
+        print(
+            f"# code under test: the vllm-torchtpu of {a.interpreter} on the host "
+            "(result.json image_source records its version and commit)")
+    else:
+        image = src if a.image == "job" else a.image
+        if not image:
+            raise SystemExit(
+                "this plan does not record the source job's image (a server read from its "
+                "vLLM log has no image record): pass --image <repo:tag@sha256:...> on a "
+                "container backend (gke_job), or --interpreter <python> on a host "
+                "backend (local, gce_tpu_vm, gke_pod)")
+        tag = image
+        image = _pin_digest(image)
+        print(f"# image: {image}" + (
+            "  (the source job's image)" if tag == src else
+            f"\n#   source job ran {src}: the plan's engine args and env come from that job. Flags"
+            " the new image lacks are translated or reported by forward_run (result.json 'compat')."
+        ))
     argv_k = engine_argv(pl["twin"], "/tmp/wmb_model", pl["compile_buckets"],
                          "/tmp/wmb_xprof")
     hit = cachelocal.find(image, argv_k, pl["twin"]["env"])
-    if not hit and tag != image and not tag.endswith(":latest"):
+    is_immutable_tag = tag != image and not tag.endswith(":latest")
+    if not hit and not a.interpreter and is_immutable_tag:
         # entries filed under an immutable tag before digests were pinned; never for a moving tag
         hit = cachelocal.find(tag, argv_k, pl["twin"]["env"])
     if pl["twin"].get("multihost"):
@@ -454,12 +481,22 @@ def cmd_forward_cmd(a) -> int:
             ["--out", os.path.join("wmb_out", "wmb", "forward")])
     steps_path = os.path.abspath(a.steps)
     recipe = a.recipe or steps_path.replace(".steps.json", "") + ".recipe.py"
+    # The start-up limit: the flag if given, else the plan's own vLLM ready timeout,
+    # else 45 minutes.
+    plan_ready_s = pl["twin"]["env"].get("VLLM_ENGINE_READY_TIMEOUT_S")
+    if a.engine_start_timeout is not None:
+        start_timeout_s = a.engine_start_timeout * 60
+    elif plan_ready_s is not None:
+        start_timeout_s = float(plan_ready_s)
+    else:
+        start_timeout_s = 45 * 60
     with open(recipe, "w") as f:
         f.write(
             _RECIPE.format(plan=os.path.basename(a.steps),
                            out=OUT_TGZ,
                            image=image,
-                           args=args))
+                           args=args,
+                           start_timeout_s=start_timeout_s))
     inputs = [os.path.join(HERE, "forward_run.py"), steps_path]
     if hit:
         inputs.append(
@@ -468,7 +505,9 @@ def cmd_forward_cmd(a) -> int:
         f"# local cache: {'HIT ' + hit if hit else 'miss (cold compile; collect files it after)'}"
     )
     print(f"# recipe: {recipe}")
-    print(f"{a.compute} submit --recipe {recipe} --image {image} " +
+    arm = (f"--interpreter {a.interpreter}"
+           if a.interpreter else f"--image {image}")
+    print(f"{a.compute} submit --recipe {recipe} {arm} " +
           " ".join(f"--input {x}" for x in inputs) + f" --output {OUT_TGZ}")
     return 0
 
@@ -527,6 +566,24 @@ def cmd_collect(a) -> int:
                                "result.json"),
                   recursive=True))
     if not res:
+        failed = sorted(
+            glob.glob(os.path.join(job_dir, "outputs", "**", "wmb", "forward",
+                                   "failure.json"),
+                      recursive=True))
+        if failed:
+            # forward_run.supervise writes failure.json when a run ends without
+            # result.json.
+            f = json.load(open(failed[0]))
+            print(
+                f"! job {a.job} failed during {f['stage']}. Reason: "
+                f"{f['reason']}. Cause: {f['detail']}",
+                file=sys.stderr)
+            ctx = f.get("cause_context")
+            print(("  The cause, as logged:\n    "
+                   if ctx else "  The last lines of its log:\n    ") +
+                  "\n    ".join(ctx or f.get("log_tail", [])[-15:]),
+                  file=sys.stderr)
+            return 2
         print(
             f"no wmb/forward/result.json under {job_dir}: fetch the job first "
             f"(`compute job artifacts --job-id {a.job} --out-dir {job_dir}`)",
@@ -639,7 +696,7 @@ def cmd_requests(a) -> int:
             f"--out-dir {job_dir}`",
             file=sys.stderr)
         return 2
-    rec = jobdata.read_recipe(job_dir)
+    rec = jobdata_agentx.read_recipe(job_dir)
     d = apply_overrides(deploy_from_args(rec["server_args"], rec["env"]),
                         _overrides(a.override))
     reqs = jobdata.read_requests(job_dir)
@@ -726,6 +783,17 @@ def cmd_points(a) -> int:
     d = Deploy(**cfg["real_deploy"])
     mod = derive_mod.load_model(cfg["model_dir"])
     cache_hit = getattr(mod, "cache_hit", None)
+    # a serving_benchmark.py job records no step mix: its cells are already fixed shapes
+    if not a.point and not snap.get("step_slices") and snap.get(
+            "summary_cells"):
+        a.point = [
+            f"{c['cell']}=0/{c['isl']}/{c['osl']}@{c['concurrency']}"
+            for c in snap["summary_cells"]
+        ]
+        print(
+            "no step mix: the source job is a serving_benchmark.py run (fixed lengths and "
+            "concurrency, every prompt new); one point per benchmark cell: " +
+            ", ".join(a.point))
     # the workload: the job's step mix (core/mix.py), unless explicit --point shapes replace it
     mixd = None
     if not a.point or a.with_mix:
@@ -794,7 +862,7 @@ def cmd_points(a) -> int:
     # the image the job ran; forward-cmd runs whatever image the caller picks
     pl["source_image"] = snap["recipe"].get("image")
     pl["env"] = derive_mod.env_provenance(snap["recipe"], cfg["twin"]["env"],
-                                          ov)
+                                          ov, getattr(mod, "TWIN_ENV", {}))
     f = mod.facts(snap["checkpoint_config"], d.kv_cache_dtype)
     # twin layer i has kind layers.twin[i]; the served model has layers.real[kind] of each
     pl["model_dir"] = cfg["model_dir"]
@@ -1106,6 +1174,7 @@ def main() -> int:
         "work directory: working configs, snapshots, plans, models being onboarded "
         "(models/<MODEL_DIR>/) (default ./.work)")
     p.add_argument("--jobs",
+                   dest="jobs_root",
                    help="directory of fetched jobs, one <job-id>/ each "
                    "(default <work>/jobs)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1175,6 +1244,15 @@ def main() -> int:
         action="store_true",
         help="skip the xprof window (profiling is on by default; saves ~40 s)")
     fc.add_argument(
+        "--engine-start-timeout",
+        type=float,
+        help=
+        "The number of minutes that engine start-up may last before the job "
+        "stops itself. The limit stops an engine that hangs without logging an "
+        "error. Set it longer than the plan takes to compile without cached "
+        "compile results. Default: the plan's VLLM_ENGINE_READY_TIMEOUT_S if it "
+        "sets one, otherwise 45 minutes.")
+    fc.add_argument(
         "--profile-iters",
         type=int,
         help="(default 1; 5 for a --top plan) "
@@ -1195,9 +1273,14 @@ def main() -> int:
         "--image",
         default="job",
         help=
-        "image under test: `job` (default) = the source job's image, recorded in "
-        "the plan; or an image path, e.g. an arm built by agentx/build.sh. "
-        "Pinned to its digest")
+        "image under test, on a backend that runs jobs in containers (gke_job): "
+        "`job` (default) = the source job's image, recorded in the plan; "
+        "or an image path, e.g. an arm's build. Pinned to its digest")
+    fc.add_argument(
+        "--interpreter",
+        help="code under test on a backend that runs jobs on the host (local, "
+        "gce_tpu_vm, gke_pod), which ignores --image: the Python of the environment "
+        "holding the arm's vllm-torchtpu, passed to `submit --interpreter`")
     cp = sub.add_parser("cache-pull")
     cp.add_argument("job")
     cp.add_argument("--image",
@@ -1346,8 +1429,8 @@ def main() -> int:
     sub.add_parser("run")
     a = p.parse_args()
     WORK = os.path.abspath(a.work)
-    jobdata.DEFAULT_ROOT = os.path.abspath(a.jobs) if a.jobs else os.path.join(
-        WORK, "jobs")
+    jobdata.DEFAULT_ROOT = os.path.abspath(
+        a.jobs_root) if a.jobs_root else os.path.join(WORK, "jobs")
     derive_mod.MODEL_ROOTS[:] = [os.path.join(WORK, "models"), SCRIPTS]
     if getattr(a, "mode", None) == "mirror":
         a.twin_world = 0  # _project resolves it to the served world

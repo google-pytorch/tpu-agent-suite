@@ -29,7 +29,7 @@ for _root in (_SCRIPTS_DIR.parents[1], _SCRIPTS_DIR.parents[2]):
             sys.path.insert(0, str(_root))
         break
 
-from framework import study, utils  # noqa: E402
+from framework import jsonio, study, utils  # noqa: E402
 
 try:
     from . import evaluate_arm  # noqa: E402
@@ -111,8 +111,8 @@ class TestEvaluateArm(unittest.TestCase):
                 "result": evaluate_arm.to_round_result(result),
             }]
         }
-        arm_result_schema = study.load_json(_SCRIPTS_DIR.parents[1] /
-                                            "schemas" / "arm-result.json")
+        arm_result_schema = jsonio.load_json(_SCRIPTS_DIR.parents[1] /
+                                             "schemas" / "arm-result.json")
         self.assertEqual(study.validate_instance(result, arm_result_schema),
                          [])
         errors = (
@@ -314,8 +314,8 @@ class TestEvaluateArm(unittest.TestCase):
                 "result": evaluate_arm.to_round_result(result),
             }]
         }
-        arm_result_schema = study.load_json(_SCRIPTS_DIR.parents[1] /
-                                            "schemas" / "arm-result.json")
+        arm_result_schema = jsonio.load_json(_SCRIPTS_DIR.parents[1] /
+                                             "schemas" / "arm-result.json")
         self.assertEqual(study.validate_instance(result, arm_result_schema),
                          [])
         errors = (

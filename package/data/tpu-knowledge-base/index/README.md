@@ -93,45 +93,30 @@ run here is not evidence about the larger table.
 
 ## Repositories that are not public yet
 
-`pending.jsonl` lists them, keyed by repository because publication is a
-property of the repository rather than of each page in it — one line covers
-every entry pointing into it, and deleting the line releases them together.
+Nothing gates a row into a repository that is not public. A lookup resolves it
+like any other, and `kb_summarize.github_note` tells the harness, for every
+GitHub url, to use its own GitHub access if the repository is gated. A reader
+with that access gets the page; one without gets the fetch failure. The `check`
+gate this section used to describe went with `index.py` in #539 (2026-10-06).
 
-A row naming a pending repository **fails `check`**. It may be a perfectly
-correct URL; it is not one that can ship, because every reader outside the team
-would get a 404.
+Such rows live in `to_be_released.jsonl`, so they are easy to find and move
+when their repository goes public: re-verify each against the public text, then
+move it to the table for its subject. Today that file holds only the
+torch_tpu, torchtitan and tokamax subwiki pages inside this repository
+(`wiki/codebases/`), which wait on tpu-agent-suite itself.
 
-`get` and `ask` fetch such a page anyway, through a local `gh` credential, so
-its content reaches whoever can read it before release; without a credential
-the fetch fails saying so. `TPU_AGENT_SUITE_KNOWLEDGE_BASE_ALLOW_PENDING=0` turns this off. It
-does not silence the gate, and it should not: a credential that makes a private
-URL look fine on one machine is how a dozen entries came to be marked verified
-while unreachable. What it generates is marked provisional, and is not served
-with the mode off.
+`pending.jsonl` is a watchlist of the upstream repositories those rows point
+into, one line per repository with when it is due, and is not an entry table
+(`catalog.NOT_ENTRIES`). It is empty since torch_tpu (2026-10-19), torchtitan
+(2026-10-16) and vllm-torchtpu (October 2026) went public; add a line when a
+row starts pointing into another private repository, and delete it when the
+repository answers without credentials. Only repositories that will actually
+become public belong there: a url that is gone rather than unreleased is not
+pending anything.
 
-The credential is `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`. CI
-exports none of them to the steps that run `index.py`, so there a pending page
-fails saying it needs a credential. It is sent only to raw.githubusercontent.com
-and never follows a redirect, and an answer drawn from a provisional page says
-`provisional` in its result. A 401, 403 or 404 read with it fails saying the
-credential has no access or the file is not there yet, rather than as the bare
-404 GitHub returns, which reads the same as a page that moved.
-
-Only repositories that will actually become public belong here. A row that is
-gone rather than unreleased is not pending anything, and listing it would mask
-a hard failure as a wait. `torchtitan` is listed because it is due for
-release; until then it 404s for every reader without access -- including the
-eval environment, which has no credential for it, so no golden case names its
-entries and a failed fetch of one says nothing about the package.
-
-Every row must match at least one entry. A row that gates nothing is stale:
-the entries it was written for were removed or repointed, and its note now
-describes an index that no longer exists.
-
-A repository can carry a `remedy` instead of a release date, for the case where
-waiting is the wrong answer -- this repository, say, whose content already
-ships inside the package, so the fix is to point the row at `file:` rather
-than to wait for a URL to start working.
+No golden eval case should name a row into a private repository: the eval
+environment has no credential for it, so a failed fetch there says nothing
+about the package.
 
 ## Where a cached answer lives
 
@@ -306,9 +291,9 @@ carrying the absence, not the generic `howto`.
 private repo paths and shas (`vllm-torchtpu:src/vllm_torchtpu/platforms/
 tpu_platform.py @ 2db3a0f7`), which no fetch can reach. Those stay pins in that
 tree rather than becoming entries here. The plugin itself is indexed through
-vllm-project/vllm-torchtpu (`vllm-torchtpu-*` in to_be_released.jsonl), which
-goes public at launch. Its earlier private repository is never cited: it is not
-being released.
+vllm-project/vllm-torchtpu (`vllm-torchtpu-*` in serving.jsonl and
+profiling.jsonl), public since October 2026. Its earlier private repository is
+never cited: it is not being released.
 
 ## Checked at release, not at lookup
 

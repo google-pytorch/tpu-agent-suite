@@ -33,7 +33,8 @@ from test_translation_base import TranslationParityBase  # noqa: E402
 from test_translation_base import parse_yaml_frontmatter
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from framework import compiler, utils  # noqa: E402
+from framework import jsonio, utils  # noqa: E402
+from framework.builder import harness_rules  # noqa: E402
 
 Path = pathlib.Path
 
@@ -41,8 +42,8 @@ Path = pathlib.Path
 # owns it. `test_tool_vocabulary_is_pinned` below asserts the literal values,
 # so a change to the mapping still has to be made deliberately and shows up as
 # one failing assertion rather than passing silently through both sides.
-CLAUDE_TOOL_MAP = compiler.CLAUDE_TOOL_MAP
-DELEGATION_TOOL = compiler.CLAUDE_DELEGATION_TOOL
+CLAUDE_TOOL_MAP = harness_rules.CLAUDE_TOOL_MAP
+DELEGATION_TOOL = harness_rules.CLAUDE_DELEGATION_TOOL
 
 
 class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
@@ -76,7 +77,7 @@ class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
         self.assertTrue(plugin_json_path.is_file(),
                         "Missing .claude-plugin/plugin.json")
 
-        plugin = utils.load_json(plugin_json_path)
+        plugin = jsonio.load_json(plugin_json_path)
         self.assertEqual(plugin["name"], self.manifest["name"])
         self.assertEqual(
             plugin["displayName"],
@@ -117,7 +118,7 @@ class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
                 int,
                 re.findall(r"--timeout[ =](\d+)",
                            path.read_text(encoding="utf-8")))
-            if seconds > compiler.MAX_SYNC_COMPUTE_TIMEOUT_S
+            if seconds > harness_rules.MAX_SYNC_COMPUTE_TIMEOUT_S
         ]
         self.assertEqual(
             over, [], "Raise MAX_SYNC_COMPUTE_TIMEOUT_S, or the Bash call "
@@ -125,7 +126,7 @@ class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
 
     def test_install_plan_settings_merge(self):
         """The plan merges the subagent depth/concurrency caps into settings."""
-        plan = utils.load_json(self.dist_dir / "tpu-agent-suite-install.json")
+        plan = jsonio.load_json(self.dist_dir / "tpu-agent-suite-install.json")
         self.assertEqual(len(plan["json_merges"]), 1)
         merge = plan["json_merges"][0]
         self.assertEqual(merge["path"], ".claude/settings.local.json")
@@ -139,22 +140,20 @@ class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
         self.assertGreaterEqual(
             int(env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"]),
             int(env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"]))
-        # Backgrounding turns a subagent's wait into a stop, which fires
-        # SubagentStop on a subagent that has nothing to report yet.
-        self.assertEqual(env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
-        # With nothing backgrounded, a Bash call that times out kills the
-        # `compute run` inside it, so both the cap and the default must
-        # outlast the longest run. Claude Code falls back to 2 minutes when
+        # Background work is allowed; the idle gate keeps a subagent's wait
+        # from passing as its result.
+        self.assertNotIn("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", env)
+        # A synchronous `compute run` holds its Bash call open, so both the
+        # cap and the default must outlast the longest run. Claude Code falls back to 2 minutes when
         # the default is unset, so it is set explicitly.
         self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"],
-                         str(compiler.SHELL_TIMEOUT_MS))
+                         str(harness_rules.SHELL_TIMEOUT_MS))
         self.assertEqual(env["BASH_MAX_TIMEOUT_MS"],
-                         str(compiler.SHELL_TIMEOUT_MS))
-        self.assertGreater(compiler.SHELL_TIMEOUT_MS,
-                           compiler.MAX_SYNC_COMPUTE_TIMEOUT_S * 1000)
+                         str(harness_rules.SHELL_TIMEOUT_MS))
+        self.assertGreater(harness_rules.SHELL_TIMEOUT_MS,
+                           harness_rules.MAX_SYNC_COMPUTE_TIMEOUT_S * 1000)
         self.assertEqual(plan["toml_sets"], [],
                          "Claude Code configures via JSON, not TOML")
-
         # The tpu-knowledge-base routing block targets Claude Code's memory file
         # Two blocks: tpu-knowledge-base routing, and the compute rule the
         # main session needs (the compute section only reaches agents).
@@ -190,6 +189,33 @@ class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
             self.assertIn(expected, central)
         # The knowledge base left package.release.json's `include`; nothing may install it.
         self.assertNotIn("knowledgebase", central)
+
+    def test_background_ledger_hooks_compile_to_native_matchers(self):
+        """Launches are recorded after `Agent` and `Bash`, cleared at session
+        end, and nothing registers the recorder on SubagentStop."""
+        hooks = jsonio.load_json(self.dist_dir / ".claude-plugin" /
+                                 "hooks.json")
+
+        record = hooks["track-background-work"]
+        self.assertEqual(list(record), ["PostToolUse"])
+        [group] = record["PostToolUse"]
+        self.assertEqual(sorted(group["matcher"].split("|")),
+                         ["Agent", "Bash"])
+        [entry] = group["hooks"]
+        self.assertIn("--builtin track-background", entry["command"])
+        self.assertIn("--event PostToolUse", entry["command"])
+
+        cleanup = hooks["background-ledger-cleanup"]
+        self.assertEqual(list(cleanup), ["SessionEnd"])
+        [[entry]] = [g["hooks"] for g in cleanup["SessionEnd"]]
+        self.assertIn("--builtin track-background", entry["command"])
+
+        for name, events in hooks.items():
+            for event, groups in events.items():
+                for g in groups:
+                    for h in g["hooks"]:
+                        if "--builtin track-background" in h["command"]:
+                            self.assertNotEqual(event, "SubagentStop", name)
 
     def test_skill_addresses_agents_per_layout(self):
         """Plugin docs use `<package>:<agent>`; project docs use bare names."""
@@ -235,7 +261,7 @@ class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
         """The Claude tool names are what Claude Code actually accepts.
 
         The one place the vocabulary is written out literally. Everything else
-        imports `compiler.CLAUDE_TOOL_MAP`, so without this a rename would
+        imports `harness_rules.CLAUDE_TOOL_MAP`, so without this a rename would
         propagate to both the generator and its tests and no assertion would
         notice. Changing a name here is fine -- it just has to be deliberate,
         and reviewed against Claude Code's own tool list.

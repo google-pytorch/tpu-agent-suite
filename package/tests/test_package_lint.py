@@ -14,7 +14,7 @@
 """Content checks run against the real package.
 
 `instruction-links`, `reference-links`, and `environment-contract` are enforced
-by `compiler.verify_package`, so they are asserted here through `verify` itself
+by `verify.verify_package`, so they are asserted here through `verify` itself
 -- that is the gate, and these tests exist so `make test` fails when it would.
 
 The remaining checks are heuristic and deliberately not gates: an agent may name
@@ -27,13 +27,14 @@ import json
 import pathlib
 import unittest
 
-from framework import compiler, lint
+from framework import jsonio, lint
+from framework.builder import package_loader, verify
 
 Path = pathlib.Path
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
-# Kept in step with the tuple `compiler.verify_package` iterates. A check listed
+# Kept in step with the tuple `verify.verify_package` iterates. A check listed
 # here is a merge gate; everything else in `lint.CHECKS` is advisory.
 GATED_CHECKS = ("instruction-links", "reference-links", "environment-contract",
                 "workspace-config-paths")
@@ -44,12 +45,12 @@ class TestPackageLint(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.manifest = compiler.load_package(PACKAGE_DIR)
+        cls.manifest = package_loader.load_package(PACKAGE_DIR)
         cls.findings = lint.run_checks(PACKAGE_DIR, cls.manifest)
 
     def test_verify_package_passes(self):
         """The gate itself, including the two enforced content checks."""
-        compiler.verify_package(PACKAGE_DIR)
+        verify.verify_package(PACKAGE_DIR)
 
     def test_no_unresolved_instruction_links(self):
         offenders = [
@@ -109,7 +110,7 @@ class TestPackageLint(unittest.TestCase):
         """GATED_CHECKS drifting from `verify` would silently downgrade a gate."""
         from framework import lint as lint_module
         gated_here = {lint_module.CHECKS[name] for name in GATED_CHECKS}
-        self.assertEqual(gated_here, set(compiler.VERIFY_CONTENT_CHECKS))
+        self.assertEqual(gated_here, set(verify.VERIFY_CONTENT_CHECKS))
 
     def test_all_supported_harnesses_declared_in_compatibility_targets(self):
         """Ensures that every harness supported by the compiler has a compatibility target declared."""
@@ -132,7 +133,7 @@ class GatedDelegatesTest(unittest.TestCase):
     ROUTED = ("tpu-kernel-development", )
 
     def setUp(self):
-        raw = compiler.load_json(PACKAGE_DIR / "package.release.json")
+        raw = jsonio.load_json(PACKAGE_DIR / "package.release.json")
         self.lines = (PACKAGE_DIR / "skills" / raw["skills"][0] /
                       "SKILL.md").read_text(encoding="utf-8").splitlines()
 
@@ -164,7 +165,7 @@ class TpuAgentSuiteOrchestrationInvariantsTest(unittest.TestCase):
     """Guards against regressions in tpu-agent orchestration rules."""
 
     def setUp(self):
-        raw = compiler.load_json(PACKAGE_DIR / "package.release.json")
+        raw = jsonio.load_json(PACKAGE_DIR / "package.release.json")
         self.text = (PACKAGE_DIR / "skills" / raw["skills"][0] /
                      "SKILL.md").read_text(encoding="utf-8")
 

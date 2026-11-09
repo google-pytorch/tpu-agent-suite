@@ -16,7 +16,7 @@
 # Environment variables for manual TPU agent E2E testing.
 export WORK_ROOT="/tmp/tpu-agent-e2e"
 export DOWNLOAD_DIR="$WORK_ROOT/downloads"
-export LOCAL_REPO_DIR="$HOME/Workspace/github/google-pytorch/torchtpu-agents"
+export LOCAL_REPO_DIR="$HOME/Workspace/github/google-pytorch/tpu-agent-suite"
 
 export HARNESS="antigravity"
 export GOLDEN_TASK="tpu-inference-gemma-4-31b-it-vllm"

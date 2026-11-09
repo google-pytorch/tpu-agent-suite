@@ -150,6 +150,147 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertEqual(len(names), 1)
         self.assertRegex(names[0], r"^session-\d+\.jsonl$")
 
+    def test_plain_text_early_crash_synthesizes_fallback_assistant_event(self):
+        crash_cli = self.root / "claude-crash"
+        crash_cli.write_text(
+            textwrap.dedent("""\
+                #!/usr/bin/env bash
+                echo "Error: Failed to initialize Vertex AI credentials" >&2
+                exit 1
+                """),
+            encoding="utf-8",
+        )
+        crash_cli.chmod(0o755)
+
+        done = subprocess.run(
+            ["bash", str(_SUPERVISOR), "--print"],
+            cwd=self.workspace,
+            env={
+                **self.env,
+                "CLAUDE_REAL_BIN": str(crash_cli),
+                "AGENT_PERSONA": "tpu-agent",
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 1)
+
+        own = self.projects / _slug(self.workspace)
+        files = list(own.glob("*.jsonl"))
+        self.assertEqual(len(files), 1)
+        self.assertGreater(files[0].stat().st_size, 0)
+        record = json.loads(
+            files[0].read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(record["type"], "assistant")
+        text = record["message"]["content"][0]["text"]
+        self.assertIn("[Depth 0 | tpu-agent]", text)
+        self.assertIn("Failed to initialize Vertex AI credentials", text)
+
+    def test_error_result_without_assistant_message_synthesizes_fallback_step(
+            self):
+        err_cli = self.root / "claude-err-json"
+        err_cli.write_text(
+            textwrap.dedent(f"""\
+                #!/usr/bin/env bash
+                printf '{{"type":"system","session_id":"{_SESSION}"}}\\n'
+                printf '{{"type":"result","is_error":true,"result":"","error":{{"message":"API Error: 401 Unauthorized"}}}}\\n'
+                exit 1
+                """),
+            encoding="utf-8",
+        )
+        err_cli.chmod(0o755)
+
+        done = subprocess.run(
+            ["bash", str(_SUPERVISOR), "--print"],
+            cwd=self.workspace,
+            env={
+                **self.env,
+                "CLAUDE_REAL_BIN": str(err_cli),
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 1)
+
+        synthesized = (self.projects / _slug(self.workspace) /
+                       f"{_SESSION}.jsonl")
+        records = [
+            json.loads(line)
+            for line in synthesized.read_text(encoding="utf-8").splitlines()
+        ]
+        assistant_records = [
+            r for r in records if r.get("type") == "assistant"
+            and isinstance(r.get("message"), dict)
+        ]
+        self.assertEqual(len(assistant_records), 1)
+        fallback_text = assistant_records[0]["message"]["content"][0]["text"]
+        self.assertIn("API Error: 401 Unauthorized", fallback_text)
+        self.assertNotIn('"type":"system"', fallback_text)
+
+    def test_sigterm_interrupts_running_cli_and_synthesizes_session(self):
+        import signal
+
+        slow_cli = self.root / "claude-slow"
+        slow_cli.write_text(
+            textwrap.dedent(f"""\
+                #!/usr/bin/env bash
+                printf '{{"type":"system","session_id":"{_SESSION}"}}\\n'
+                printf '{{"type":"assistant","message":{{"role":"assistant","content":"working"}}}}\\n'
+                sleep 30
+                """),
+            encoding="utf-8",
+        )
+        slow_cli.chmod(0o755)
+
+        proc = subprocess.Popen(
+            ["bash", str(_SUPERVISOR), "--print"],
+            cwd=self.workspace,
+            env={
+                **self.env,
+                "CLAUDE_REAL_BIN": str(slow_cli),
+                "AGENT_PERSONA": "tpu-agent",
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdout is not None
+        proc.stdout.readline()
+        proc.stdout.readline()
+        proc.send_signal(signal.SIGTERM)
+        _, stderr = proc.communicate(timeout=10)
+
+        synthesized = (self.projects / _slug(self.workspace) /
+                       f"{_SESSION}.jsonl")
+        self.assertTrue(synthesized.is_file())
+        lines = synthesized.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(
+            any("[Depth 0 | tpu-agent] working" in ln for ln in lines))
+        self.assertEqual(stderr.count("Session synthesis complete:"), 1)
+
+    def test_task_agent_persona_overrides_agent_persona(self):
+        saved = self.projects / _slug(self.workspace) / f"{_SESSION}.jsonl"
+        self._run(
+            ["--print"],
+            self.workspace,
+            AGENT_PERSONA="tpu-agent",
+            TASK_AGENT_PERSONA="tpu-model-onboarding",
+            FAKE_SESSION=_SESSION,
+            FAKE_SAVE=str(saved),
+        )
+        args_text = self.args_log.read_text(encoding="utf-8")
+        self.assertIn("--agent tpu-model-onboarding", args_text)
+        self.assertNotIn("--agent tpu-agent", args_text)
+        record = json.loads(saved.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(
+            record["message"]["content"][0]["text"],
+            "[Depth 0 | tpu-model-onboarding] saved",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

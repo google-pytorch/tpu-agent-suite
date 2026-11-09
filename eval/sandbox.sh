@@ -138,6 +138,9 @@ CONFIG_ARG=""
 CONFIG_ENV=""
 CONFIG_CONTROL_ARM=""
 CONFIG_HARNESS=""
+# The package manifest the config installs: the one its PACKAGE_MANIFEST names
+# (eval/utils.py `resolve_manifest`).
+CONFIG_MANIFEST="package.release.json"
 COMMAND=()
 
 # Parse flags
@@ -263,7 +266,8 @@ if [ -n "$CONFIG_ARG" ]; then
 import os, re, shlex, sys, yaml
 
 sys.path.insert(0, os.getcwd())
-from eval.utils import harness_for_config, is_control_arm
+from eval.utils import (RELEASE_MANIFEST, harness_for_config, is_control_arm,
+                        package_manifest, resolve_manifest)
 
 cfg = yaml.safe_load(open(sys.argv[1])) or {}
 env = {}
@@ -271,25 +275,40 @@ for agent in (cfg.get("agents") or []):
     env.update(agent.get("env") or {})
 
 pattern = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}$")
+resolved = {}
 for key, raw in env.items():
     value = str(raw).strip()
     match = pattern.match(value)
     if match:
         value = os.environ.get(match.group(1), match.group(2) or "")
+    resolved[key] = value
+# Before anything is printed: an unknown PACKAGE_MANIFEST stops here rather
+# than leaving the default manifest in place. A control arm installs
+# nothing, so its PACKAGE_MANIFEST is not read.
+control_arm = is_control_arm(sys.argv[1])
+manifest = RELEASE_MANIFEST
+if not control_arm:
+    try:
+        manifest = resolve_manifest(package_manifest(resolved))
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
+for key, value in resolved.items():
     if value:
         print(f"export {key}={shlex.quote(value)}")
-print(f"CONFIG_CONTROL_ARM={int(is_control_arm(sys.argv[1]))}")
+print(f"CONFIG_CONTROL_ARM={int(control_arm)}")
 print(f"CONFIG_HARNESS={shlex.quote(harness_for_config(cfg))}")
+print(f"CONFIG_MANIFEST={shlex.quote(manifest)}")
 PYRESOLVE
 )"
   if [ -z "$CONFIG_ENV" ]; then
     echo "Error: $CONFIG_FILE declares no agents[].env to apply." >&2
     exit 1
   fi
-  # Only the arm and the harness come back into this shell. agents[].env is
-  # the container's, and several of its values are paths only it has.
-  eval "$(printf '%s\n' "$CONFIG_ENV" | grep -E '^(CONFIG_CONTROL_ARM|CONFIG_HARNESS)=' || true)"
-  CONFIG_ENV="$(printf '%s\n' "$CONFIG_ENV" | grep -vE '^(CONFIG_CONTROL_ARM|CONFIG_HARNESS)=' || true)"
+  # Only the arm, the harness and the manifest come back into this shell.
+  # agents[].env is the container's, and several of its values are paths only
+  # it has.
+  eval "$(printf '%s\n' "$CONFIG_ENV" | grep -E '^(CONFIG_CONTROL_ARM|CONFIG_HARNESS|CONFIG_MANIFEST)=' || true)"
+  CONFIG_ENV="$(printf '%s\n' "$CONFIG_ENV" | grep -vE '^(CONFIG_CONTROL_ARM|CONFIG_HARNESS|CONFIG_MANIFEST)=' || true)"
   echo "Using config: $CONFIG_FILE"
 fi
 
@@ -309,22 +328,28 @@ if [ "$CONFIG_CONTROL_ARM" = "1" ]; then
   INSTALL_PKG=0
   PACKAGES_SOURCE="$CONFIG_FILE is a control arm (its name contains 'baseline')"
 elif [ -n "$SKILLS_ARG" ]; then
-  # Checked against what package.release.json releases, the same rule run.py uses.
+  # Checked against what the config's manifest releases, the same rule run.py uses.
   PACKAGES="$(python3 -c '
 import os, sys
 sys.path.insert(0, os.getcwd())
 from eval.utils import released_skills, skill_subset
 try:
-    print(",".join(skill_subset([sys.argv[1]], released_skills())))
+    print(",".join(skill_subset([sys.argv[1]], released_skills(None, sys.argv[2]))))
 except ValueError as exc:
     sys.exit(f"Error: {exc}")
-' "$SKILLS_ARG")" || exit 1
+' "$SKILLS_ARG" "$CONFIG_MANIFEST")" || exit 1
   INSTALL_PKG=1
   PACKAGES_SOURCE="--skills, a debugging subset of the package"
 else
   INSTALL_PKG=1
-  PACKAGES="tpu-agent-suite"
-  PACKAGES_SOURCE="every skill package.release.json releases"
+  # The package's own name: tpu-agent-suite, or tpu-agent-suite-experimental.
+  PACKAGES="$(python3 -c '
+import os, sys
+sys.path.insert(0, os.getcwd())
+from eval.utils import read_manifest
+print(read_manifest(None, sys.argv[1])["name"])
+' "$CONFIG_MANIFEST")" || exit 1
+  PACKAGES_SOURCE="every skill $CONFIG_MANIFEST releases"
 fi
 
 # --------------------------------------------------------------------------
@@ -442,7 +467,8 @@ if [ "$INSTALL_PKG" = "1" ]; then
   for harness in claude-code antigravity codex; do
     echo "    Compiling $PACKAGES for $harness"
     python3 framework/compiler.py translate package \
-      --harness "$harness" ${SKILLS_FLAG[@]+"${SKILLS_FLAG[@]}"} \
+      --harness "$harness" --manifest "$CONFIG_MANIFEST" \
+      ${SKILLS_FLAG[@]+"${SKILLS_FLAG[@]}"} \
       --output "$SANDBOX_STAGE/dist/$harness" >/dev/null
   done
 

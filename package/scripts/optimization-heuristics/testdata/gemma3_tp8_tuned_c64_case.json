@@ -1,0 +1,309 @@
+{
+  "case": "gemma3_27b_1k1k_c64_tuned",
+  "framework": "vllm_torchtpu",
+  "profiles": [
+    {
+      "key": "tuned_c64_steady",
+      "role": "mixed",
+      "session_id": "final2.xplane.pb",
+      "result": {
+        "phase_stats": [
+          {
+            "phase": "decode",
+            "n_steps_per_device": 131.0,
+            "idle_frac": 0.12738704,
+            "mean_bucket": 63.2671755725,
+            "mean_dur_ms": 14.9955106947,
+            "p90_dur_ms": 15.264235
+          },
+          {
+            "phase": "all",
+            "n_steps_per_device": 131.0,
+            "idle_frac": 0.12738704,
+            "mean_bucket": 63.2671755725,
+            "mean_dur_ms": 14.9955106947,
+            "p90_dur_ms": 15.264235
+          }
+        ],
+        "class_share": [
+          {
+            "phase": "all",
+            "op_class": "attention_kernel",
+            "share": 0.5581298079,
+            "ms_per_step": 8.3694415038
+          },
+          {
+            "phase": "all",
+            "op_class": "matmul",
+            "share": 0.212203974,
+            "ms_per_step": 3.1821069618
+          },
+          {
+            "phase": "all",
+            "op_class": "collective",
+            "share": 0.1783066717,
+            "ms_per_step": 2.6737996031
+          },
+          {
+            "phase": "all",
+            "op_class": "other",
+            "share": 0.0413889622,
+            "ms_per_step": 0.620648626
+          },
+          {
+            "phase": "decode",
+            "op_class": "attention_kernel",
+            "share": 0.5581298079,
+            "ms_per_step": 8.3694415038
+          },
+          {
+            "phase": "decode",
+            "op_class": "matmul",
+            "share": 0.212203974,
+            "ms_per_step": 3.1821069618
+          },
+          {
+            "phase": "decode",
+            "op_class": "collective",
+            "share": 0.1783066717,
+            "ms_per_step": 2.6737996031
+          },
+          {
+            "phase": "decode",
+            "op_class": "other",
+            "share": 0.0413889622,
+            "ms_per_step": 0.620648626
+          }
+        ],
+        "top_ops": [
+          {
+            "base_op": "RPAd-p_64-bq_1_1-bkv_1536_1536-sw_1024",
+            "op_class": "attention_kernel",
+            "hlo_category": "custom-call",
+            "tf_op_type": "pallas_call",
+            "scope": "custom_kernel/custom_kernel/RPAd-p_64-bq_1_1-bkv_1536_1536-sw_1024/pallas_call",
+            "ms_per_step": 6.875600855,
+            "count_per_step": 51.786259542,
+            "share": 0.4585106166,
+            "phase": "decode"
+          },
+          {
+            "base_op": "fusion",
+            "op_class": "matmul",
+            "hlo_category": "convolution fusion",
+            "tf_op_type": "mm",
+            "scope": "mm/mm",
+            "ms_per_step": 2.8765684885,
+            "count_per_step": 185.2213740458,
+            "share": 0.1918286444,
+            "phase": "decode"
+          },
+          {
+            "base_op": "all-reduce",
+            "op_class": "collective",
+            "hlo_category": "all-reduce",
+            "tf_op_type": "distributed.all_reduce",
+            "scope": "distributed.all_reduce/distributed.all_reduce",
+            "ms_per_step": 2.6737996031,
+            "count_per_step": 124.4809160305,
+            "share": 0.1783066717,
+            "phase": "decode"
+          },
+          {
+            "base_op": "RPAd-p_64-bq_1_1-bkv_10240_2560",
+            "op_class": "attention_kernel",
+            "hlo_category": "custom-call",
+            "tf_op_type": "pallas_call",
+            "scope": "custom_kernel/custom_kernel/RPAd-p_64-bq_1_1-bkv_10240_2560/pallas_call",
+            "ms_per_step": 1.1082802214,
+            "count_per_step": 9.9541984733,
+            "share": 0.0739074676,
+            "phase": "decode"
+          },
+          {
+            "base_op": "RPAm-p_64-bq_32_32-bkv_2048_512-sw_1024",
+            "op_class": "attention_kernel",
+            "hlo_category": "custom-call",
+            "tf_op_type": "pallas_call",
+            "scope": "custom_kernel/custom_kernel/RPAm-p_64-bq_32_32-bkv_2048_512-sw_1024/pallas_call",
+            "ms_per_step": 0.3172717481,
+            "count_per_step": 50.8091603053,
+            "share": 0.0211577821,
+            "phase": "decode"
+          },
+          {
+            "base_op": "fusion",
+            "op_class": "other",
+            "hlo_category": "loop fusion",
+            "tf_op_type": "mean",
+            "scope": "mean/mean",
+            "ms_per_step": 0.3081993282,
+            "count_per_step": 371.4580152672,
+            "share": 0.0205527731,
+            "phase": "decode"
+          },
+          {
+            "base_op": "convolution_bitcast_fusion",
+            "op_class": "matmul",
+            "hlo_category": "convolution fusion",
+            "tf_op_type": "mm",
+            "scope": "mm/mm",
+            "ms_per_step": 0.3055384733,
+            "count_per_step": 61.7480916031,
+            "share": 0.0203753296,
+            "phase": "decode"
+          },
+          {
+            "base_op": "multiply_subtract_fusion",
+            "op_class": "other",
+            "hlo_category": "loop fusion",
+            "tf_op_type": "sub",
+            "scope": "sub/sub",
+            "ms_per_step": 0.1117794656,
+            "count_per_step": 123.4961832061,
+            "share": 0.0074541953,
+            "phase": "decode"
+          },
+          {
+            "base_op": "convert_add_fusion",
+            "op_class": "other",
+            "hlo_category": "loop fusion",
+            "tf_op_type": "add",
+            "scope": "add/add",
+            "ms_per_step": 0.0921574275,
+            "count_per_step": 370.465648855,
+            "share": 0.0061456678,
+            "phase": "decode"
+          }
+        ],
+        "findings": [
+          {
+            "detector_id": "D1_host_gap",
+            "title": "Device idles between steps (host-bound)",
+            "phase": "decode",
+            "summary": "The TPU is idle 12.7% of each decode step cycle (~2556 \u00b5s/step) waiting on the host (scheduling, input prep, dispatch). Attribute the host work with the host tracer and remove per-step Python overhead.",
+            "evidence": [
+              {
+                "metric": "device idle between steps",
+                "value": 12.738703997440535,
+                "unit": "% of cycle",
+                "detail": "mean 2556 \u00b5s idle per step",
+                "xprof_link": null
+              },
+              {
+                "metric": "decode step time (mean)",
+                "value": 14.99551069465649,
+                "unit": " ms",
+                "detail": "131 steps/device",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "diagnostic",
+            "confidence": "medium",
+            "est_step_fraction_saved": 0.12738703997440534,
+            "validation": "A/B at the same ISL/OSL/concurrency; expect higher output tok/s and lower TPOT. Re-profile and confirm idle_frac drops. New-request admission happens every max_decode_steps, so check TTFT.",
+            "kernel_followup": "Profile with PYTHON_TRACER_LEVEL>=1 and check `check_host_boundness`; hand off to the host-bottleneck skill.",
+            "source_refs": [],
+            "lever": "diagnostic",
+            "couples_with": [],
+            "score": 0.0764
+          },
+          {
+            "detector_id": "D29_async_scheduling_off",
+            "title": "Scheduler may run serially with the device (async scheduling)",
+            "phase": "decode",
+            "summary": "The TPU is idle 12.7% of each decode cycle and --async-scheduling is not set (recent vLLM auto-enables it; older releases and some executors/spec-decode methods do not - check the \"Async scheduling\" line in the server log). Without async scheduling the scheduler for step N+1 runs after step N finish",
+            "evidence": [
+              {
+                "metric": "decode idle fraction",
+                "value": 12.738703997440535,
+                "unit": "%",
+                "detail": "",
+                "xprof_link": null
+              },
+              {
+                "metric": "decode step time (mean)",
+                "value": 14.99551069465649,
+                "unit": " ms",
+                "detail": "131 steps/device",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [
+              {
+                "knob": "vllm.cli.async_scheduling",
+                "kind": "cli",
+                "name": "--async-scheduling",
+                "suggested_value": "true",
+                "current_value": "",
+                "already_set": false
+              }
+            ],
+            "risk": "perf_only",
+            "confidence": "low",
+            "est_step_fraction_saved": 0.08,
+            "validation": "A/B throughput; Qwen3 on Ironwood: +7.7% and +2.1%.",
+            "kernel_followup": null,
+            "source_refs": [
+              "Qwen3 serving study on TPU v7x"
+            ],
+            "lever": "serving_knob",
+            "couples_with": [],
+            "score": 0.024
+          },
+          {
+            "detector_id": "D11_recompilation",
+            "title": "XLA compilation inside the serving window",
+            "phase": "all",
+            "summary": "131 compile events (6.9 ms) happen after serving started; each blocks the engine loop.",
+            "evidence": [
+              {
+                "metric": "compile events",
+                "value": 131,
+                "unit": "",
+                "detail": "CommonPjRtLoadedExecutable::Execute (tt_jit_compile_mlir_as_strided)",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "diagnostic",
+            "confidence": "medium",
+            "est_step_fraction_saved": 0.0,
+            "validation": "Warm up all buckets before profiling; confirm no runtime compiles with the recompilation check enabled.",
+            "kernel_followup": null,
+            "source_refs": [],
+            "lever": "diagnostic",
+            "couples_with": [],
+            "score": 0.0
+          },
+          {
+            "detector_id": "D14_profile_hygiene",
+            "title": "Profile quality limits confidence",
+            "phase": "all",
+            "summary": "Re-profile to raise confidence: stop_trace stalls the engine (exclude the tail).",
+            "evidence": [
+              {
+                "metric": "stop_trace duration",
+                "value": 492.378208,
+                "unit": " ms",
+                "detail": "",
+                "xprof_link": null
+              }
+            ],
+            "knob_changes": [],
+            "risk": "diagnostic",
+            "confidence": "high",
+            "est_step_fraction_saved": 0.0,
+            "validation": "",
+            "kernel_followup": null,
+            "source_refs": [],
+            "lever": "diagnostic",
+            "couples_with": [],
+            "score": 0.0
+          }
+        ]
+      }
+    }
+  ]
+}

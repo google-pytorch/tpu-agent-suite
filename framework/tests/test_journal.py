@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from framework import compiler, journal, runtime, utils
+from framework import journal, paths, runtime
 
 RUN_ID = "20261014T170000Z-0123456789ab"
 
@@ -42,7 +42,7 @@ class JournalTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"TPU_AGENT_SUITE_HOME": tmp.name})
         env.start()
         self.addCleanup(env.stop)
-        self.dir = utils.get_run_root(RUN_ID)
+        self.dir = paths.get_run_root(RUN_ID)
         # The session creates the run directory, not the journal.
         self.dir.mkdir(parents=True)
 
@@ -75,7 +75,7 @@ class JournalTest(unittest.TestCase):
         other = "20261014T170000Z-ffffffffffff"
         with self.assertRaisesRegex(journal.Refused, "has no directory"):
             journal.write(other, agent="a", kind="note", text="x")
-        self.assertFalse(utils.get_run_root(other).exists())
+        self.assertFalse(paths.get_run_root(other).exists())
 
         self.add(kind="decision", text="route")
         self.add(kind="hypothesis", text="h")
@@ -131,28 +131,6 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(self.cli("render", *run)[0], 0)
         self.assertEqual(self.cli("show", "--run-id", "../x")[0],
                          1)  # Can't leave runs/.
-
-    def test_only_agents_and_skills_with_a_shell_get_contract(self):
-        manifest = {"name": "pkg", "version": "1.0.0", "agents": []}
-        for tools, has_shell in ((["shell"], True), (["read"], False)):
-            agent = compiler.agent_execution_contract(manifest, {
-                "name": "worker",
-                "tools": tools
-            }, "claude-code")
-            self.assertEqual(
-                "journal add --run-id <run_id> --agent worker" in agent,
-                has_shell)
-        for tools, has_shell in (([], True), (["shell"], True), (["read"],
-                                                                 False)):
-            for harness in ("claude-code", "codex"):
-                with self.subTest(tools=tools, harness=harness):
-                    skill = compiler.skill_package_contract(
-                        manifest, {
-                            "name": "entry",
-                            "delegates": ["a"],
-                            "tools": tools
-                        }, harness)
-                    self.assertEqual("--agent entry" in skill, has_shell)
 
 
 if __name__ == "__main__":
