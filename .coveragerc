@@ -20,8 +20,7 @@ precision = 1
 show_missing = True
 skip_covered = False
 
-# TODO (jrplatin): target is 80%
-fail_under = 70
+fail_under = 80
 
 exclude_also =
     # Defensive branches that only fire on interpreter/platform edge cases.
