@@ -94,6 +94,26 @@ class TestInstallerStaging(unittest.TestCase):
         self.assertEqual(answers["namespace"], "custom-ns")
         self.assertEqual(answers["container"], "main-worker")
 
+    def test_collect_task_environment_answers_external_driver(self):
+
+        class FakeExternalDriver:
+
+            @classmethod
+            def collect_environment_answers(cls, env_lookup):
+                return {"custom_target": env_lookup.get("EXT_TARGET", "dflt")}
+
+        with patch("framework.compute.drivers.get_driver",
+                   return_value=FakeExternalDriver):
+            answers = collect_task_environment_answers(
+                extra_env={
+                    "COMPUTE_BACKEND": "ext_custom",
+                    "EXT_TARGET": "cluster-a",
+                })
+        self.assertEqual(answers, {
+            "backend": "ext_custom",
+            "custom_target": "cluster-a",
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

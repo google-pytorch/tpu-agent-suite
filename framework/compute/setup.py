@@ -232,6 +232,8 @@ def validate_profile(name: str,
         elif (_blank(stored_params.get(trigger)) and child not in answers
               and _blank(params.get(child))):
             result["newly_applicable"].append(_question(child, questions))
+    if complete():
+        params = driver_cls.populate_default_params(params)
     invalid += [
         err for field, value in params.items()
         if (err := validate_field_format(field, value))

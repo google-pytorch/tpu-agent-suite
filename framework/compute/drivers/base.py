@@ -177,6 +177,18 @@ class ComputeDriver(abc.ABC):
         del found
         return None
 
+    @classmethod
+    def populate_default_params(cls, params: dict[str, Any]) -> dict[str, Any]:
+        """Return `params` with any backend-inferred defaults filled in."""
+        return dict(params)
+
+    @classmethod
+    def collect_environment_answers(
+            cls, env_lookup: dict[str, str]) -> dict[str, Any]:
+        """Return profile answers inferred from `env_lookup` for this backend."""
+        del env_lookup
+        return {}
+
     def not_configured(self, field: str, detail: str = "") -> NotConfigured:
         """The error for a setting that's asked only when needed, and is unset.
 

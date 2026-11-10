@@ -79,6 +79,13 @@ def collect_task_environment_answers(
             env_lookup.get("GKE_COMPILE_CACHE_URL", ""),
         })
 
+    else:
+        from framework.compute import drivers
+
+        drv_cls = drivers.get_driver(backend)
+        if drv_cls is not None:
+            answers.update(drv_cls.collect_environment_answers(env_lookup))
+
     raw_extra_answers = env_lookup.get("COMPUTE_ANSWERS_JSON", "").strip()
     if raw_extra_answers:
         extra_answers = json.loads(raw_extra_answers)

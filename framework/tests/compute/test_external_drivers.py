@@ -222,6 +222,46 @@ class TestExternalDrivers(unittest.TestCase):
             "params": {}
         })
         self.assertEqual([q["name"] for q in missing["missing"]], ["target"])
+        self.assertEqual(
+            driver_registry.get_driver("ext_d").collect_environment_answers(
+                {}), {})
+
+    def test_external_driver_default_params_and_env_answers(self):
+        source = self.tmp / "ext_defaults.py"
+        source.write_text(
+            _EXTERNAL_DRIVER_SOURCE.format(name="ext_def") + """
+ExternalProbeDriver.SETUP_FIELDS = base.SetupFields(
+    required=("target",),
+    optional=("note",),
+)
+
+def _pop(cls, params):
+    out = dict(params)
+    out.setdefault("note", "auto-note")
+    return out
+
+def _env(cls, env_lookup):
+    return {"target": env_lookup.get("EXT_TARGET", "env-t")}
+
+ExternalProbeDriver.populate_default_params = classmethod(_pop)
+ExternalProbeDriver.collect_environment_answers = classmethod(_env)
+""",
+            encoding="utf-8",
+        )
+        self.load(source)
+        drv_cls = driver_registry.get_driver("ext_def")
+        self.assertEqual(
+            drv_cls.collect_environment_answers({"EXT_TARGET": "custom"}),
+            {"target": "custom"},
+        )
+        validated = compute.setup.validate_profile("p", {
+            "backend": "ext_def",
+            "params": {
+                "target": "t1"
+            }
+        })
+        self.assertEqual(validated["status"], "ok")
+        self.assertEqual(validated["params"]["note"], "auto-note")
 
     def test_failed_driver_rolls_back_cli_flags(self):
         source = self.tmp / "flag_leak.py"

@@ -133,7 +133,7 @@ next.
     1. The request's `checkpoint_bucket`, when the jobs can read it: any
        backend other than `gke_job`, a `gke_job` profile with a
        `pod_service_account`, or the same bucket as its `staging_bucket`.
-    2. On `gke_job`, the profile's `staging_bucket`. When it names a folder
+    2. The profile's `staging_bucket`, when set. When it names a folder
        (`gs://<bucket>/<folder>`), pass `--folder <folder>/checkpoints`; the
        script uses only the bucket from `--bucket`. When it replaces a
        `checkpoint_bucket` the pods could not read, say so in your result.
