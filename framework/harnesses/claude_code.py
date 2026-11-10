@@ -15,9 +15,124 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
+import sys
+from collections.abc import Iterator
 from typing import Any
 
+from framework import utils
 from framework.harnesses import base
+
+
+def _parse_record(line: str) -> Any:
+    """Parse a JSONL line, returning None if malformed."""
+    try:
+        return json.loads(line)
+    except ValueError:
+        return None
+
+
+def _iter_nested_dicts(node: Any) -> Iterator[dict[str, Any]]:
+    """Yield `node` and every dict nested inside it."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _iter_nested_dicts(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_nested_dicts(item)
+
+
+def _is_call_to(node: dict[str, Any], tool: str) -> bool:
+    """Whether a transcript record is a `tool_use` call to `tool` with a string id."""
+    return (node.get("type") == "tool_use" and node.get("name") == tool
+            and isinstance(node.get("id"), str))
+
+
+def _load_run_lines(raw_input: dict[str, Any],
+                    fields: dict[str, Any],
+                    handback_mapping: dict[str, Any],
+                    *,
+                    warn_missing_run: bool = False) -> list[str] | None:
+    """Locate the stopping subagent's own transcript and return the current run's lines.
+
+    Reads the subagent's `transcript_path` (`agent_transcript_path`, never the
+    parent session's top-level `transcript_path`) and slices from the record
+    matching the stopping run's `prompt_id` (`transcript_prompt_id`).
+    """
+    transcript_path = str(
+        utils.extract_first_field(raw_input, fields.get("transcript_path", []))
+        or "")
+    if not transcript_path:
+        return None
+    try:
+        text = pathlib.Path(transcript_path).read_text(encoding="utf-8",
+                                                       errors="replace")
+    except OSError:
+        return None
+    lines = [line for line in map(str.strip, text.splitlines()) if line]
+    if not lines:
+        return None
+    prompt_id = str(
+        utils.extract_first_field(raw_input, fields.get("prompt_id", []))
+        or "")
+    prompt_id_key = str(handback_mapping.get("transcript_prompt_id") or "")
+    if prompt_id and prompt_id_key:
+        for index, line in enumerate(lines):
+            if prompt_id in line:
+                record = _parse_record(line)
+                if isinstance(record,
+                              dict) and record.get(prompt_id_key) == prompt_id:
+                    return lines[index:]
+    if warn_missing_run:
+        print(
+            f"runtime: cannot locate the stopping run in {transcript_path} "
+            f"(prompt id {prompt_id or 'missing'!r}, transcript key "
+            f"{prompt_id_key or 'missing'!r}); checking the native stop.",
+            file=sys.stderr)
+    return None
+
+
+def _is_accepted_result(node: dict[str, Any], call_ids: set[str]) -> bool:
+    """Whether a transcript record is a non-error `tool_result` for one of `call_ids`."""
+    return (node.get("type") == "tool_result"
+            and node.get("tool_use_id") in call_ids
+            and node.get("is_error") is not True)
+
+
+def _handback_delivered(lines: list[str], tool: str) -> bool:
+    """Return True if `lines` contain an accepted call to the hand-back `tool`."""
+    call_ids = {
+        node["id"]
+        for line in lines if tool in line
+        for node in _iter_nested_dicts(_parse_record(line))
+        if _is_call_to(node, tool)
+    }
+    return any(
+        _is_accepted_result(node, call_ids) for line in lines
+        if any(call_id in line for call_id in call_ids)
+        for node in _iter_nested_dicts(_parse_record(line)))
+
+
+def _handback_offered(lines: list[str], tool: str, offer: dict[str,
+                                                               Any]) -> bool:
+    """Return True if `lines` contain the `transcript_offer` record or a call to `tool`."""
+    flag, text = offer["flag"], offer["text"]
+    for line in lines:
+        if tool not in line:
+            continue
+        record = _parse_record(line)
+        if (isinstance(record, dict) and record.get(flag) is True
+                and text in line):
+            return True
+        if any(_is_call_to(node, tool) for node in _iter_nested_dicts(record)):
+            return True
+    return False
+
+
+HANDBACK_SKIP = ("subagent delivers through the hand-back tool; this native "
+                 "stop is a turn boundary")
 
 
 class ClaudeCode(base.Harness):
@@ -26,6 +141,41 @@ class ClaudeCode(base.Harness):
     name = "claude-code"
     display_name = "Claude Code"
     config_dir = ".claude"
+
+    # --- runtime: inbound --------------------------------------------------
+
+    def handback_skip_reason(self, event_payload: dict[str,
+                                                       Any]) -> str | None:
+        """Skip native `SubagentStop` events whose delivery goes through `SubagentHandback`."""
+        args = event_payload.get("args")
+        if isinstance(args, dict) and args.get("handback") is True:
+            return None
+        handback_mapping = self.handback_mapping()
+        if handback_mapping is None:
+            return None
+        raw_input = event_payload.get("raw_input") or {}
+        fields = self.event_mapping("SubagentStop").get("fields", {})
+        tool = handback_mapping["matcher"]
+        required_mode = handback_mapping.get("requires_mode")
+        if required_mode and utils.extract_first_field(
+                raw_input, fields.get("permission_mode", [])) == required_mode:
+            offer = handback_mapping.get("transcript_offer")
+            if not isinstance(
+                    offer,
+                    dict) or not offer.get("flag") or not offer.get("text"):
+                return base.HANDBACK_ASSUMED_SKIP
+            lines = _load_run_lines(raw_input, fields, handback_mapping)
+            if lines is None:
+                return base.HANDBACK_ASSUMED_SKIP
+            return HANDBACK_SKIP if _handback_offered(lines, tool,
+                                                      offer) else None
+        lines = _load_run_lines(raw_input,
+                                fields,
+                                handback_mapping,
+                                warn_missing_run=True)
+        if lines is not None and _handback_delivered(lines, tool):
+            return HANDBACK_SKIP
+        return None
 
     # --- runtime: outbound -------------------------------------------------
     #

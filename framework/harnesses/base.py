@@ -15,9 +15,9 @@
 
 An adaptor holds what is particular to one harness: today its identity,
 which block of `tool-mappings.json` and `event-mappings.json` it reads, and
-the native shape of a hook reply; the per-harness compile, install and
-runtime logic still in the core modules moves here over time. Ships with
-the runtime; imports no build tooling.
+the inbound, dispatch, and outbound sides of a hook call; the per-harness
+compile, install and trajectory logic still in the core modules moves here
+over time. Ships with the runtime; imports no build tooling.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from __future__ import annotations
 import dataclasses
 import sys
 from typing import Any
+
+from framework import utils
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,6 +46,26 @@ class HookReply:
     context: str | None
     updated_args: Any
 
+    @classmethod
+    def allow(
+        cls,
+        event: str,
+        hook_name: str,
+        *,
+        context: str | None = None,
+    ) -> HookReply:
+        """An empty `allow` verdict, optionally carrying `context`."""
+        return cls(
+            event=event,
+            hook_name=hook_name,
+            decision="allow",
+            reason="",
+            followup_message=None,
+            message=None,
+            context=context,
+            updated_args=None,
+        )
+
     @property
     def is_deny(self) -> bool:
         return self.decision == "deny"
@@ -55,8 +77,26 @@ class HookReply:
                 or f"Denied by hook {self.hook_name}")
 
 
+@dataclasses.dataclass(frozen=True)
+class DispatchContext:
+    """What `before_dispatch` and `after_dispatch` see of a hook invocation."""
+
+    event: str
+    canonical_event: str
+    normalized_event: dict[str, Any]
+    hook_name: str
+    package: str
+    session_id: str
+
+
+HANDBACK_ASSUMED_SKIP = (
+    "auto mode, but the transcript could not show whether the subagent was "
+    "given the hand-back tool; this native stop is taken as a turn boundary "
+    "and its result is not checked")
+
+
 class Harness:
-    """One harness's identity, mapping-table access, and hook reply shape."""
+    """One harness's identity, mapping-table access, and runtime hook behaviour."""
 
     name: str
     display_name: str
@@ -79,6 +119,88 @@ class Harness:
         if block is None and self.mapping_key:
             block = harnesses.get(self.mapping_key)
         return block or {}
+
+    def event_mapping(self, canonical_event: str) -> dict[str, Any]:
+        """This harness's block of `canonical_event` in `event-mappings.json`."""
+        return self.mapping_block(utils.get_event_mappings().get(
+            canonical_event, {}).get("harnesses", {}))
+
+    def handback_mapping(self) -> dict[str, Any] | None:
+        """The validated `handback` block of `SubagentStop`, or None."""
+        handback = self.event_mapping("SubagentStop").get("handback")
+        if (isinstance(handback, dict) and handback.get("event_name")
+                and handback.get("matcher")):
+            return handback
+        return None
+
+    # --- runtime: inbound -------------------------------------------------
+
+    # Whether a SubagentStop without a subagent name is logged to stderr.
+    # True when nameless stops come from internal helper agents; False when
+    # root-session turns share the same native Stop event and fire routinely.
+    report_nameless_stop: bool = True
+
+    def parent_session_id(self, session_id: str) -> str | None:
+        """The parent session ID of a subagent session, if the harness links them."""
+        return None
+
+    def canonical_event(self, event: str, raw_payload: dict[str, Any]) -> str:
+        """The canonical event name for inbound `event` and `raw_payload`."""
+        del raw_payload
+        event_mappings = utils.get_event_mappings()
+        if event in event_mappings:
+            return event
+        for canonical, entry in event_mappings.items():
+            if event == self.mapping_block(entry.get("harnesses",
+                                                     {})).get("event_name"):
+                return canonical
+        return event
+
+    def resolve_subagent(self,
+                         session_id: str,
+                         transcript_path: str = "") -> str | None:
+        """The subagent name for a session when the payload omits it, or None."""
+        del session_id, transcript_path
+        return None
+
+    def complete_subagent_stop(
+        self,
+        subagent: str,
+        output: Any,
+        *,
+        session_id: str = "",
+        transcript_path: str = "",
+    ) -> tuple[str, Any]:
+        """Fill in subagent metadata absent from the raw SubagentStop payload."""
+        del session_id, transcript_path
+        return subagent, output
+
+    def subagent_was_cut_short(self, event_payload: dict[str, Any]) -> bool:
+        """Whether `event_payload` describes a subagent halted before finishing."""
+        del event_payload
+        return False
+
+    def handback_skip_reason(self, event_payload: dict[str,
+                                                       Any]) -> str | None:
+        """Skip reason when a native SubagentStop is covered by a hand-back tool."""
+        del event_payload
+        return None
+
+    def is_session_over(self, event_payload: dict[str, Any]) -> bool:
+        """Whether `event_payload` marks the actual end of the root session."""
+        return event_payload.get("event") == "SessionEnd"
+
+    # --- runtime: dispatch lifecycle --------------------------------------
+
+    def before_dispatch(self, ctx: DispatchContext) -> HookReply | None:
+        """A canonical reply to render without running the hook, or None."""
+        del ctx
+        return None
+
+    def after_dispatch(self, ctx: DispatchContext,
+                       canonical_result: dict[str, Any]) -> None:
+        """Record any per-turn state after the hook action has produced its verdict."""
+        del ctx, canonical_result
 
     # --- runtime: outbound -------------------------------------------------
 

@@ -419,37 +419,13 @@ def _lease_run(package: str, workspace: Path, run_id: str) -> None:
               file=sys.stderr)
 
 
-# Termination reasons that indicate a root session actually ended (as opposed to
-# a per-turn Stop event such as `no_tool_call`, `user_canceled`, or `halted_step`,
-# where the conversation may continue and still need its submitted jobs).
-_COMPLETED_SESSION_TERMINATION_REASONS = frozenset({
-    "terminal_step_type",
-    "terminal_custom_hook",
-})
-
-
-def _session_completed(reason: Any) -> bool:
-    """Whether a termination reason says the root session ran to its actual end."""
-    text = str(reason or "").strip().lower()
-    return (text.removeprefix("termination_reason_")
-            in _COMPLETED_SESSION_TERMINATION_REASONS)
-
-
 def _is_session_over(event_payload: dict[str, Any]) -> bool:
-    """Return True if a canonical SessionEnd event marks the end of the session.
-
-    Native SessionEnd events always do; on Google harnesses (where SessionEnd is
-    emulated on per-turn Stop), the session must be both `fully_idle` and
-    terminated with a completed-session reason.
-    """
-    if event_payload.get("event") != "SessionEnd":
-        return False
-    if not harnesses.is_google_harness(
-            event_payload.get("context", {}).get("harness", "")):
-        return True
-    term = event_payload.get("termination", {})
-    return (term.get("fully_idle") is True
-            and _session_completed(term.get("reason")))
+    """Return True if a canonical SessionEnd event marks the end of the session."""
+    harness = str(event_payload.get("context", {}).get("harness") or "")
+    adaptor = harnesses.get(harness)
+    if adaptor is None:
+        return event_payload.get("event") == "SessionEnd"
+    return adaptor.is_session_over(event_payload)
 
 
 def _builtin_reap_jobs(

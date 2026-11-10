@@ -39,7 +39,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from framework import jsonio, paths, run_state, runtime, utils  # noqa: E402
+from framework import jsonio, paths, runtime, utils  # noqa: E402
 from framework.builder import hook_config  # noqa: E402
 from framework.hooks import actions, dispatch, events  # noqa: E402
 from framework.tests.hooks import helpers  # noqa: E402
@@ -706,55 +706,6 @@ class TestNormalizeInbound(helpers.RuntimeTestCase):
         ])
 
 
-class TestGoogleHarnessSubagentNames(helpers.RuntimeTestCase):
-    """Transcript and subagent-name helpers for the Google harnesses."""
-
-    def test_get_google_harness_subagent_name_with_disk_descriptor(self):
-        cid = "test-descriptor-cid-9999"
-        # A fake home, so the descriptor never lands in the developer's own
-        # ~/.gemini brain directory.
-        fake_home = self.temp_dir / "fake_home"
-        parent_dir = fake_home / ".gemini" / "antigravity-cli" / "brain" / "mock-parent-1234" / ".system_generated" / "subagents"
-        parent_dir.mkdir(parents=True, exist_ok=True)
-        desc_file = parent_dir / f"{cid}.json"
-        desc_file.write_text(json.dumps({
-            "conversationId": cid,
-            "subagentDescriptor": {
-                "typeName": "torch-coder"
-            }
-        }),
-                             encoding="utf-8")
-        with mock.patch("pathlib.Path.home", return_value=fake_home):
-            name = run_state.get_google_harness_subagent_name(cid, "")
-        self.assertEqual(name, "torch-coder")
-
-    def test_google_harness_post_processing(self):
-        # 1. Output extracted from transcript when None
-        transcript_file = self.workspace_dir / "transcript_post.jsonl"
-        transcript_file.write_text(
-            json.dumps({
-                "source": "MODEL",
-                "content": "TPU kernel done"
-            }),
-            encoding="utf-8",
-        )
-        subagent, output = events.google_harness_post_processing(
-            subagent="my-agent",
-            subagent_output=None,
-            transcript_path=str(transcript_file),
-        )
-        self.assertEqual(subagent, "my-agent")
-        self.assertEqual(output, "TPU kernel done")
-
-        # 2. Existing output preserved
-        _, output_kept = events.google_harness_post_processing(
-            subagent="my-agent",
-            subagent_output="already_set",
-            transcript_path=str(transcript_file),
-        )
-        self.assertEqual(output_kept, "already_set")
-
-
 class TestSubagentDispatch(helpers.RuntimeTestCase):
     """Dispatching subagent-stop hooks."""
 
@@ -821,38 +772,6 @@ class TestSubagentDispatch(helpers.RuntimeTestCase):
                     raw_input_text=json.dumps(payload),
                 )
                 self.assertEqual((code, res.get(key)), (0, expected))
-
-
-class TestStopEventDisambiguation(unittest.TestCase):
-    """Antigravity emits one native `Stop` for two different things.
-
-    A subagent finishing and the root loop ending arrive on the same wire
-    event, so only the payload separates them. Getting it backwards sends a
-    subagent's completion down the root path, where a resume hook would try to
-    restart a conversation that already ended.
-    """
-
-    def setUp(self):
-        self.workspace = pathlib.Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.workspace, ignore_errors=True)
-
-    def _normalize(self, payload):
-        return events.normalize_inbound_event(raw_payload=payload,
-                                              harness="antigravity",
-                                              event="Stop",
-                                              package="pkg",
-                                              workspace=self.workspace)
-
-    def test_nested_subagent_metadata_is_a_subagent_stop(self):
-        """The role can arrive inside the tool call rather than beside it."""
-        event = self._normalize({
-            "toolCall": {
-                "typeName": "tpu-diagnostics"
-            },
-            "terminationReason": "NO_TOOL_CALL",
-        })
-        self.assertEqual(event["event"], "SubagentStop")
-        self.assertEqual(event["subagent"], "tpu-diagnostics")
 
 
 if __name__ == "__main__":

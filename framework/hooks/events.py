@@ -19,7 +19,6 @@ each one keeps them. `normalize_inbound_event` is the entry point.
 
 from __future__ import annotations
 
-import json
 import pathlib
 import re
 import sys
@@ -65,7 +64,7 @@ def resolve_workspace_root(
 
     # 2. Fallback to process cwd and parent directory marker search
     cur = Path.cwd().resolve()
-    if cur.name in (".agent", ".cursor", ".claude"):
+    if cur.name in harnesses.HARNESS_CONFIG_DIRS.values():
         return cur.parent
     # Find the nearest ancestor with an active-run marker.
     for p in [cur, *cur.parents]:
@@ -73,51 +72,6 @@ def resolve_workspace_root(
                 paths.ACTIVE_RUN_FILE).is_file():
             return p
     return cur
-
-
-def extract_last_transcript_message(transcript_path: str) -> str | None:
-    """Return the latest MODEL message content from a JSONL transcript, or None."""
-    if not transcript_path:
-        return None
-    p = Path(transcript_path)
-    if not p.is_file():
-        return None
-    try:
-        with open(p, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                if data.get("source") == "MODEL" and data.get("content"):
-                    return data["content"]
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
-
-
-def google_harness_post_processing(
-    subagent: str,
-    subagent_output: Any,
-    session_id: str = "",
-    transcript_path: str = "",
-) -> tuple[str, Any]:
-    """Fill in missing subagent name and deliverable for Google harness Stop events.
-
-    Google harnesses emit a generic `Stop` event rather than `SubagentStop`, so
-    subagent metadata is resolved from brain descriptors and transcript files when
-    absent from the payload.
-    """
-    if not subagent and (session_id or transcript_path):
-        subagent = run_state.get_google_harness_subagent_name(
-            session_id, transcript_path) or ""
-    if subagent_output is None and transcript_path:
-        subagent_output = extract_last_transcript_message(transcript_path)
-    return subagent, subagent_output
 
 
 def _build_event_context(
@@ -174,20 +128,21 @@ def _normalize_subagent_stop_event(
     subagent_output = extract_canonical_field(raw_payload,
                                               fields.get("output", []),
                                               container=container_dict)
+    session_id_val = str(
+        extract_canonical_field(raw_payload,
+                                fields.get("session_id", []),
+                                container=container_dict) or "")
 
-    if harnesses.is_google_harness(harness):
-        cid = str(
-            extract_canonical_field(raw_payload,
-                                    fields.get("session_id", []),
-                                    container=container_dict) or "")
+    adaptor = harnesses.get(harness)
+    if adaptor is not None:
         tpath = str(
             extract_canonical_field(raw_payload,
                                     fields.get("transcript_path", []),
                                     container=container_dict) or "")
-        subagent, subagent_output = google_harness_post_processing(
-            subagent=subagent,
-            subagent_output=subagent_output,
-            session_id=cid,
+        subagent, subagent_output = adaptor.complete_subagent_stop(
+            subagent,
+            subagent_output,
+            session_id=session_id_val,
             transcript_path=tpath)
 
     normalized_args: dict[str, Any] = {"subagent": subagent}
@@ -213,10 +168,6 @@ def _normalize_subagent_stop_event(
                                     harness,
                                     "SubagentStop",
                                     container=container_dict)
-    session_id_val = str(
-        extract_canonical_field(raw_payload,
-                                fields.get("session_id", []),
-                                container=container_dict) or "")
     if fully_idle is not None:
         normalized_args["fully_idle"] = fully_idle
         normalized_args["fully_idle_source"] = "harness"
@@ -511,13 +462,11 @@ def _normalize_session_start_event(
             coerced = str(workspace)
         normalized_args[scalar_key] = coerced
 
-    subagent: str | None = None
-    if harnesses.is_google_harness(harness):
-        cid = str(normalized_args.get("session_id") or "")
-        trans_path = str(normalized_args.get("transcript_path") or "")
-        subagent = run_state.get_google_harness_subagent_name(cid, trans_path)
-
     session_id_val = str(normalized_args.get("session_id") or "")
+    trans_path = str(normalized_args.get("transcript_path") or "")
+    adaptor = harnesses.get(harness)
+    subagent = (adaptor.resolve_subagent(session_id_val, trans_path)
+                if adaptor is not None else None)
 
     return {
         "event": "SessionStart",
@@ -543,30 +492,10 @@ def normalize_inbound_event(
         if handback_mapping is not None:
             return _normalize_handback_event(raw_payload, handback_mapping,
                                              package, workspace)
-    # On Google harnesses, `Stop` and `SessionEnd` share the native `Stop`
-    # event with subagent stops; inspect the payload for subagent fields to
-    # distinguish them from a root-session stop.
-    if event == "Stop" or (event == "SessionEnd"
-                           and harnesses.is_google_harness(harness)):
-        subagent_fields = harnesses.harness_mapping(
-            utils.get_event_mappings().get("SubagentStop",
-                                           {}).get("harnesses", {}),
-            harness).get("fields", {})
-        container: dict[str, Any] = {}
-        for key in subagent_fields.get("container", []):
-            value = raw_payload.get(key)
-            if isinstance(value, dict):
-                container = value
-                break
-        has_subagent = any(
-            raw_payload.get(field) or container.get(field)
-            for field in subagent_fields.get("subagent", []))
-        if has_subagent:
-            canonical_event = "SubagentStop"
-        else:
-            canonical_event = "SessionEnd" if event == "SessionEnd" else "Stop"
-    else:
-        canonical_event = harnesses.to_canonical_event(event, harness)
+    adaptor = harnesses.get(harness)
+    canonical_event = (adaptor.canonical_event(event, raw_payload) if adaptor
+                       is not None else harnesses.to_canonical_event(
+                           event, harness))
 
     if canonical_event in ("Stop", "SessionEnd"):
         return _normalize_termination_event(raw_payload,

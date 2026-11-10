@@ -28,7 +28,7 @@ import sys
 from typing import Any
 
 from framework import bg_ledger, harnesses, run_state, utils
-from framework.hooks import actions, events, stop_filter
+from framework.hooks import actions, events
 
 Path = pathlib.Path
 TpuAgentSuiteError = utils.TpuAgentSuiteError
@@ -267,64 +267,44 @@ def _dispatch_hook_body(
     )
     canonical_event = normalized_event.get("event") or event
 
-    # Google harnesses emulate SessionStart, SessionEnd, and SubagentStop via
-    # PreInvocation and Stop events.
-    if harnesses.is_google_harness(harness):
-        # Ignore subagent stops when dispatching a root SessionEnd hook.
-        if event == "SessionEnd" and canonical_event == "SubagentStop":
-            return translate_canonical_output({"decision": "allow"}, harness,
-                                              event, hook_name), 0
-
-        # PreInvocation fires on every model call. Run the SessionStart hook
-        # only on the root session's first turn/invocation (`initial_num_steps == 1`
-        # and `invocation_num == 0`); on subsequent calls, re-inject cached and
-        # pending context instead.
-        if canonical_event == "SessionStart":
-            args = normalized_event.get("args", {})
-            if "initial_num_steps" not in args or "invocation_num" not in args:
-                raise TpuAgentSuiteError(
-                    f"harness '{harness}' requires 'initial_num_steps' and 'invocation_num' "
-                    f"to determine SessionStart phase")
-            init_steps = args["initial_num_steps"]
-            inv_num = args["invocation_num"]
-            session_id = events.event_session_id(normalized_event)
-
-            is_subagent = bool(normalized_event.get("subagent"))
-            is_subagent_or_retry = is_subagent or inv_num > 0
-            is_turn_2_plus = init_steps > 1
-
-            if is_subagent_or_retry or is_turn_2_plus:
-                cached_ctx = ""
-                if not is_subagent:
-                    cached_ctx = run_state.resolve_session_hook_context(
-                        session_id, hook_name)
-                pending_ctx = run_state.replay_pending_hook_context(session_id)
-                merged = "\n\n".join(t for t in (cached_ctx, pending_ctx) if t)
-                canonical: dict[str, Any] = {"decision": "allow"}
-                if merged:
-                    canonical["context"] = merged
-                return translate_canonical_output(canonical, harness,
-                                                  canonical_event,
-                                                  hook_name), 0
+    adaptor = harnesses.get(harness)
+    dispatch_ctx: harnesses.DispatchContext | None = None
+    if adaptor is not None:
+        dispatch_ctx = harnesses.DispatchContext(
+            event=event,
+            canonical_event=canonical_event,
+            normalized_event=normalized_event,
+            hook_name=hook_name,
+            package=package,
+            session_id=events.event_session_id(normalized_event),
+        )
+        short_circuit = adaptor.before_dispatch(dispatch_ctx)
+        if short_circuit is not None:
+            return adaptor.render_reply(short_circuit), 0
 
     # Skip SubagentStop events that do not represent a completed subagent
     # delivery (e.g. turn boundaries, halts, root turns, or duplicate fires).
     if canonical_event == "SubagentStop":
-        # The skip filter and the idle gate both ask whether a not-idle stop
+        if not str(normalized_event.get("subagent") or "").strip():
+            if adaptor is None or adaptor.report_nameless_stop:
+                print(
+                    f"[{hook_name}] SubagentStop skipped: "
+                    "no subagent name (internal helper or root session)",
+                    file=sys.stderr,
+                )
+            return _translate_hook_reply({"decision": "allow"}, harness,
+                                         canonical_event, hook_name,
+                                         normalized_event), 0
+        # The skip check and the idle gate both ask whether a not-idle stop
         # is a pause the harness resumes; ask once.
         stop_args = normalized_event.get("args")
         harness_resumes = (bg_ledger.harness_resumes_agent(
             normalized_event, harness) if isinstance(stop_args, dict)
                            and stop_args.get("fully_idle") is False else None)
-        skip_reason = stop_filter.subagent_stop_skip_reason(
-            normalized_event, harness, harness_resumes=harness_resumes)
-        handback_skip = skip_reason in (stop_filter.HANDBACK_SKIP,
-                                        stop_filter.HANDBACK_ASSUMED_SKIP)
-        if skip_reason and not handback_skip:
-            if (skip_reason == stop_filter.NO_SUBAGENT_NAME_SKIP
-                    and not harnesses.is_google_harness(harness)):
-                print(f"[{hook_name}] SubagentStop skipped: {skip_reason}",
-                      file=sys.stderr)
+        if not events.is_handback_event(normalized_event) and (
+            (adaptor is not None
+             and adaptor.subagent_was_cut_short(normalized_event))
+                or harness_resumes):
             return _translate_hook_reply({"decision": "allow"}, harness,
                                          canonical_event, hook_name,
                                          normalized_event), 0
@@ -345,9 +325,11 @@ def _dispatch_hook_body(
             return _translate_hook_reply(idle_verdict, harness,
                                          canonical_event, hook_name,
                                          normalized_event), 0
+        handback_skip = (adaptor.handback_skip_reason(normalized_event)
+                         if adaptor is not None else None)
         if handback_skip:
-            if skip_reason == stop_filter.HANDBACK_ASSUMED_SKIP:
-                print(f"[{hook_name}] SubagentStop skipped: {skip_reason}",
+            if handback_skip == harnesses.base.HANDBACK_ASSUMED_SKIP:
+                print(f"[{hook_name}] SubagentStop skipped: {handback_skip}",
                       file=sys.stderr)
             return _translate_hook_reply({"decision": "allow"}, harness,
                                          canonical_event, hook_name,
@@ -544,35 +526,15 @@ def _dispatch_hook_body(
             on_failure=on_failure,
         )
 
-    if harnesses.is_google_harness(harness):
-        session_id = events.event_session_id(normalized_event)
+    if canonical_result.get("run_id") and not canonical_result.get("context"):
+        canonical_result = {
+            **canonical_result,
+            "context":
+            run_state.format_run_context(canonical_result["run_id"]),
+        }
 
-        # Cache Turn 1 SessionStart context for re-injection on subsequent PreInvocation calls.
-        if canonical_event == "SessionStart":
-            ctx_text = (canonical_result.get("replay_context")
-                        or canonical_result.get("context"))
-            run_id = canonical_result.get("run_id")
-            if run_id and not ctx_text:
-                ctx_text = run_state.format_run_context(run_id)
-            if session_id and ctx_text:
-                run_state.record_session_hook_context(
-                    session_id=session_id,
-                    hook_name=hook_name,
-                    context_text=ctx_text,
-                    package=package,
-                )
-
-        # Spool PostToolUse context for delivery on the next PreInvocation call,
-        # since Google harness PostToolUse responses cannot carry context directly.
-        elif canonical_event == "PostToolUse":
-            deferred_text = canonical_result.get("context")
-            if deferred_text and session_id:
-                run_state.record_pending_hook_context(
-                    session_id=session_id,
-                    hook_name=hook_name,
-                    context_text=str(deferred_text),
-                    package=package,
-                )
+    if adaptor is not None and dispatch_ctx is not None:
+        adaptor.after_dispatch(dispatch_ctx, canonical_result)
 
     # 4. Translate to target harness format
     harness_response = _translate_hook_reply(

@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the stop filter: subagent handback and the background
-idle gate."""
+"""Unit tests for the stop filter and the background idle gate."""
 
 import contextlib
 import io
@@ -30,7 +29,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from framework import bg_ledger, paths  # noqa: E402
-from framework.hooks import dispatch, events, stop_filter  # noqa: E402
+from framework.hooks import dispatch, events  # noqa: E402
 from framework.tests.hooks import helpers  # noqa: E402
 
 Path = pathlib.Path
@@ -42,268 +41,6 @@ def setUpModule():
 
 def tearDownModule():
     helpers.tear_down_module()
-
-
-class TestSubagentHandback(unittest.TestCase):
-    """A Claude Code subagent's result arrives by one of two roads.
-
-    Outside auto mode a subagent ends its turn and the result is its last
-    message (native SubagentStop), in the foreground or the background. In
-    auto mode every subagent must call the injected `SubagentHandback` tool
-    instead, and only that call is delivered. The same SubagentStop hook is
-    registered on both, and the contract must be enforced exactly once
-    whichever road is taken.
-    """
-
-    PKG = "test-pkg@1.0.0"
-    RESULT = {"status": "success", "summary": "done", "artifacts": []}
-
-    def setUp(self):
-        super().setUp()
-        self.temp_dir, self.workspace_dir = helpers.isolated_workspace(
-            self, "central_tpu_agent_suite")
-        self.central_home = self.temp_dir / "central_tpu_agent_suite"
-
-        scripts_dir = self.central_home / "packages" / self.PKG / "scripts"
-        scripts_dir.mkdir(parents=True)
-        self.fires = self.temp_dir / "fires.jsonl"
-        # Records every fire, and refuses any output without a JSON status.
-        (scripts_dir / "check.py").write_text(
-            "import sys, json\n"
-            "data = json.loads(sys.stdin.read())\n"
-            f"with open({str(self.fires)!r}, 'a') as f:\n"
-            "    f.write(json.dumps(data) + '\\n')\n"
-            "if '\"status\"' in str(data.get('output') or ''):\n"
-            "    print(json.dumps({'decision': 'allow'}))\n"
-            "else:\n"
-            "    print(json.dumps({'decision': 'deny', 'reason': 'bad',\n"
-            "                      'followup_message': 'send JSON'}))\n",
-            encoding="utf-8",
-        )
-
-    def _dispatch(self, payload):
-        return dispatch.dispatch_hook(
-            harness="claude-code",
-            package=self.PKG,
-            hook_name="check",
-            event="SubagentStop",
-            script_rel="scripts/check.py",
-            workspace=self.workspace_dir,
-            raw_input_text=json.dumps(payload),
-        )
-
-    def _handback(self, message, **extra):
-        return {
-            "hook_event_name": "PreToolUse",
-            "tool_name": "SubagentHandback",
-            "agent_type": "tpu-model-onboarding",
-            "session_id": "sess-1",
-            "tool_input": {
-                "message": message
-            },
-            **extra,
-        }
-
-    def _fire_count(self):
-        if not self.fires.exists():
-            return 0
-        return len(self.fires.read_text(encoding="utf-8").splitlines())
-
-    def _write_transcript(self, records):
-        path = self.temp_dir / "agent-1.jsonl"
-        path.write_text("\n".join(json.dumps(r) for r in records),
-                        encoding="utf-8")
-        return path
-
-    @staticmethod
-    def _content(block):
-        return {"message": {"content": [block]}}
-
-    @staticmethod
-    def _prompt(prompt_id, text, meta=False):
-        # Every user record Claude Code writes for a run carries its promptId.
-        record = {
-            "type": "user",
-            "promptId": prompt_id,
-            "message": {
-                "role": "user",
-                "content": text
-            },
-        }
-        if meta:
-            record["isMeta"] = True
-        return record
-
-    def _native_stop(self,
-                     transcript,
-                     message="Report delivered.",
-                     prompt_id=None,
-                     permission_mode=None):
-        payload = {
-            "hook_event_name": "SubagentStop",
-            "agent_type": "tpu-model-onboarding",
-            "session_id": "sess-1",
-            "last_assistant_message": message,
-            "agent_transcript_path": str(transcript),
-            # The parent session's file on Claude Code; must never be read.
-            "transcript_path": str(self.temp_dir / "parent.jsonl"),
-        }
-        if prompt_id is not None:
-            payload["prompt_id"] = prompt_id
-        if permission_mode is not None:
-            payload["permission_mode"] = permission_mode
-        return payload
-
-    def test_one_check_per_delivery_across_both_roads(self):
-        # The recorded auto-mode sequence: the subagent writes its report as
-        # text and ends its turn before calling the tool, then calls it, then
-        # ends its turn again with a closing remark. Only the call reaches
-        # the caller, so only the call is checked. The stop's mode decides
-        # alone: the transcript, missing here, is not read.
-        transcript = self.temp_dir / "missing.jsonl"
-        before, _ = self._dispatch(
-            self._native_stop(transcript, "draft", permission_mode="auto"))
-        handback, _ = self._dispatch(self._handback(json.dumps(self.RESULT)))
-        after, _ = self._dispatch(
-            self._native_stop(transcript,
-                              "Report delivered.",
-                              permission_mode="auto"))
-
-        self.assertNotIn("decision", before)
-        self.assertEqual(handback["hookSpecificOutput"]["permissionDecision"],
-                         "allow")
-        self.assertNotIn("decision", after)
-        fires = [
-            json.loads(line)
-            for line in self.fires.read_text(encoding="utf-8").splitlines()
-        ]
-        self.assertEqual(len(fires), 1)
-        self.assertIs(fires[0]["args"]["handback"], True)
-        self.assertEqual(fires[0]["subagent"], "tpu-model-onboarding")
-
-    def _handback_call(self, call_id, result, is_error=False):
-        # A SubagentHandback call and the tool result Claude Code records.
-        tool_result = {
-            "type": "tool_result",
-            "tool_use_id": call_id,
-            "content": result
-        }
-        if is_error:
-            tool_result["is_error"] = True
-        return [
-            self._content({
-                "type": "tool_use",
-                "id": call_id,
-                "name": "SubagentHandback"
-            }),
-            self._content(tool_result),
-        ]
-
-    def _auto_run_then_resume(self):
-        # Recorded shape of a subagent that handed back in auto mode (run
-        # "p1") and was then resumed in default mode (run "p2") in the same
-        # transcript: Claude Code withdraws the tool for the resumed run, and
-        # its plain final message is what the caller receives.
-        return self._write_transcript([
-            self._prompt("p1", "harness test, part 1"),
-            *self._handback_call("t1", "Report delivered to your caller."),
-            self._prompt("p2", "harness test, part 2", meta=True),
-            self._prompt("p2",
-                         "<system-reminder>SubagentHandback is not available "
-                         "in this run ...</system-reminder>",
-                         meta=True),
-            self._content({
-                "type": "text",
-                "text": "handshake-2"
-            }),
-        ])
-
-    def test_stop_without_a_known_run_is_held(self):
-        # A payload that cannot name its run, or names one no record bears,
-        # proves nothing, like an unreadable transcript: an earlier run's
-        # hand-back must not exempt it, so the native stop is checked.
-        transcript = self._auto_run_then_resume()
-        for prompt_id in (None, "p9"):
-            with self.subTest(prompt_id=prompt_id):
-                with contextlib.redirect_stderr(io.StringIO()) as stderr:
-                    res, _ = self._dispatch(
-                        self._native_stop(transcript,
-                                          "handshake-2",
-                                          prompt_id=prompt_id))
-                self.assertEqual(res.get("decision"), "block")
-                self.assertIn("cannot locate the stopping run",
-                              stderr.getvalue())
-        self.assertEqual(self._fire_count(), 2)
-
-    def test_auto_mode_run_without_an_offer_is_held(self):
-        # Recorded on Claude Code 2.1.241, headless and interactive alike:
-        # auto mode, but the run is never given the tool, so its plain final
-        # message is what the caller receives. Skipping it on the mode alone
-        # let every result through unchecked. The meta record that withdraws
-        # the tool names it too; it must not read as the offer.
-        for label, record in (
-            ("never offered",
-             self._content({
-                 "type": "text",
-                 "text": "Brief and plan written."
-             })),
-            ("withdrawn",
-             self._prompt("p1",
-                          "<system-reminder>SubagentHandback is not available "
-                          "in this run ...</system-reminder>",
-                          meta=True)),
-        ):
-            with self.subTest(label):
-                transcript = self._write_transcript(
-                    [self._prompt("p1", "harness test"), record])
-                res, _ = self._dispatch(
-                    self._native_stop(transcript,
-                                      "handshake",
-                                      prompt_id="p1",
-                                      permission_mode="auto"))
-                self.assertEqual(res.get("decision"), "block")
-        self.assertEqual(self._fire_count(), 2)
-
-    def test_auto_mode_run_offered_the_tool_is_a_turn_boundary(self):
-        # Recorded on Claude Code 2.1.285: the offer is a meta record at the
-        # start of the run, before its first stop, so the draft stop before
-        # the call is let through without waiting for the call. The skip is
-        # not reported: the offer shows the run has the tool.
-        for offer in ("<system-reminder>\nYour final report is delivered "
-                      "through SubagentHandback: when your work is "
-                      "complete, call SubagentHandback({message: <your "
-                      "full report>}).</system-reminder>",
-                      "Your final report is delivered through "
-                      "SubagentHandback."):
-            with self.subTest(offer=offer):
-                transcript = self._write_transcript([
-                    self._prompt("p1", "reply with pong"),
-                    self._prompt("p1", offer, meta=True),
-                ])
-                with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-                    res, _ = self._dispatch(
-                        self._native_stop(transcript,
-                                          "draft",
-                                          prompt_id="p1",
-                                          permission_mode="auto"))
-                self.assertNotIn("decision", res)
-                self.assertEqual(self._fire_count(), 0)
-                self.assertNotIn("SubagentStop skipped", err.getvalue())
-
-    def test_accepted_handback_exempts_stops_in_any_mode(self):
-        # Switching out of auto mode after the call was accepted must not
-        # hold the closing remark: that is the block-on-every-retry loop.
-        transcript = self._write_transcript([
-            self._prompt("p1", "harness test"),
-            *self._handback_call("t1", "Report delivered to your caller."),
-        ])
-        res, _ = self._dispatch(
-            self._native_stop(transcript,
-                              "Report delivered.",
-                              prompt_id="p1",
-                              permission_mode="default"))
-        self.assertNotIn("decision", res)
-        self.assertEqual(self._fire_count(), 0)
 
 
 class TestBackgroundIdleGate(unittest.TestCase):
@@ -569,19 +306,28 @@ class TestBackgroundIdleGate(unittest.TestCase):
     def test_harness_reported_idle_flag_still_skips_on_antigravity(self):
         # Antigravity says `fullyIdle` itself and resumes the paused agent;
         # the ledger policy must not reach it.
-        event = events.normalize_inbound_event(
-            {
-                "typeName": "parent-orch",
-                "conversationId": "conv-1",
-                "terminationReason": "NO_TOOL_CALL",
-                "fullyIdle": False,
-                "finalModelOutput": "waiting",
-            }, "antigravity", "SubagentStop", self.PKG, self.workspace_dir)
+        payload = {
+            "typeName": "parent-orch",
+            "conversationId": "conv-1",
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": False,
+            "finalModelOutput": "waiting",
+        }
+        event = events.normalize_inbound_event(payload, "antigravity",
+                                               "SubagentStop", self.PKG,
+                                               self.workspace_dir)
         self.assertEqual(event["args"]["fully_idle_source"], "harness")
-        self.assertEqual(
-            stop_filter.subagent_stop_skip_reason(event, "antigravity"),
-            "subagent still has work outstanding (not fully idle)")
         self.assertIsNone(bg_ledger.idle_gate_verdict(event, "antigravity"))
+        res, code = dispatch.dispatch_hook(
+            harness="antigravity",
+            package=self.PKG,
+            hook_name="test-validate-schema",
+            event="SubagentStop",
+            builtin="validate-schema",
+            workspace=self.workspace_dir,
+            raw_input_text=json.dumps(payload),
+        )
+        self.assertEqual((code, res.get("decision")), (0, "allow"))
 
 
 if __name__ == "__main__":

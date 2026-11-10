@@ -15,8 +15,7 @@
 
 A run is a directory under ~/.tpu-agent-suite/runs/ holding one session's
 artifacts. Sessions are recorded under ~/.tpu-agent-suite/sessions/: the run
-each one uses, the context its hooks injected, and context still waiting to be
-delivered on the Google harnesses.
+each one uses and its active tool-limited skill.
 """
 
 from __future__ import annotations
@@ -33,11 +32,6 @@ from framework import compute, harnesses, jsonio, paths, utils
 Path = pathlib.Path
 TpuAgentSuiteError = utils.TpuAgentSuiteError
 _safe_path_component = utils.safe_path_component
-
-# Ceiling on spooled context entries per session, oldest evicted first.
-# Every live entry is replayed into emulated context on each invocation until
-# pushed out by newer entries, so this bounds the per-call prompt overhead.
-MAX_PENDING_CONTEXT_ENTRIES = 8
 
 
 def generate_run_id() -> str:
@@ -124,65 +118,10 @@ def format_run_context(run_id: str) -> str:
     )
 
 
-def _google_harness_subagent_descriptors(
-        conversation_id: str) -> Iterator[Path]:
-    """Yield subagent descriptors matching `conversation_id` across brain roots.
-
-    Descriptors live at `<brain_dir>/<parent_cid>/.system_generated/subagents/<cid>.json`.
-    """
-    for brain_root in sorted(set(
-            harnesses.GOOGLE_HARNESS_BRAIN_DIRS.values())):
-        brain_dir = Path.home() / ".gemini" / brain_root / "brain"
-        if brain_dir.is_dir():
-            matches = list(
-                brain_dir.glob(
-                    f"*/.system_generated/subagents/{conversation_id}.json"))
-            if matches:
-                yield matches[0]
-
-
-def get_google_harness_subagent_name(
-    conversation_id: str,
-    transcript_path: str = "",
-) -> str | None:
-    """Return the subagent name for `conversation_id`, or None for a root session."""
-    if transcript_path and "/worktrees/subagent-" in transcript_path:
-        return "subagent"
-    if not conversation_id:
-        return None
-
-    for descriptor in _google_harness_subagent_descriptors(conversation_id):
-        desc_data = jsonio.load_json_or_empty(descriptor)
-        sub_desc = desc_data.get("subagentDescriptor")
-        if isinstance(sub_desc, dict):
-            name = sub_desc.get("typeName") or sub_desc.get("role")
-            if name:
-                return name
-
-    return None
-
-
-def get_google_harness_parent_conversation_id(
-        conversation_id: str) -> str | None:
-    """Return the parent conversation ID for a Google harness subagent, or None."""
-    if not conversation_id:
-        return None
-    descriptor = next(_google_harness_subagent_descriptors(conversation_id),
-                      None)
-    return descriptor.parents[2].name if descriptor else None
-
-
 def get_session_file(session_id: str) -> Path:
     """Return path to session metadata file under ~/.tpu-agent-suite/sessions/."""
     return paths.get_sessions_root(
     ) / f"{_safe_path_component(session_id)}.json"
-
-
-def get_hook_context_file(session_id: str, hook_name: str) -> Path:
-    """Return path to a hook's cached SessionStart context for a session."""
-    contexts_dir = (paths.get_sessions_root() /
-                    f"{_safe_path_component(session_id)}.contexts")
-    return contexts_dir / f"{_safe_path_component(hook_name)}.json"
 
 
 def record_session_run(
@@ -206,104 +145,14 @@ def record_session_run(
     jsonio.write_json(session_file, session_doc)
 
 
-def record_session_hook_context(
-    session_id: str,
-    hook_name: str,
-    context_text: str,
-    package: str = "",
-) -> None:
-    """Record cached hook context under ~/.tpu-agent-suite/sessions/<id>.contexts/."""
-    if not session_id or not hook_name or not context_text:
-        return
-    jsonio.write_json(
-        get_hook_context_file(session_id, hook_name), {
-            "context": context_text,
-            "hook_name": hook_name,
-            "package": package,
-            "recorded_at": utils.utc_now_iso(),
-        })
-
-
-def get_pending_context_dir(session_id: str) -> Path:
-    """Return the spool directory for hook context awaiting delivery.
-
-    Used on Google harnesses where PostToolUse responses cannot carry context;
-    hooks spool context here and PreInvocation delivers it on subsequent turns.
-    """
-    return (paths.get_sessions_root() /
-            f"{_safe_path_component(session_id)}.pending")
-
-
-def record_pending_hook_context(
-    session_id: str,
-    hook_name: str,
-    context_text: str,
-    package: str = "",
-) -> None:
-    """Spool hook context into a per-entry file for delivery on a later event."""
-    if not session_id or not context_text:
-        return
-    pending_dir = get_pending_context_dir(session_id)
-    pending_dir.mkdir(parents=True, exist_ok=True)
-
-    recorded_at = utils.utc_now_iso()
-    entry_name = f"{recorded_at}-{uuid.uuid4().hex[:8]}.json"
-    jsonio.write_json(
-        pending_dir / _safe_path_component(entry_name), {
-            "context": context_text,
-            "hook_name": hook_name,
-            "package": package,
-            "recorded_at": recorded_at,
-        })
-
-    # Evict oldest entries past MAX_PENDING_CONTEXT_ENTRIES.
-    existing = sorted(pending_dir.glob("*.json"))
-    overflow = len(existing) - MAX_PENDING_CONTEXT_ENTRIES
-    if overflow > 0:
-        for stale in existing[:overflow]:
-            stale.unlink(missing_ok=True)
-
-
-def replay_pending_hook_context(session_id: str | None) -> str:
-    """Return spooled context for `session_id` (without falling back to a parent session)."""
-    if not session_id:
-        return ""
-    pending_dir = get_pending_context_dir(session_id)
-    if not pending_dir.is_dir():
-        return ""
-
-    texts: list[str] = []
-    for entry_file in sorted(pending_dir.glob("*.json")):
-        entry = jsonio.load_json_or_empty(entry_file)
-        context_text = entry.get("context")
-        if not context_text:
-            entry_file.unlink(missing_ok=True)
-            continue
-        texts.append(str(context_text))
-    return "\n\n".join(texts)
-
-
 def _iter_session_ids(session_id: str) -> Iterator[str]:
-    """Yield `session_id`, followed by its parent conversation ID if it is a subagent."""
+    """Yield `session_id`, followed by its parent session ID if it is a subagent."""
     yield session_id
-    parent_cid = get_google_harness_parent_conversation_id(session_id)
-    if parent_cid:
-        yield parent_cid
-
-
-def resolve_session_hook_context(
-    session_id: str | None,
-    hook_name: str,
-) -> str | None:
-    """Resolve cached hook context text for a session and hook name."""
-    if not session_id or not hook_name:
-        return None
-    for cid in _iter_session_ids(session_id):
-        context_text = jsonio.load_json_or_empty(
-            get_hook_context_file(cid, hook_name)).get("context")
-        if context_text:
-            return str(context_text)
-    return None
+    for name in harnesses.names():
+        parent_id = harnesses.HARNESSES[name].parent_session_id(session_id)
+        if parent_id and parent_id != session_id:
+            yield parent_id
+            return
 
 
 def resolve_session_run_id(session_id: str | None = None) -> str | None:

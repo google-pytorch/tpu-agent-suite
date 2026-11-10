@@ -90,3 +90,25 @@ class HarnessConformance(unittest.TestCase):
                     self.harness.render_reply(
                         self._hook_reply("NoSuchEvent", decision)), dict)
                 unknown.assert_called_once()
+
+    def test_canonical_event_resolves_canonical_and_native_names(self):
+        """Every canonical event resolves to itself, and every native event to
+        one of the canonical events mapped onto it."""
+        mappings = utils.get_event_mappings()
+        by_native: dict[str, set[str]] = {}
+        for canonical, entry in mappings.items():
+            block = self.harness.mapping_block(entry.get("harnesses", {}))
+            native = block.get("event_name")
+            if native:
+                by_native.setdefault(native, set()).add(canonical)
+
+        for canonical in utils.SUPPORTED_HOOK_EVENTS:
+            with self.subTest(canonical=canonical):
+                self.assertEqual(self.harness.canonical_event(canonical, {}),
+                                 canonical)
+        for native, candidates in by_native.items():
+            with self.subTest(native=native):
+                self.assertIn(self.harness.canonical_event(native, {}),
+                              candidates)
+        self.assertEqual(self.harness.canonical_event("NoSuchEvent", {}),
+                         "NoSuchEvent")

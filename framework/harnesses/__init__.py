@@ -30,6 +30,7 @@ from framework.harnesses import (antigravity, base, claude_code, codex, cursor,
 Harness = base.Harness
 GoogleHarness = google.GoogleHarness
 HookReply = base.HookReply
+DispatchContext = base.DispatchContext
 
 HARNESSES: dict[str, Harness] = {
     adaptor.name: adaptor
@@ -106,9 +107,9 @@ def harness_mapping(harnesses: dict[str, Any], harness: str) -> dict[str, Any]:
 
 def event_mapping(canonical_event: str, harness: str) -> dict[str, Any]:
     """The mapping block of `canonical_event` for `harness` (empty if none)."""
-    return harness_mapping(
-        utils.get_event_mappings().get(canonical_event,
-                                       {}).get("harnesses", {}), harness)
+    adaptor = get(harness)
+    return adaptor.event_mapping(
+        canonical_event) if adaptor is not None else {}
 
 
 def subagent_handback_mapping(harness: str) -> dict[str, Any] | None:
@@ -137,12 +138,8 @@ def subagent_handback_mapping(harness: str) -> dict[str, Any] | None:
     record nor a call is checked; without the entry the transcript cannot
     show it, and the mode alone exempts the stop.
     """
-    handback_mapping = event_mapping("SubagentStop", harness).get("handback")
-    if (isinstance(handback_mapping, dict)
-            and handback_mapping.get("event_name")
-            and handback_mapping.get("matcher")):
-        return handback_mapping
-    return None
+    adaptor = get(harness)
+    return adaptor.handback_mapping() if adaptor is not None else None
 
 
 def subagent_idle_mapping(harness: str) -> dict[str, Any] | None:
@@ -199,11 +196,6 @@ def to_harness_event(canonical_event: str, harness: str) -> str:
 
 def to_canonical_event(harness_event: str, harness: str) -> str:
     """Map a harness-specific event identifier to its canonical event name."""
-    event_mappings = utils.get_event_mappings()
-    if harness_event in event_mappings:
-        return harness_event
-    for c_name, c_def in event_mappings.items():
-        h_info = harness_mapping(c_def.get("harnesses", {}), harness)
-        if harness_event == h_info.get("event_name"):
-            return c_name
-    return harness_event
+    adaptor = get(harness)
+    return adaptor.canonical_event(
+        harness_event, {}) if adaptor is not None else harness_event

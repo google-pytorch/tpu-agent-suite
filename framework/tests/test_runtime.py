@@ -37,6 +37,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from framework import agent_contracts, paths, run_state, runtime, utils
+from framework.harnesses import google as google_harness
 from framework.hooks import dispatch, events
 from framework.tests.hooks import helpers
 
@@ -283,7 +284,7 @@ class TestPurgeData(helpers.RuntimeTestCase):
             run_id=run_doc["run_id"],
             package="test-pkg@1.0.0",
         )
-        run_state.record_session_hook_context(
+        google_harness.record_session_hook_context(
             session_id="conv-purge",
             hook_name="session-run-init",
             context_text="cached context",
@@ -297,8 +298,8 @@ class TestPurgeData(helpers.RuntimeTestCase):
         self.assertFalse(paths.get_runs_root().is_dir())
         self.assertIsNone(run_state.resolve_session_run_id("conv-purge"))
         self.assertIsNone(
-            run_state.resolve_session_hook_context("conv-purge",
-                                                   "session-run-init"))
+            google_harness.resolve_session_hook_context(
+                "conv-purge", "session-run-init"))
 
     def test_purge_data_declined_keeps_everything(self):
         run_state.record_session_run(

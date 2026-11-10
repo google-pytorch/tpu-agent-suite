@@ -13,11 +13,10 @@
 # limitations under the License.
 """Hook dispatch: what `runtime.py hook-dispatch` runs for each harness event.
 
-`events` turns a harness payload into a canonical event, `stop_filter` decides
-whether a SubagentStop is a finished subagent, `dispatch` filters the event
-and shapes the reply, and `actions` runs the hook itself.
+`events` turns a harness payload into a canonical event, `dispatch` filters
+the event and shapes the reply, and `actions` runs the hook itself.
 """
 
-from framework.hooks import actions, dispatch, events, stop_filter
+from framework.hooks import actions, dispatch, events
 
-__all__ = ["actions", "dispatch", "events", "stop_filter"]
+__all__ = ["actions", "dispatch", "events"]
