@@ -44,6 +44,7 @@ The framework ships with 4 built-in compute drivers:
 | `priority` | `--priority` | unset | Kueue workload priority class; leaving this unset leaves the Job unlabelled so it takes the cluster default. |
 | `declared_duration_minutes` | `--declared-duration-minutes` | unset | Declared runtime in minutes for Kueue suspension enforcement. |
 | `job_name_prefix` | `--job-name-prefix` | unset | Prefix (1–30 lowercase letters, digits, or `-`) added to every generated Job name, e.g. `agent`. |
+| `slots` | none (`config set slots=N`) | `1` | How many of this profile's servers a serving sweep may run side by side. Read by `tpu_slots.py`, not by the driver. |
 | `mldiagnostics` | `--mldiagnostics` | `false` | Label the Job for GKE managed ML diagnostics so the workload appears in the Cloud Console Diagnostics view. |
 | `python_interpreter` | `--interpreter` | `python3` | Python interpreter inside the container. |
 

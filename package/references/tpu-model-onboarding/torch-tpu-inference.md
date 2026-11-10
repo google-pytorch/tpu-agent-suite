@@ -77,13 +77,16 @@ next.
     run the shapes on several servers at once, every one of them the same
     kind of TPU as this deployment: one accelerator, topology and image. So
     put this deployment on the kind with the most room for servers like it.
-    Book the session's slots as "A sweep on several servers" in
-    `{{reference:common/inference-serving-benchmark.md}}` says (its step 1),
-    then take the slot with the most free slots of its kind beside it:
+    The session's slots are the ones its compute profiles declare (step 1
+    of "A sweep on several servers" in
+    `{{reference:common/inference-serving-benchmark.md}}`). Take the slot
+    with the most free slots of its kind beside it; with no `parallel.json`
+    yet, the claim writes it from the profiles:
 
     ```bash
     python3 {{script:common/tpu_slots.py}} claim --run-id <run_id> \
-      --holder tpu-model-onboarding:<deployment name> --most-available
+      --holder tpu-model-onboarding:<deployment name> --most-available \
+      --runtime "{{runtime}}" --package {{package_tag}}
     ```
 
     It prints the `resource`, its `profile`, its `hardware` key and

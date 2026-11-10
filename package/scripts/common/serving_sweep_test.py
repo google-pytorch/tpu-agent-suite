@@ -41,6 +41,20 @@ except ImportError:
     sys.modules["serving_sweep"] = serving_sweep
     _spec.loader.exec_module(serving_sweep)
 tpu_slots = serving_sweep.tpu_slots
+
+
+def _declaring(profiles, n):
+    """`profiles`, each gke_job profile declaring `n` slots."""
+    return {
+        name: ({
+            **p, "params": {
+                **(p.get("params") or {}), "slots": n
+            }
+        } if p.get("backend") == "gke_job" else p)
+        for name, p in profiles.items()
+    }
+
+
 serving_benchmark = serving_sweep.serving_benchmark
 
 MODEL = {"id": "m", "root": "/model", "max_model_len": 9216}
@@ -296,12 +310,17 @@ class SweepCase(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         self.slots = self.root / "parallel.json"
         self.runs = 0
+        self.declared = (GKE, GKE)
 
     def plan(self, *extra, client=CLIENT):
         return serving_sweep.make_plan(list(client) + list(extra), 9216)
 
     def make_slots(self, n, profiles=None):
-        tpu_slots.discover(self.slots, profiles or GKE, n)
+        """The profiles' gke_job ones declare `n` slots; the sweep given those
+        profiles is given these, and opens the same slots itself."""
+        source = profiles or GKE
+        self.declared = (source, _declaring(source, n))
+        tpu_slots.open_slots(self.slots, self.declared[1])
 
     def sweep(self,
               plan,
@@ -324,8 +343,10 @@ class SweepCase(unittest.TestCase):
             argv += ["--leader-profile", active]
         args = serving_sweep.parse_args(argv + list(extra) + ["--"] +
                                         plan["client_args"])
-        return serving_sweep.Sweep(args, plan, compute, profiles or GKE,
-                                   active)
+        source, declared = self.declared
+        if profiles is None or profiles is source:
+            profiles = declared
+        return serving_sweep.Sweep(args, plan, compute, profiles, active)
 
     def run_quietly(self, sweep):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -382,14 +403,20 @@ class TestPlan(SweepCase):
 class TestRun(SweepCase):
 
     def test_a_sweep_runs_every_shape_once_on_servers_that_serve(self):
-        self.make_slots(2)
+        # No parallel.json yet: the sweep writes it from the profile's slots.
+        two = gke()
+        two["params"] = {**two["params"], "slots": 2}
         fake = FakeCompute(delay=0.01, client_delay=0.1)
-        sweep = self.sweep(self.plan(), fake,
+        sweep = self.sweep(self.plan(),
+                           fake,
                            "--server-submit-arg=--shm-size-gb=128",
-                           "--server-input", "deployments.json",
+                           "--server-input",
+                           "deployments.json",
                            "--server-image",
-                           "registry.example/patched@sha256:f")
+                           "registry.example/patched@sha256:f",
+                           profiles={"gke": two})
         merged = self.run_quietly(sweep)
+        self.assertTrue(self.slots.exists())
         self.assertEqual(merged["status"], "ok")
         self.assertEqual(len(merged["cells"]), 9)
         ran = {_flag(j["argv"], "--isl-osl"): j for j in fake.clients()}
@@ -736,7 +763,7 @@ class TestHardware(SweepCase):
         }
 
     def test_followers_are_the_leaders_kind_on_any_profile_of_it(self):
-        tpu_slots.discover(self.slots, self.PROFILES, 1)
+        self.make_slots(1, self.PROFILES)
         tpu_slots.claim(self.slots,
                         "tpu-model-onboarding:g",
                         profile="gke-v7x-a")
@@ -752,14 +779,14 @@ class TestHardware(SweepCase):
 
     def test_without_a_leader_the_first_server_goes_to_the_most_free_kind(
             self):
-        tpu_slots.discover(self.slots, self.PROFILES, 1)
+        self.make_slots(1, self.PROFILES)
         fake = FakeCompute(delay=0.01)
         _, merged = self.run_on(fake, "gke-v6e", leader=())
         self.assertEqual(merged["status"], "ok")
         self.assertEqual(self.kinds(fake), {V7X})
 
     def test_shapes_measured_on_two_kinds_are_not_one_sweep(self):
-        tpu_slots.discover(self.slots, self.PROFILES, 2)
+        self.make_slots(2, self.PROFILES)
         sweep, _ = self.run_on(FakeCompute(delay=0.01), "gke-v6e")
         follower = next(s for s in sweep.servers if s["owned"])
         follower["hardware"] = V7X

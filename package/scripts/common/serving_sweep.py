@@ -106,6 +106,7 @@ import enum
 import io
 import json
 import math
+import os
 import pathlib
 import re
 import shlex
@@ -339,7 +340,9 @@ class Compute:
     def __init__(self, runtime: str, package: str | None, run_id: str | None,
                  calls_dir: Path):
         self.runtime = runtime
-        self.base = shlex.split(runtime) + ["compute"]
+        # A quoted --runtime "python3 ~/..." reaches us with its ~ unexpanded.
+        self.base = [os.path.expanduser(t)
+                     for t in shlex.split(runtime)] + ["compute"]
         self.package, self.run_id = package, run_id
         self.calls_dir = calls_dir
         self._n = 0
@@ -602,6 +605,10 @@ class Sweep:
         if not self.args.no_slots:
             self.slots_path = tpu_slots.state_path(self.args.run_id,
                                                    self.args.slots)
+            if not self.slots_path.exists():
+                # The session's slots, set once from its profiles. A sweep
+                # books only gke_job slots, so no TPU VM is inspected.
+                tpu_slots.open_slots(self.slots_path, self.profiles)
         want = min(len(self.queue), self.args.max_servers)
         self.servers.extend(self.leaders(want))
         # One kind of TPU for every server: the first leader's, else that of

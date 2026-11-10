@@ -109,6 +109,8 @@ class GkeJobDriver(base.ComputeDriver):
             f"{COMPILE_CACHE_MAX_AGE_DAYS} days (0 never removes them)",
             "job_name_prefix":
             "a recognisable prefix on generated Job names",
+            "slots":
+            "servers a serving sweep may run side by side (default 1)",
             "ml_diagnostics_cluster":
             "uploading profiles to an ML Diagnostics dashboard",
             "ml_diagnostics_gcs":

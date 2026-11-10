@@ -113,6 +113,11 @@
                 "minimum": 1,
                 "description": "gke_job backend (optional): size in GiB of the memory-backed /dev/shm mounted in every pod; defaults to 128: without it a pod gets the container runtime's 64 MB, which isn't enough scratch space. Without hf_cache_pvc, the model download and compile caches go there too, so it must hold the weights."
               },
+              "slots": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "gke_job backend (optional): how many servers of this profile a serving sweep may run side by side; defaults to 1."
+              },
               "hf_cache_pvc": {
                 "type": "string",
                 "description": "gke_job backend (optional): name of a ReadWriteMany PersistentVolumeClaim, created by a cluster admin in the Job's namespace, mounted at /hf-cache in every pod with HF_HUB_CACHE pointing at it, so model weights download once and later Jobs read them from disk. Leave unset to download into each pod's /dev/shm (shm_size_gb)."

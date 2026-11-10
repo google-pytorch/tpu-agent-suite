@@ -442,25 +442,13 @@ How the sweep works:
     its own `/dev/shm`; stage a `gs://` copy once and serve that instead
     (onboarding's Step 0.2b does this with `stage_checkpoint.py`).
 
-1.  **Book the slots**, once per session, from the compute profiles. Each
-    `gke_job` profile gets one slot per server its node pool can still start
-    (the free chips `tpu_slots.py` reads itself, divided by the chips one of
-    its Jobs takes; don't run `compute inspect` for them), and each slot
-    records its kind of TPU. Profiles on the same nodes share those chips:
-    each lists them, and a claim stops at what the
-    nodes can hold. `--gke-slots` is what a profile gets when its free chips
-    cannot be read, or its pool has no nodes yet; give it no more than the
-    shapes to measure. `parallel`, the cap on slots held at once, starts at
-    the session's capacity and changes only with `--parallel`:
-
-    ```bash
-    python3 {{script:common/tpu_slots.py}} discover --run-id <run_id> \
-      --runtime "{{runtime}}" --package {{package_tag}} --gke-slots <N>
-    ```
-
-    `status: needs_input` names what only the user can answer; ask them. The
-    result's `hardware` lists the free slots per kind of TPU, and `sized`
-    how each profile was counted.
+1.  **The slots** come from the session's compute profiles: one per TPU VM,
+    and a `gke_job` profile's `slots` param (default 1), set once at the
+    start of the session: `serving_sweep.py run` writes the session's
+    `parallel.json` when there is none yet. Servers side by side need a
+    profile that declares more than one slot; the user sets it before the
+    session with `{{runtime}} config set slots=<N> --profile <p>
+    --package {{package_tag}}`.
 
 2.  **Run it detached** into a new directory, one no earlier sweep used: a
     sweep takes hours, longer than any one command may block. Pass the server

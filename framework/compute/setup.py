@@ -88,6 +88,13 @@ def _questions() -> dict[str, dict[str, Any]]:
     return {q["name"]: q for q in spec["questions"]}
 
 
+def _schema_question(field: str) -> dict[str, Any]:
+    """A field with no question (an on_demand one) takes its schema type."""
+    params = _schema()["properties"]["profiles"]["additionalProperties"][
+        "properties"]["params"]["properties"]
+    return {"name": field, "type": (params.get(field) or {}).get("type")}
+
+
 def _schema() -> dict[str, Any]:
     """Return the environment.json schema, extended for external drivers.
 
@@ -203,7 +210,7 @@ def validate_profile(name: str,
         else:
             try:
                 params[key] = utils.parse_answer(
-                    questions.get(key, {"name": key}), raw)
+                    questions.get(key) or _schema_question(key), raw)
             except utils.TpuAgentSuiteError as exc:
                 bad(key, str(exc), value=raw)
 

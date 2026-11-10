@@ -232,12 +232,13 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
             self.config_set("tpu_topology=")["missing"][0]["name"],
             "tpu_topology")
         self.assertEqual(self.saved(), before)
-        res = self.config_set("declared_duration_minutes=30",
+        # slots has no question; its schema type still makes "2" an integer.
+        res = self.config_set("declared_duration_minutes=30", "slots=2",
                               "xprof_interpreter=/py")
         self.assertEqual((res["status"], res["revision"]), ("ok", 3))
-        self.assertEqual(
-            self.saved()["profiles"]["gke"]["params"]
-            ["declared_duration_minutes"], 30)
+        saved = self.saved()["profiles"]["gke"]["params"]
+        self.assertEqual((saved["declared_duration_minutes"], saved["slots"]),
+                         (30, 2))
         self.assertEqual(self.saved()["xprof_interpreter"], "/py")
         for args, kwargs, code in [(("trajectory_enabled=true", ), {},
                                     "INVALID_FIELD"),
