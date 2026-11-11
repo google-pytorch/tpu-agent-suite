@@ -6,6 +6,13 @@ This repository builds and distributes **TPU agent suite packages**: declarative
 
 ---
 
+## Releases
+
+- **Stable Releases (Recommended)**: Google periodically cuts verified, pre-compiled harness archives in **[GitHub Releases](https://github.com/google-pytorch/tpu-agent-suite/releases)**. End users should download and install from the [latest release](https://github.com/google-pytorch/tpu-agent-suite/releases/latest) rather than building from `main`.
+- **Development (`main` Branch)**: The `main` branch tracks active ongoing development and may include unreleased or evolving changes between stable releases.
+
+---
+
 ## Architecture
 
 | Component | Path | Description |
