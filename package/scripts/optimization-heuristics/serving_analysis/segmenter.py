@@ -70,6 +70,10 @@ _EXEC_MODEL_RE = re.compile(r'execute_model:\s*(\d+)\s*reqs,\s*(\d+)\s*toks')
 _DEFAULT_DECODE_BUCKET_MAX = 512
 # Max distance between a host annotation and the device step it launched.
 _ANNOTATION_TOLERANCE_NS = 2_000_000_000
+# Speculative decoding methods whose drafts vary in length per request (n-gram
+# and suffix lookup). The other drafters (MTP, EAGLE, draft models) schedule
+# exactly num_speculative_tokens drafts for each decoding request.
+_VARIABLE_DRAFT_METHODS = ('ngram', 'suffix')
 
 
 def module_family(module: str) -> str:
@@ -239,7 +243,7 @@ def _phase_for_variant(
 def _annotations(host: pd.DataFrame) -> pd.DataFrame:
     if host.empty:
         return pd.DataFrame(columns=['host', 'start_ns', 'reqs', 'toks'])
-    mask = host['name'].str.contains('execute_model:', regex=False)
+    mask = host['name'].str.contains('execute_model:', regex=False, na=False)
     ann = host[mask]
     parsed = ann['name'].str.extract(_EXEC_MODEL_RE)
     df = pd.DataFrame({
@@ -284,7 +288,7 @@ def segment(
     classified_meta: pd.DataFrame | None = None,
 ) -> Segmentation:
     """Segments a TraceTable into serving steps."""
-    ctx = ctx or context_lib.ServingContext()
+    ctx = (ctx or context_lib.ServingContext()).finalize()
     notes: list[str] = []
     families = family_table(table.modules)
     framework, step_fams = pick_step_families(families, ctx.framework)
@@ -300,7 +304,9 @@ def segment(
                                    'module'].unique())
     buckets = infer_token_buckets(classified_meta, step_modules,
                                   ctx.model.hidden_size)
-    decode_max = ctx.max_num_seqs or _DEFAULT_DECODE_BUCKET_MAX
+    toks_per_seq = ctx.decode_tokens_per_req
+    decode_max = (ctx.max_num_seqs * toks_per_seq
+                  if ctx.max_num_seqs else _DEFAULT_DECODE_BUCKET_MAX)
     if framework in ('vllm_tpu', 'vllm_torchtpu') and not ctx.max_num_seqs:
         notes.append(
             f'max_num_seqs unknown; token buckets <= {decode_max} are labelled '
@@ -363,10 +369,20 @@ def segment(
         steps['reqs'] = merged['reqs']
         steps['toks'] = merged['toks']
         # Refine vLLM labels: a step whose tokens exceed its requests has prefill
-        # tokens in it.
+        # tokens in it. With speculative decoding a decoding request carries
+        # 1 + num_speculative_tokens tokens, so a step is decode only when its
+        # tokens are exactly that many per request: fewer can be a short
+        # prefill chunk beside the decodes. Drafters whose drafts vary in
+        # length only bound the count, so any step within the bound is decode.
         has = steps['reqs'].notna() & (framework == 'vllm_tpu')
-        steps.loc[has & (steps['toks'] <= steps['reqs']), 'phase'] = DECODE
-        steps.loc[has & (steps['toks'] > steps['reqs']), 'phase'] = MIXED
+        full = steps['reqs'] * toks_per_seq
+        method = str(ctx.speculative_method or '').lower()
+        if toks_per_seq > 1 and method not in _VARIABLE_DRAFT_METHODS:
+            is_decode = steps['toks'] == full
+        else:
+            is_decode = steps['toks'] <= full
+        steps.loc[has & is_decode, 'phase'] = DECODE
+        steps.loc[has & ~is_decode, 'phase'] = MIXED
         notes.append(
             f'Matched {int(has.sum())}/{len(steps)} steps to host execute_model '
             'annotations.')

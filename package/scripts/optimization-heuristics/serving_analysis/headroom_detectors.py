@@ -26,7 +26,7 @@ import math
 import re
 
 from serving_analysis import context as context_lib
-from serving_analysis import detectors
+from serving_analysis import detector_utils as du
 from serving_analysis import features as features_lib
 from serving_analysis import findings as F
 from serving_analysis import knobs
@@ -63,7 +63,7 @@ D44_CHUNK = 1024
 _FP4_WEIGHT = re.compile(r'\b(f4e2m1fn|s4|u4)\[')
 _ANY_OPERAND = re.compile(r'custom-call\([^)]*\b[a-z][a-z0-9]*\[')
 _FP4_ALIASES = ('fp4', 'float4_e2m1fn', 'f4e2m1fn', 'int4', 's4')
-_MLA_V1 = re.compile(r'(^|/)MLA-RPA-bq_')
+_MLA_V1 = re.compile(r'(?:^|/)MLA-RPA-bq_')
 _DSV4 = re.compile(r'deepseek[-_]?v4|dsv4', re.I)
 _TRUE = ('1', 'true', 'yes', 'on')
 
@@ -92,7 +92,7 @@ def _float_or(s: str, default: float) -> float:
 
 def _is_vllm_tpu(ctx: context_lib.ServingContext,
                  f: features_lib.Features) -> bool:
-    return (detectors._framework(ctx, f) == 'vllm_tpu'
+    return (du.framework(ctx, f) == 'vllm_tpu'
             and ctx.serving_config is not None)
 
 
@@ -110,7 +110,7 @@ def d36_hbm_limited_decode_batch(f: features_lib.Features,
                                       oc.MOE_GMM)
     if gmm_share < D36_MIN_GMM_SHARE:
         return []
-    bucket = detectors._stat(f, segmenter.DECODE, 'mean_bucket')
+    bucket = du.stat(f, segmenter.DECODE, 'mean_bucket')
     if not bucket or math.isnan(bucket):
         return []
     dp = ctx.dp or 1
@@ -120,16 +120,23 @@ def d36_hbm_limited_decode_batch(f: features_lib.Features,
     # Only a batch that is already full is capped by memory; a load-limited
     # batch (concurrency below max_num_seqs) does not grow with more KV.
     mns = ctx.max_num_seqs
-    reqs = detectors._stat(f, segmenter.DECODE, 'mean_reqs')
+    reqs = du.stat(f, segmenter.DECODE, 'mean_reqs')
+    has_reqs = not math.isnan(reqs) and reqs > 0
     saturated = None
-    if mns:
-        if reqs and not math.isnan(reqs):
-            saturated = reqs >= D36_SATURATED_FRAC * mns
-        elif ctx.concurrency:
-            saturated = ctx.concurrency / dp >= D36_SATURATED_FRAC * mns
-    if saturated is False:
+    sat_txt = 'batch saturation is unknown (no --max-num-seqs or request counts)'
+    if mns and has_reqs:
+        saturated = reqs >= D36_SATURATED_FRAC * mns
+        sat_txt = (
+            f'the batch is full ({reqs:.0f} of --max-num-seqs={mns} requests)')
+    elif mns and ctx.concurrency:
+        per_replica = ctx.concurrency / dp
+        saturated = per_replica >= D36_SATURATED_FRAC * mns
+        sat_txt = (
+            f'the batch is full (benchmark concurrency {per_replica:.0f} per DP'
+            f' replica vs --max-num-seqs={mns})')
+    if saturated is not None and not saturated:
         return []
-    cfg = detectors._cfg(ctx)
+    cfg = ctx.serving_config
     changes = []
     gmu = _float_or(_knob(ctx, 'vllm.cli.gpu_memory_utilization'), 0.92)
     if gmu < D36_TARGET_GMU:
@@ -137,28 +144,24 @@ def d36_hbm_limited_decode_batch(f: features_lib.Features,
             knobs.make_change('vllm.cli.gpu_memory_utilization',
                               str(D36_TARGET_GMU), cfg))
     kv_cfg = _knob(ctx, 'vllm_tpu.cli.kv_cache_dtype').lower()
-    dequant, _ = detectors._kv_dequant_outside_kernel(f, ctx)
-    if (detectors._kv_cache_dtype(f) != 'fp8' and not kv_cfg.startswith('fp8')
+    dequant, _ = du.kv_dequant_outside_kernel(f, ctx)
+    if (du.kv_cache_dtype(f) != 'fp8' and not kv_cfg.startswith('fp8')
             and not dequant):
         changes.append(
             knobs.make_change('vllm_tpu.cli.kv_cache_dtype', 'fp8', cfg))
     is_dsv4 = bool(_DSV4.search(m.name or ''))
-    if (m.is_mla and not is_dsv4 and _knob(
-            ctx, 'vllm_tpu.env.MLA_TRANSPOSE_KV_CACHE').lower() not in _TRUE):
+    if (m.is_mla and not is_dsv4 and
+            not F.is_true(_knob(ctx, 'vllm_tpu.env.MLA_TRANSPOSE_KV_CACHE'))):
         changes.append(
             knobs.make_change('vllm_tpu.env.MLA_TRANSPOSE_KV_CACHE', 'True',
                               cfg))
     if mns and saturated:
-        target = math.ceil(
-            mns * D36_SEQS_GROWTH / D36_SEQS_ALIGN) * D36_SEQS_ALIGN
+        target = (math.ceil(mns * D36_SEQS_GROWTH / D36_SEQS_ALIGN) *
+                  D36_SEQS_ALIGN)
         changes.append(
             knobs.make_change('vllm.cli.max_num_seqs', str(target), cfg))
     if not changes:
         return []
-    sat_txt = (
-        f'the batch is full ({reqs:.0f} of --max-num-seqs={mns} requests)'
-        if saturated else
-        'batch saturation is unknown (no --max-num-seqs or request counts)')
     return [
         Finding(
             detector_id='D36_hbm_limited_decode_batch',
@@ -180,10 +183,9 @@ def d36_hbm_limited_decode_batch(f: features_lib.Features,
                 Evidence('routed tokens per expert per step', per_expert),
                 Evidence('decode token bucket (mean)', bucket),
                 *([Evidence('decode requests (mean)', reqs)]
-                  if reqs and not math.isnan(reqs) else []),
-                *detectors._top_op_evidence(f, segmenter.DECODE, oc.MOE_GMM,
-                                            2),
-                detectors._step_evidence(f, segmenter.DECODE, sid),
+                  if has_reqs else []),
+                *du.top_op_evidence(f, segmenter.DECODE, oc.MOE_GMM, 2),
+                du.step_evidence(f, segmenter.DECODE, sid),
             ],
             knob_changes=changes,
             risk=F.Risk.MEMORY,
@@ -209,19 +211,18 @@ def d37_moe_weight_precision(f: features_lib.Features,
                              sid: str) -> list[Finding]:
     if not _is_vllm_tpu(ctx, f) or not ctx.model.is_moe:
         return []
-    if _knob(ctx, 'vllm_tpu.env.MOE_REQUANTIZE_WEIGHT_DTYPE').lower() in (
-            _FP4_ALIASES):
+    weight_dtype = _knob(ctx, 'vllm_tpu.env.MOE_REQUANTIZE_WEIGHT_DTYPE')
+    if weight_dtype.lower() in _FP4_ALIASES:
         return []
     # moe_weights.py asserts when requantization is disabled.
-    if str(ctx.config_get('DISABLE_WEIGHT_REQUANTIZATION')
-           or '').lower() in (_TRUE):
+    if F.is_true(ctx.config_get('DISABLE_WEIGHT_REQUANTIZATION')):
         return []
     gmm_meta = f.meta[f.meta['op_class'] == oc.MOE_GMM]
     text = ' '.join(gmm_meta['kernel_text'].fillna(''))
     if _FP4_WEIGHT.search(text):
         return []
     operands_visible = bool(_ANY_OPERAND.search(text))
-    phases = detectors._active_phases(f)
+    phases = du.active_phases(f)
     shares = {
         p: features_lib.share_of(f.class_time, p, oc.MOE_GMM)
         for p in phases
@@ -232,7 +233,7 @@ def d37_moe_weight_precision(f: features_lib.Features,
     share = shares[phase]
     if share < D37_MIN_GMM_SHARE:
         return []
-    cfg = detectors._cfg(ctx)
+    cfg = ctx.serving_config
     changes = [
         knobs.make_change('vllm_tpu.env.MOE_REQUANTIZE_WEIGHT_DTYPE', 'fp4',
                           cfg)
@@ -241,6 +242,11 @@ def d37_moe_weight_precision(f: features_lib.Features,
         changes.append(
             knobs.make_change('vllm_tpu.env.MOE_REQUANTIZE_BLOCK_SIZE', '512',
                               cfg))
+    if operands_visible:
+        where = ' in the GMM operands'
+    else:
+        where = (' (GMM operand dtypes are not in the trace; based on'
+                 ' MOE_REQUANTIZE_WEIGHT_DTYPE)')
     return [
         Finding(
             detector_id='D37_moe_weight_precision',
@@ -248,17 +254,14 @@ def d37_moe_weight_precision(f: features_lib.Features,
             phase=phase,
             summary=(
                 f'Grouped expert matmuls are {_pct(share):.1f}% of the {phase}'
-                ' step and no fp4/int4 expert weights were found' +
-                (' in the GMM operands' if operands_visible else
-                 (' (GMM operand dtypes are not in the trace; based on'
-                  ' MOE_REQUANTIZE_WEIGHT_DTYPE)')) +
+                ' step and no fp4/int4 expert weights were found' + where +
                 '. Decode GMM is weight-bandwidth bound, so fp4 weights with'
                 ' 512-wide quantization blocks roughly halve expert weight'
                 ' reads.'),
             evidence=[
                 Evidence('MoE GMM share', _pct(share), '%'),
-                *detectors._top_op_evidence(f, phase, oc.MOE_GMM, 2),
-                detectors._step_evidence(f, phase, sid),
+                *du.top_op_evidence(f, phase, oc.MOE_GMM, 2),
+                du.step_evidence(f, phase, sid),
             ],
             knob_changes=changes,
             risk=F.Risk.QUALITY_GATED,
@@ -308,7 +311,7 @@ def d40_mla_kernel_config(f: features_lib.Features,
                     Evidence('v1 kernel',
                              1,
                              detail=str(attn.loc[v1, 'op'].iloc[0])),
-                    detectors._step_evidence(f, segmenter.DECODE, sid),
+                    du.step_evidence(f, segmenter.DECODE, sid),
                 ],
                 knob_changes=[],
                 risk=F.Risk.DIAGNOSTIC,
@@ -324,7 +327,7 @@ def d40_mla_kernel_config(f: features_lib.Features,
             ))
     if _DSV4.search(m.name or ''):
         return out  # DSv4 forces packing 4 / no transpose (kv_cache_manager.py).
-    cfg = detectors._cfg(ctx)
+    cfg = ctx.serving_config
     changes = []
     notes = []
     packing = _int_or(_knob(ctx, 'vllm_tpu.env.MLA_KV_PACKING_SIZE'),
@@ -335,9 +338,8 @@ def d40_mla_kernel_config(f: features_lib.Features,
                               str(D40_TUNED_KV_PACKING), cfg))
         notes.append(f'MLA_KV_PACKING_SIZE={packing} (tuned tables use'
                      f' {D40_TUNED_KV_PACKING})')
-    no_q_quant = (_knob(
-        ctx, 'vllm_tpu.env.DISABLE_MLA_Q_ACTIVATION_QUANTIZATION').lower()
-                  in _TRUE)
+    no_q_quant = F.is_true(
+        _knob(ctx, 'vllm_tpu.env.DISABLE_MLA_Q_ACTIVATION_QUANTIZATION'))
     if no_q_quant:
         changes.append(
             knobs.make_change(
@@ -356,9 +358,9 @@ def d40_mla_kernel_config(f: features_lib.Features,
                  '. The v2 kernel is tuned for fp8 Q with 32-way KV packing.'),
                 evidence=[
                     Evidence('attention kernel share', _pct(share), '%'),
-                    *detectors._top_op_evidence(f, segmenter.DECODE,
-                                                oc.ATTENTION_KERNEL, 2),
-                    detectors._step_evidence(f, segmenter.DECODE, sid),
+                    *du.top_op_evidence(f, segmenter.DECODE,
+                                        oc.ATTENTION_KERNEL, 2),
+                    du.step_evidence(f, segmenter.DECODE, sid),
                 ],
                 knob_changes=changes,
                 risk=F.Risk.QUALITY_GATED if no_q_quant else F.Risk.PERF_ONLY,
@@ -381,38 +383,37 @@ def d44_moe_combine_not_chunked(f: features_lib.Features,
                                 ctx: context_lib.ServingContext,
                                 sid: str) -> list[Finding]:
     m = ctx.model
-    fw = detectors._framework(ctx, f)
-    if (fw not in ('vllm_tpu', 'vllm_torchtpu') or ctx.serving_config is None
-            or not m.is_moe or f.step_ops.empty):
+    fw = du.framework(ctx, f)
+    if (not du.is_vllm(ctx, f) or ctx.serving_config is None or not m.is_moe
+            or f.step_ops.empty):
         return []
     knob_key = ('vllm_tpu.env.VLLM_MOE_CHUNK_SIZE' if fw == 'vllm_tpu' else
                 'vllm_torchtpu.env.TPU_MOE_COLLECTION_CHUNK_SIZE')
     if _int_or(_knob(ctx, knob_key), 0) > 0:
         return []
-    if detectors._name_mask(f.step_ops, detectors._FUSED_EP_OP).any():
+    if du.name_mask(f.step_ops, du.FUSED_EP_OP).any():
         return []  # The fused EP kernel does its own combine.
-    coll = features_lib.collective_groups(f.step_ops, f.meta, f.seg.steps)
+    coll = f.collectives
     if coll.empty:
         return []
     onehot = (_int_or(_knob(ctx, 'vllm_tpu.env.ONEHOT_MOE_PERMUTE_THRESHOLD'),
                       0) if fw == 'vllm_tpu' else 0)
     topk = m.num_experts_per_tok or 1
     out = []
-    for phase in detectors._active_phases(f):
-        if phase not in detectors._PREFILL_LIKE:
+    for phase in du.active_phases(f):
+        if phase not in du.PREFILL_LIKE:
             continue
-        bucket = detectors._stat(f, phase, 'mean_bucket')
+        bucket = du.stat(f, phase, 'mean_bucket')
         if onehot > 0 and bucket and bucket * topk <= onehot:
             continue  # One-hot combine path never chunks (fused_moe_gmm.py).
         c = coll[(coll['phase'] == phase)
                  & coll['moe_scope'].astype(bool)
                  & coll['collective'].isin(['all-reduce', 'reduce-scatter'])]
-        rows = c['dims'].map(lambda d: int(str(d).split('x')[0])
-                             if str(d).split('x')[0].isdigit() else 0)
+        rows = c['dims'].map(lambda d: (du.parse_dims(d) or [0])[0])
         c = c[rows >= D44_MIN_ROWS]
         if c.empty:
             continue
-        dur = detectors._stat(f, phase, 'mean_dur_ns')
+        dur = du.stat(f, phase, 'mean_dur_ns')
         share = float(c['ns_per_step'].sum()) / dur if dur else 0.0
         if share < D44_MIN_SHARE:
             continue
@@ -438,14 +439,11 @@ def d44_moe_combine_not_chunked(f: features_lib.Features,
                             ' µs/step',
                         ) for _, r in top.iterrows()
                     ],
-                    detectors._step_evidence(f, phase, sid),
+                    du.step_evidence(f, phase, sid),
                 ],
                 knob_changes=[
-                    knobs.make_change(
-                        knob_key,
-                        str(D44_CHUNK),
-                        detectors._cfg(ctx),
-                    )
+                    knobs.make_change(knob_key, str(D44_CHUNK),
+                                      ctx.serving_config)
                 ],
                 risk=F.Risk.PERF_ONLY,
                 confidence=F.Confidence.MEDIUM,

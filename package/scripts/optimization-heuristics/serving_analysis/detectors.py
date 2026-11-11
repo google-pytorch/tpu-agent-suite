@@ -30,9 +30,10 @@ from collections.abc import Callable, Sequence
 import numpy as np
 import pandas as pd
 from serving_analysis import context as context_lib
+from serving_analysis import detector_utils as du
 from serving_analysis import features as features_lib
 from serving_analysis import findings as F
-from serving_analysis import knobs
+from serving_analysis import knobs, limits
 from serving_analysis import op_classes as oc
 from serving_analysis import segmenter
 
@@ -67,7 +68,7 @@ D7_MIN_MOE_AG_SHARE = 0.03
 D7_MIN_COLLECTIVE_SHARE = 0.25
 # Decode all-gathers at least this big gather weights, not activations
 # (16M elements = 32 MB in bf16; decode activations are batch x hidden).
-D7_MIN_WEIGHT_AG_ELEMS = 1 << 24
+D7_MIN_WEIGHT_AG_ELEMS = du.MIN_WEIGHT_AG_ELEMS
 D7_MIN_WEIGHT_AG_SHARE = 0.10
 # D8 KV-head padding.
 D8_MIN_ATTN_SHARE = 0.10
@@ -81,8 +82,6 @@ D13_MIN_SHARE = 0.02
 # D14 hygiene.
 D14_MIN_STEPS = 5
 D14_STOP_TRACE_NS = 100_000_000
-# Phases with fewer steps/device are skipped when another phase has more.
-MIN_PHASE_STEPS = 3
 # D15 fused EP MoE (vLLM-TorchTPU).
 D15_MIN_GMM_SHARE = 0.02
 D15_MIN_COLLECTIVE_SHARE = 0.05
@@ -94,6 +93,12 @@ D17_MIN_SHARE = 0.10
 D17_MIN_KV_WRITE_OPS = 5000
 # D18 indexer.
 D18_MIN_SHARE = 0.08
+# Small decode batches where halving the decode engine's DCP from 16 to 8
+# halves the DCP top-k / KV merge fan-in. Only the decode engine of a
+# disaggregated pair (`kv_role` kv_consumer) is lowered: symmetric DCP 8 on
+# both legs halved the prefill prefix cache.
+_D18_SMALL_DECODE_SEQS = limits.SMALL_DECODE_MAX_SEQS
+_D18_SMALL_DECODE_BUCKET = limits.SMALL_DECODE_MAX_BUCKET
 # D19 in-step waits. Below D19_MIN_COVERAGE attributed op time, op events are
 # probably missing and D14 reports it instead.
 D19_MIN_COVERAGE = 0.5
@@ -103,6 +108,10 @@ D20_MIN_ATTN_SHARE = 0.05
 # Assumed attention share when op coverage is too low to measure it
 # (conservative; GLM-5.2 TP16->DP16 was a 7.3x throughput gain).
 D20_CONFIG_ONLY_EST = 0.3
+# Default per-rank KV budget (36 GB) when --kv-cache-memory-bytes is unset.
+_D20_DEFAULT_KV_BUDGET_BYTES = limits.DEFAULT_KV_BUDGET_BYTES
+# MLA KV latent + RoPE dim fallback (512 + 64 = 576 for DeepSeek-V3 / GLM-5.2).
+_D20_DEFAULT_MLA_LATENT_DIM = limits.DEFAULT_MLA_LATENT_DIM
 # D21 sequential loops.
 D21_MIN_OPS_PER_STEP = 2000
 D21_MIN_SHARE = 0.10
@@ -115,55 +124,26 @@ D22_MIN_DENSE_SHARE = 0.3
 # D24 MoE TP without EP.
 D24_MIN_MOE_SHARE = 0.15
 D24_MAX_GAIN = 0.12
-_FUSED_EP_OP = r'fused_ep_moe'
+_FUSED_EP_OP = du.FUSED_EP_OP
 _KV_WRITE_OP = r'dynamic-update-slice|scatter'
 _DOC_GLM_HILLCLIMB = 'GLM-5.2 FP8 serving hill-climb on TPU v7x'
 _DOC_GLM_BASELINE = 'GLM-5.2 FP8 serving baseline on TPU v7x'
 _DOC_QWEN_CODER = 'Qwen3-Coder-480B serving study'
 _DOC_Q32_STRIKE = 'Qwen3-32B serving study on TPU v7x'
 
-_PREFILL_LIKE = (segmenter.PREFILL, segmenter.PREFILL_OR_MIXED,
-                 segmenter.MIXED)
-
+_PREFILL_LIKE = du.PREFILL_LIKE
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-def _ms(ns: float) -> float:
-    return float(ns) / 1e6
-
-
-def _us(ns: float) -> float:
-    return float(ns) / 1e3
-
-
-def _pct(x: float) -> float:
-    return 100.0 * float(x)
-
-
-def _n_elems(dims: str) -> int:
-    """Element count of a collective_groups 'AxBxC' dims string."""
-    n = 1
-    for d in str(dims or '').split('x'):
-        if not d.isdigit():
-            return 0
-        n *= int(d)
-    return n
-
-
-def _framework(ctx: context_lib.ServingContext,
-               f: features_lib.Features) -> str:
-    return ctx.framework if ctx.framework != 'auto' else f.seg.framework
-
-
-# Inputs at least this many times the outputs make a workload prefill-heavy.
-PREFILL_HEAVY_MIN_RATIO = 2
-
-
-def _prefill_heavy(ctx: context_lib.ServingContext) -> bool:
-    """Whether the benchmark's inputs are at least twice its outputs."""
-    return bool(ctx.input_len and ctx.output_len
-                and ctx.input_len >= PREFILL_HEAVY_MIN_RATIO * ctx.output_len)
+# Shared with catalog_detectors and headroom_detectors through detector_utils;
+# the private names keep this module's call sites unchanged.
+_ms = du.ms
+_us = du.us
+_pct = du.pct
+_n_elems = du.n_elems
+_framework = du.framework
+_prefill_heavy = du.is_prefill_heavy
 
 
 def _is_true(value) -> bool:
@@ -175,79 +155,22 @@ def _cfg(ctx: context_lib.ServingContext) -> dict[str, str] | None:
     return ctx.serving_config
 
 
-def _stat(f: features_lib.Features, phase: str, col: str) -> float:
-    ps = f.phase_stats
-    row = ps[ps['phase'] == phase]
-    return float(row[col].iloc[0]) if len(row) else float('nan')
-
-
-def _representative_step(f: features_lib.Features, phase: str) -> pd.Series:
-    st = f.seg.steps
-    first = st.iloc[0]
-    st = st[(st['host'] == first['host']) & (st['device'] == first['device'])]
-    if phase != 'all':
-        st = st[st['phase'] == phase]
-    if st.empty:
-        return first
-    med = st['dur_ns'].median()
-    return st.iloc[int((st['dur_ns'] - med).abs().to_numpy().argmin())]
-
-
-def xprof_link(session_id: str, start_ns: float, end_ns: float) -> str | None:
-    """Trace-viewer deep link; None, since these traces are local files.
-
-    Kept so evidence keeps a place for a link when a hosted trace viewer
-    exists for the session.
-    """
-    del session_id, start_ns, end_ns
-    return None
-
-
-def _step_link(sid: str, f: features_lib.Features, phase: str) -> str | None:
-    s = _representative_step(f, phase)
-    end = s['start_ns'] + (s['cycle_ns']
-                           if pd.notna(s['cycle_ns']) else s['dur_ns'])
-    return xprof_link(sid, s['start_ns'], end)
-
-
-def _active_phases(f: features_lib.Features) -> list[str]:
-    """Phases with enough steps to analyze.
-
-  A phase with fewer than MIN_PHASE_STEPS steps/device is skipped when another
-  phase has at least that many (e.g. the one warm-up prefill captured in a
-  decode profile). If every phase is small (a 256K-context prefill profile
-  may hold 1-2 steps), all are kept and D14 flags the low step count.
-  """
-    n = {p: _stat(f, p, 'n_steps_per_device') for p in f.seg.phases}
-    big = [p for p, v in n.items() if v >= MIN_PHASE_STEPS]
-    return big if big else list(f.seg.phases)
-
-
-def _step_evidence(f: features_lib.Features, phase: str, sid: str) -> Evidence:
-    return Evidence(
-        metric=f'{phase} step time (mean)',
-        value=_ms(_stat(f, phase, 'mean_dur_ns')),
-        unit=' ms',
-        detail=f'{_stat(f, phase, "n_steps_per_device"):.0f} steps/device',
-        xprof_link=_step_link(sid, f, phase),
-    )
-
-
-def _top_op_evidence(f: features_lib.Features,
-                     phase: str,
-                     op_class: str,
-                     n: int = 2) -> list[Evidence]:
-    out = []
-    for _, r in features_lib.top_ops(f.step_ops, f.seg.steps, phase, op_class,
-                                     n).iterrows():
-        out.append(
-            Evidence(
-                metric=f'top op `{r["op"]}`',
-                value=_us(r['ns_per_step']),
-                unit=' µs/step',
-                detail=f'{r["count"]:.0f}×/step',
-            ))
-    return out
+_stat = du.stat
+xprof_link = du.xprof_link
+_step_link = du.step_link
+_active_phases = du.active_phases
+_step_evidence = du.step_evidence
+_top_op_evidence = du.top_op_evidence
+_kv_cache_dtype = du.kv_cache_dtype
+_kv_dequant_outside_kernel = du.kv_dequant_outside_kernel
+_phase_ops = du.phase_ops
+_n_steps = du.n_steps
+_share = du.share
+_base_op_evidence = du.base_op_evidence
+_name_mask = du.name_mask
+_is_torchtpu = du.is_torchtpu
+_is_vllm = du.is_vllm
+_is_copy_program = du.is_copy_program
 
 
 def _knob_ref(key: str) -> str:
@@ -261,19 +184,6 @@ def kv_packing(kv_dtype: str) -> int:
     2 for bf16 / fp16 (and unknown), 4 for an 8-bit cache (fp8, int8).
     """
     return 4 if re.search(r'f8|fp8|int8|\bi8|\bs8', kv_dtype.lower()) else 2
-
-
-def _kv_cache_dtype(f: features_lib.Features) -> str:
-    """'fp8' | 'int8' | 'bf16' | '' from the attention kernel operand text."""
-    meta = f.meta[f.meta['op_class'] == oc.ATTENTION_KERNEL]
-    text = ' '.join(meta['kernel_text'].head(20))
-    if 'f8e4m3' in text or 'f8e5m2' in text:
-        return 'fp8'
-    if re.search(r'\bs8\[', text):
-        return 'int8'
-    if 'bf16' in text:
-        return 'bf16'
-    return ''
 
 
 # -----------------------------------------------------------------------------
@@ -366,11 +276,28 @@ def _next_pow2(n: float) -> int:
     return 1 << max(0, math.ceil(math.log2(max(n, 1))))
 
 
+def _speculative_tokens(ctx: context_lib.ServingContext) -> int:
+    """Draft tokens per request per decode step set by context or command."""
+    if ctx.num_speculative_tokens:
+        return int(ctx.num_speculative_tokens)
+    for k, v in (ctx.serving_config or {}).items():
+        key = k.replace('-', '_').lower()
+        if key.rsplit('.', 1)[-1] == 'num_speculative_tokens':
+            return int(v) if str(v).isdigit() else 0
+        if 'speculative_config' in key:
+            m = _SPEC_TOKENS.search(str(v))
+            if m:
+                return int(m.group(1))
+    return 0
+
+
 # vLLM-TorchTPU compiles token buckets doubling from 16 up to the batch-token
 # budget (platforms/tpu_platform.py `_get_token_paddings`); the server log
 # prints the list as "Using token paddings: [...]".
 D2_TORCHTPU_MIN_BUCKET = 16
+D2_LATENCY_BOUND_MAX_BUCKET = 64
 _TOKEN_PADDINGS_RE = re.compile(r'Using token paddings: \[([0-9, ]+)\]')
+_SPEC_TOKENS = re.compile(r'num_speculative_tokens[\'"]?\s*[:=]\s*(\d+)')
 
 
 def _torchtpu_token_paddings(ctx: context_lib.ServingContext) -> list[int]:
@@ -402,9 +329,10 @@ def _d2_points_padding(f: features_lib.Features,
         return []
     ladder = _torchtpu_token_paddings(ctx)
     dp = ctx.dp or 1
+    per_req = 1 + _speculative_tokens(ctx)
     padded = []
     for c in ctx.benchmark_concurrencies:
-        live = -(-c // dp)
+        live = -(-c // dp) * per_req
         bucket = next((b for b in ladder if b >= live), None)
         if not bucket:
             continue
@@ -459,11 +387,13 @@ def d2_padding(f: features_lib.Features, ctx: context_lib.ServingContext,
     for phase in _active_phases(f):
         g = st[st['phase'] == phase]
         live = g['toks']
-        if live.notna().sum() == 0:
+        inferred = live.notna().sum() == 0
+        if inferred:
             if phase == segmenter.DECODE and ctx.concurrency:
+                per_request = 1 + _speculative_tokens(ctx)
                 live = pd.Series(
                     np.minimum(ctx.concurrency, ctx.max_num_seqs
-                               or ctx.concurrency),
+                               or ctx.concurrency) * per_request,
                     index=g.index,
                     dtype=float,
                 )
@@ -476,8 +406,10 @@ def d2_padding(f: features_lib.Features, ctx: context_lib.ServingContext,
         pad_ratio = float(((bucket - live[ok]).clip(lower=0) / bucket).mean())
         if pad_ratio < D2_MIN_PAD_RATIO:
             continue
-        token_share = features_lib.share_of(f.class_time, phase, oc.MOE_GMM,
-                                            oc.MATMUL, oc.COLLECTIVE)
+        classes = [oc.MOE_GMM, oc.MATMUL]
+        if float(bucket.median()) > D2_LATENCY_BOUND_MAX_BUCKET:
+            classes.append(oc.COLLECTIVE)
+        token_share = features_lib.share_of(f.class_time, phase, *classes)
         min_bucket_used = int(bucket.min())
         med_live = float(live[ok].median())
         changes = []
@@ -499,17 +431,32 @@ def d2_padding(f: features_lib.Features, ctx: context_lib.ServingContext,
                         _cfg(ctx)))
             attn_dp = knobs.current_value(
                 'vllm_tpu.additional_config.enable_dp_attention', _cfg(ctx))
-            if (ctx.model.is_moe and str(attn_dp).lower() != 'true'
-                    and (ctx.dp or 1) == 1):
+            if ctx.model.is_moe and not _is_true(attn_dp) and (ctx.dp
+                                                               or 1) == 1:
                 changes.append(
                     knobs.make_change(
                         'vllm_tpu.env.MOE_ROUTE_PADDING_TO_EXPERT0', 'true',
                         _cfg(ctx)))
-        elif fw == 'vllm_torchtpu' and ctx.model.is_moe:
-            changes.append(
-                knobs.make_change(
-                    'vllm_torchtpu.env.TPU_MOE_SKIP_PADDED_TOKENS', '1',
-                    _cfg(ctx)))
+        elif fw == 'vllm_torchtpu':
+            step = du.knob_int(ctx, 'vllm_torchtpu.env.TPU_TOKEN_BUCKET_STEP',
+                               0)
+            if min_bucket_used > 256 and not 0 < step < 128:
+                changes.append(
+                    knobs.make_change(
+                        'vllm_torchtpu.env.TPU_TOKEN_BUCKET_STEP', '128',
+                        _cfg(ctx)))
+            if ctx.model.is_moe:
+                changes.append(
+                    knobs.make_change(
+                        'vllm_torchtpu.env.TPU_MOE_SKIP_PADDED_TOKENS', '1',
+                        _cfg(ctx)))
+        note = ''
+        if inferred:
+            note = (
+                ' Live tokens are inferred from the benchmark concurrency'
+                ' (times 1 + draft tokens when speculative decoding is set);'
+                ' with MTP or another drafter not shown in the command, the'
+                ' padding is smaller than this.')
         out.append(
             Finding(
                 detector_id='D2_padding_waste',
@@ -520,7 +467,7 @@ def d2_padding(f: features_lib.Features, ctx: context_lib.ServingContext,
                  f' ~{_pct(pad_ratio):.0f}% larger than the live token count'
                  f' (median live {med_live:.0f}, smallest bucket'
                  f' {min_bucket_used}). Tighter buckets and routing pad tokens'
-                 ' to a single expert cut wasted compute.'),
+                 ' to a single expert cut wasted compute.' + note),
                 evidence=[
                     Evidence('mean padding ratio', _pct(pad_ratio), '%'),
                     Evidence(
@@ -529,7 +476,8 @@ def d2_padding(f: features_lib.Features, ctx: context_lib.ServingContext,
                             str(int(b)) for b in sorted(bucket.unique())[:8]),
                     ),
                     Evidence(
-                        'token-proportional share (GMM+matmul+collectives)',
+                        'token-proportional share ({})'.format(
+                            ' + '.join(classes)),
                         _pct(token_share),
                         '%',
                     ),
@@ -642,7 +590,7 @@ def d3_interference(f: features_lib.Features, ctx: context_lib.ServingContext,
                 Evidence('decode stall', _pct(stall_frac), '% of step time'),
             ],
             knob_changes=changes,
-            risk=F.Risk.LATENCY_TRADEOFF,
+            risk=F.Risk.LATENCY_TRADEOFF if changes else F.Risk.DIAGNOSTIC,
             confidence=F.Confidence.MEDIUM,
             est_step_fraction_saved=min(0.3, 0.5 * stall_frac),
             validation=
@@ -744,6 +692,12 @@ def d5_permute(f: features_lib.Features, ctx: context_lib.ServingContext,
             changes.append(
                 knobs.make_change('vllm_tpu.env.ONEHOT_MOE_PERMUTE_THRESHOLD',
                                   str(batch), _cfg(ctx)))
+        elif (fw == 'vllm_torchtpu' and ctx.serving_config is not None
+              and is_dec and 0 < max_bucket <= 64):
+            changes.append(
+                knobs.make_change(
+                    'vllm_torchtpu.env.TPU_MOE_LOWTOK_MAX_TOKENS',
+                    str(max_bucket), _cfg(ctx)))
         else:
             follow = (
                 'Permute/unpermute gathers are slow at this batch size. Check the '
@@ -790,7 +744,7 @@ def d6_imbalance(f: features_lib.Features, ctx: context_lib.ServingContext,
     if f.step_ops.empty:
         return []
     out = []
-    coll = features_lib.collective_groups(f.step_ops, f.meta, f.seg.steps)
+    coll = f.collectives
     for phase in _active_phases(f):
         imb = features_lib.cross_device_imbalance(f.step_ops, phase,
                                                   oc.MOE_GMM)
@@ -868,7 +822,7 @@ def d7_collectives(f: features_lib.Features, ctx: context_lib.ServingContext,
     out = []
     fw = _framework(ctx, f)
     ars = features_lib.ar_then_slice(f.step_ops, f.meta, f.seg.steps)
-    coll = features_lib.collective_groups(f.step_ops, f.meta, f.seg.steps)
+    coll = f.collectives
     moe_ops = set(
         zip(
             f.meta.loc[f.meta['moe_scope'], 'module'],
@@ -983,7 +937,7 @@ def d7_collectives(f: features_lib.Features, ctx: context_lib.ServingContext,
                 fsdp_off = fsdp == '1'
                 if fw == 'maxtext' and not fsdp_off:
                     size = (fsdp if fsdp and fsdp.isdigit() and int(fsdp) > 1
-                            else ('the current FSDP size'))
+                            else '-1')
                     changes = [
                         knobs.make_change('maxtext.yml.ici_fsdp_parallelism',
                                           '1', cfg),
@@ -1076,13 +1030,15 @@ def d8_kv_head_padding(f: features_lib.Features,
     else:
         attn_dp = knobs.current_value(
             'vllm_tpu.additional_config.enable_dp_attention', _cfg(ctx))
-        if str(attn_dp).lower() == 'true':
+        if _is_true(attn_dp):
             return []
     tp = ctx.tp
     tp_note = ''
-    if not tp:
+    if not tp and not f.seg.steps.empty:
         tp = int(f.seg.steps.groupby(['host', 'device']).ngroups)
         tp_note = f' (TP assumed = {tp} devices; pass the serving config)'
+    if not tp or tp < 1:
+        return []
     kv_dtype = _kv_cache_dtype(f) or (ctx.config_get('kv-cache-dtype') or '')
     packing = kv_packing(kv_dtype)
     kv_per_dev = m.num_kv_heads / tp
@@ -1162,7 +1118,8 @@ def d8_kv_head_padding(f: features_lib.Features,
                     Evidence('attention kernel share', _pct(share), '%'),
                     Evidence('KV heads per device', kv_per_dev),
                     Evidence('KV-cache rows per device (K and V interleaved)',
-                             rows),
+                             rows,
+                             detail=f'padded to {padded}'),
                     Evidence('KV packing factor', packing, detail=kv_dtype),
                     *_top_op_evidence(f, phase, oc.ATTENTION_KERNEL, 1),
                     _step_evidence(f, phase, sid),
@@ -1203,10 +1160,16 @@ def d9_rope_cache(f: features_lib.Features, ctx: context_lib.ServingContext,
         if share < D9_MIN_SHARE:
             continue
         if fw == 'vllm_torchtpu':
-            changes = [
-                knobs.make_change('vllm_torchtpu.env.TPU_ROPE_CACHE_TRUNCATE',
-                                  '1', _cfg(ctx))
-            ]
+            trunc_chg = knobs.make_change(
+                'vllm_torchtpu.env.TPU_ROPE_CACHE_TRUNCATE', '1', _cfg(ctx))
+            if trunc_chg.already_set:
+                changes = [
+                    knobs.make_change(
+                        'vllm_torchtpu.env.TPU_ROPE_CACHE_ROW_MAJOR', '1',
+                        _cfg(ctx))
+                ]
+            else:
+                changes = [trunc_chg]
         else:
             slice_chg = knobs.make_change('vllm_tpu.env.SLICE_ROPE_CACHE',
                                           'true', _cfg(ctx))
@@ -1261,8 +1224,8 @@ def d11_recompile(f: features_lib.Features, ctx: context_lib.ServingContext,
         changes = [
             knobs.make_change('vllm_tpu.env.SKIP_JAX_PRECOMPILE', 'false',
                               _cfg(ctx)),
-            knobs.make_change('vllm_tpu.env.VLLM_XLA_CHECK_RECOMPILATION',
-                              'true', _cfg(ctx)),
+            knobs.make_change('vllm_tpu.env.VLLM_XLA_CHECK_RECOMPILATION', '1',
+                              _cfg(ctx)),
         ]
     first = ce.iloc[0]
     return [
@@ -1296,45 +1259,6 @@ def d11_recompile(f: features_lib.Features, ctx: context_lib.ServingContext,
 # -----------------------------------------------------------------------------
 # D12: KV cache quantization headroom (decode)
 # -----------------------------------------------------------------------------
-_KV_QUANT_OPERAND = re.compile(r'f8e4m3|f8e5m2|\bs8\[')
-_ATTN_SCOPE = re.compile(r'attn|attention|ragged_paged|(^|/)RPA|mla', re.I)
-_KV_NAME = re.compile(r'kv|cache', re.I)
-
-
-def _kv_dequant_outside_kernel(
-        f: features_lib.Features,
-        ctx: context_lib.ServingContext) -> tuple[bool, str]:
-    """Whether quantized KV is converted to bf16 before the attention kernel.
-
-  Args:
-    f: Features.
-    ctx: Serving context.
-
-  Returns:
-    (detected, reason).
-  """
-    m = f.meta
-    if not m.empty:
-        non_kernel = m['op_class'] != oc.ATTENTION_KERNEL
-        names = m['tf_op_name'].fillna('')
-        in_attn = names.str.contains(_ATTN_SCOPE)
-        # fp8 attention weights also convert to bf16 in this scope; require a
-        # KV-cache name to keep weight dequant out.
-        kv_like = (names + ' ' + m['op'].fillna('')).str.contains(_KV_NAME)
-        quant_in = m['kernel_text'].fillna('').str.contains(_KV_QUANT_OPERAND)
-        deq = m[non_kernel & in_attn & kv_like & quant_in &
-                (m['out_dtype'] == 'bf16')]
-        if not deq.empty:
-            return True, f'`{deq["base_op"].iloc[0]}` converts fp8/int8 to bf16'
-    cur = (knobs.current_value('vllm_tpu.cli.kv_cache_dtype',
-                               ctx.serving_config)
-           if ctx.serving_config is not None
-           and _framework(ctx, f) == 'vllm_tpu' else None)
-    if str(cur or '').lower().startswith('fp8'):
-        return True, f'kv_cache_dtype={cur} but the attention kernel reads bf16'
-    return False, ''
-
-
 def d12_kv_quant(f: features_lib.Features, ctx: context_lib.ServingContext,
                  sid: str) -> list[Finding]:
     if segmenter.DECODE not in f.seg.phases:
@@ -1487,7 +1411,8 @@ def d14_hygiene(f: features_lib.Features, ctx: context_lib.ServingContext,
         if d >= D14_STOP_TRACE_NS:
             ev.append(Evidence('stop_trace duration', _ms(d), ' ms'))
             notes.append('stop_trace stalls the engine (exclude the tail)')
-    if f.seg.steps['toks'].isna().all() and _framework(ctx, f) == 'vllm_tpu':
+    if (not f.seg.steps.empty and f.seg.steps['toks'].isna().all()
+            and _framework(ctx, f) == 'vllm_tpu'):
         notes.append('no `execute_model:` host annotations (real batch sizes '
                      'unknown; use a newer tpu_inference or enable the Python '
                      'tracer)')
@@ -1517,60 +1442,6 @@ def d14_hygiene(f: features_lib.Features, ctx: context_lib.ServingContext,
             est_step_fraction_saved=0.0,
         )
     ]
-
-
-# -----------------------------------------------------------------------------
-# Shared helpers for op-name based detectors
-# -----------------------------------------------------------------------------
-def _phase_ops(f: features_lib.Features, phase: str) -> pd.DataFrame:
-    so = f.step_ops
-    return so if phase == 'all' else so[so['phase'] == phase]
-
-
-def _n_steps(f: features_lib.Features, phase: str) -> int:
-    st = f.seg.steps
-    return len(st) if phase == 'all' else int((st['phase'] == phase).sum())
-
-
-def _share(f: features_lib.Features, phase: str, g: pd.DataFrame) -> float:
-    n, dur = _n_steps(f, phase), _stat(f, phase, 'mean_dur_ns')
-    if not n or not dur or g.empty:
-        return 0.0
-    return float(g['self_ns'].sum()) / n / dur
-
-
-def _base_op_evidence(f: features_lib.Features,
-                      phase: str,
-                      g: pd.DataFrame,
-                      n: int = 3) -> list[Evidence]:
-    n_steps = _n_steps(f, phase)
-    if g.empty or not n_steps or 'base_op' not in g.columns:
-        return []
-    agg = g.groupby('base_op')['self_ns'].agg(['sum', 'size'])
-    agg = agg.sort_values(by='sum', ascending=False).head(n)
-    return [
-        Evidence(
-            f'op `{str(b)[:90]}`',
-            _us(float(r['sum']) / n_steps),
-            ' µs/step',
-            detail=f'{float(r["size"]) / n_steps:.0f}×/step',
-        ) for b, r in agg.iterrows()
-    ]
-
-
-def _name_mask(g: pd.DataFrame, pattern: str) -> pd.Series:
-    base = g['base_op'].fillna('') if 'base_op' in g.columns else g['op']
-    return base.str.contains(pattern, case=False, regex=True)
-
-
-def _is_torchtpu(ctx: context_lib.ServingContext,
-                 f: features_lib.Features) -> bool:
-    return _framework(ctx, f) == 'vllm_torchtpu'
-
-
-def _is_vllm(ctx: context_lib.ServingContext,
-             f: features_lib.Features) -> bool:
-    return _framework(ctx, f) in ('vllm_tpu', 'vllm_torchtpu')
 
 
 # -----------------------------------------------------------------------------
@@ -1779,9 +1650,43 @@ def d17_data_formatting(f: features_lib.Features,
 # -----------------------------------------------------------------------------
 # D18: sparse-attention indexer hotspot
 # -----------------------------------------------------------------------------
+def _dcp_fits_kv_budget(ctx: context_lib.ServingContext,
+                        target_dcp: int) -> bool:
+    """Whether `target_dcp` shards can hold `ctx.concurrency` sequences in HBM."""
+    model = ctx.model
+    seq_len = ctx.max_model_len or ((ctx.input_len or 0) +
+                                    (ctx.output_len or 0))
+    if not seq_len or not model.num_layers:
+        return True
+    tp_pcp = max(1, (ctx.tp or 1) * max(1, ctx.pcp or 1))
+    non_dcp_ranks = max(1, tp_pcp // max(1, target_dcp))
+    if model.mla_kv_dim:
+        per_token_elems = model.mla_kv_dim
+        kv_head_shards = 1
+    elif model.num_kv_heads and model.head_dim:
+        per_token_elems = 2 * model.num_kv_heads * model.head_dim
+        kv_head_shards = min(model.num_kv_heads, non_dcp_ranks)
+    else:
+        per_token_elems = _D20_DEFAULT_MLA_LATENT_DIM
+        kv_head_shards = 1
+    kv_dtype = (ctx.config_get('--kv-cache-dtype', 'kv-cache-dtype',
+                               'kv_cache_dtype') or '').lower()
+    bytes_per_elem = 1 if ('fp8' in kv_dtype or 'f8' in kv_dtype) else 2
+    dp_replicas = max(1, ctx.dp or 1)
+    seqs_per_dp = max(1, math.ceil((ctx.concurrency or 1) / dp_replicas))
+    kv_per_rank = (model.num_layers * per_token_elems * seq_len * seqs_per_dp *
+                   bytes_per_elem) / max(1, target_dcp * kv_head_shards)
+    budget = ctx.kv_cache_memory_bytes or _D20_DEFAULT_KV_BUDGET_BYTES
+    return kv_per_rank <= budget
+
+
 def d18_indexer(f: features_lib.Features, ctx: context_lib.ServingContext,
                 sid: str) -> list[Finding]:
     out = []
+    dcp = ctx.dcp or du.knob_int(ctx, 'vllm.cli.decode_context_parallel_size',
+                                 1)
+    tp_pcp = (ctx.tp or 1) * max(1, ctx.pcp or 1)
+    target_dcp = limits.SMALL_BATCH_DECODE_TARGET_DCP
     for phase in _active_phases(f):
         g = _phase_ops(f, phase)
         idx = g[g['op_class'] == oc.ATTN_INDEXER]
@@ -1793,6 +1698,45 @@ def d18_indexer(f: features_lib.Features, ctx: context_lib.ServingContext,
                  & ~g['moe_scope'].fillna(False).astype(bool)
                  & g['tf_op_type'].isin(['top_k', 'approx_top_k', 'sort'])]
         sort_share = _share(f, phase, sort)
+        mean_bucket = _stat(f, phase, 'mean_bucket')
+        small_decode = phase == segmenter.DECODE and (
+            bool(ctx.concurrency and ctx.concurrency <= _D18_SMALL_DECODE_SEQS)
+            or (not math.isnan(mean_bucket)
+                and mean_bucket <= _D18_SMALL_DECODE_BUCKET))
+        changes = []
+        dcp_note = ''
+        validation = ''
+        est_saved = 0.5 * (share + sort_share)
+        if (small_decode and ctx.is_pd_decode and _is_torchtpu(ctx, f)
+                and ctx.serving_config is not None
+                and dcp >= limits.MIN_ASYMMETRIC_PREFILL_DCP
+                and tp_pcp % target_dcp == 0
+                and _dcp_fits_kv_budget(ctx, target_dcp)):
+            changes = [
+                knobs.make_change(
+                    'vllm.cli.decode_context_parallel_size',
+                    str(target_dcp),
+                    ctx.serving_config,
+                )
+            ]
+            dcp_note = (
+                f' At small decode batch with DCP={dcp}, a decode engine at'
+                ' `--decode-context-parallel-size=8` halves the DCP top-k / KV'
+                ' merge fan-in, which lowered GLM-5.2 P/D decode TPOT. Under'
+                ' disaggregated P/D lower it on the decode leg only'
+                ' (`DECODE_DCP_SIZE=8`, keeping `PREFILL_DCP_SIZE=16`):'
+                ' symmetric DCP 8 on both legs halved KV capacity, lowered the'
+                ' prefill prefix-cache hit rate and regressed Mtok/$.')
+            validation = (
+                'A/B decode p90 interactivity and Mtok/$ with'
+                ' `--decode-context-parallel-size=8` on the decode engine only.'
+                ' Under disaggregated P/D keep `PREFILL_DCP_SIZE=16` with an'
+                ' asymmetric KV transfer path (`DECODE_DCP_SIZE=8`); symmetric'
+                ' DCP 8 on both legs halved KV capacity (11.89M -> 5.95M'
+                ' tokens), dropped the prefill HBM prefix-cache hit rate from'
+                ' 91.9% to 80.2%, and lowered throughput per cost by 24.8% at'
+                ' concurrency 48 and 1.7% at concurrency 32.')
+            est_saved = min(0.25, 0.35 * (share + sort_share))
         out.append(
             Finding(
                 detector_id='D18_attn_indexer',
@@ -1805,18 +1749,22 @@ def d18_indexer(f: features_lib.Features, ctx: context_lib.ServingContext,
                  '. Its cost grows with context length, so it dominates long-'
                  'context decode.' +
                  ('' if sc else
-                  ' The top-k is not using the SparseCore top-k kernel.')),
+                  (' The top-k is not using the SparseCore top-k kernel.')) +
+                 dcp_note),
                 evidence=[
                     Evidence('indexer share', _pct(share), '%'),
                     Evidence('non-MoE top-k / sort share', _pct(sort_share),
                              '%'),
+                    *([Evidence('DCP', dcp)] if changes else []),
                     *_base_op_evidence(f, phase, idx, 3),
                     _step_evidence(f, phase, sid),
                 ],
-                knob_changes=[],
-                risk=F.Risk.DIAGNOSTIC,
-                confidence=F.Confidence.MEDIUM,
-                est_step_fraction_saved=0.5 * (share + sort_share),
+                knob_changes=changes,
+                risk=F.Risk.PERF_ONLY if changes else F.Risk.DIAGNOSTIC,
+                confidence=F.Confidence.LOW
+                if changes else F.Confidence.MEDIUM,
+                est_step_fraction_saved=est_saved,
+                validation=validation,
                 kernel_followup=
                 ('GLM-5.2 moved the indexer top-k to a SparseCore top-k kernel'
                  ' (`sc_topk_direct_*`) and streams indexer scoring'
@@ -1879,6 +1827,25 @@ def d19_in_step_wait(f: features_lib.Features, ctx: context_lib.ServingContext,
 # -----------------------------------------------------------------------------
 # D20: MLA attention sharded with TP (KV latent replicated)
 # -----------------------------------------------------------------------------
+def _mla_kv_needs_dcp(ctx: context_lib.ServingContext) -> bool:
+    """Whether a single rank's KV cache cannot hold the configured context."""
+    m = ctx.model
+    seq_len = ctx.max_model_len or ((ctx.input_len or 0) +
+                                    (ctx.output_len or 0))
+    if not seq_len or not m.num_layers:
+        return False
+    latent_dim = m.mla_kv_dim or _D20_DEFAULT_MLA_LATENT_DIM
+    kv_dtype = (ctx.config_get('--kv-cache-dtype', 'kv-cache-dtype',
+                               'kv_cache_dtype') or '').lower()
+    bytes_per_elem = 1 if ('fp8' in kv_dtype or 'f8' in kv_dtype) else 2
+    dp_ranks = max(1, (ctx.tp or 1) * (ctx.dp or 1) * max(1, ctx.pcp or 1))
+    seqs_per_rank = max(1, math.ceil((ctx.concurrency or 1) / dp_ranks))
+    kv_bytes_needed = (m.num_layers * latent_dim * seq_len * seqs_per_rank *
+                       bytes_per_elem)
+    budget = ctx.kv_cache_memory_bytes or _D20_DEFAULT_KV_BUDGET_BYTES
+    return kv_bytes_needed > budget
+
+
 def d20_mla_attention_tp(f: features_lib.Features,
                          ctx: context_lib.ServingContext,
                          sid: str) -> list[Finding]:
@@ -1887,6 +1854,16 @@ def d20_mla_attention_tp(f: features_lib.Features,
         return []
     if (ctx.dp or 1) > 1 and ctx.tp <= 2:
         return []  # Hybrid DPxTP2 already; not the pathological case.
+    dcp = ctx.dcp or du.knob_int(ctx, 'vllm.cli.decode_context_parallel_size',
+                                 1)
+    if dcp > 1 or (ctx.pcp or 1) > 1 or _mla_kv_needs_dcp(ctx):
+        # Context parallelism (or a KV cache one rank cannot hold) already
+        # shards the MLA KV cache across ranks instead of replicating it, and
+        # a TP=1 / DP mesh would drop that sharding.
+        return []
+    dp_ranks = ctx.tp * (ctx.dp or 1)
+    if ctx.concurrency and ctx.concurrency < dp_ranks:
+        return []  # Fewer requests than DP ranks would leave ranks idle.
     out = []
     for phase in _active_phases(f):
         share = features_lib.share_of(
@@ -1924,8 +1901,11 @@ def d20_mla_attention_tp(f: features_lib.Features,
                 )
             ]
         if config_only:
-            share_txt = ('attention share unmeasurable: ops cover only '
-                         f'{_pct(cov):.0f}% of the {phase} step')
+            share_txt = (
+                'attention share unmeasurable: ops cover only '
+                f'{_pct(cov):.0f}% of the {phase} step; the estimate is a'
+                f' prior (an assumed {_pct(D20_CONFIG_ONLY_EST):.0f}%'
+                ' attention share), not a measurement of this trace')
             share_ev = Evidence(f'{phase} op-time coverage', _pct(cov), '%')
             est = D20_CONFIG_ONLY_EST * (1 - 1 / ctx.tp)
         else:
@@ -1992,9 +1972,8 @@ def d21_sequential_loop(f: features_lib.Features,
             continue
         attn_mask = (
             loop['op_class'].isin([oc.ATTENTION_KERNEL, oc.ATTENTION_OTHER])
-            | names.str.contains(r'attention|attn', case=False, regex=True)
-        ) & ~names.str.contains(
-            r'gdn|linear|delta|mamba|kda', case=False, regex=True)
+            | names.str.contains(oc.ATTENTION_SCOPE)) & ~names.str.contains(
+                oc.LINEAR_ATTENTION_SCOPE)
         attn_loop = (not lin) and float(w[attn_mask].sum()) / tot >= 0.5
         # Innermost jit(...) scope above the loop (e.g. mla_ragged_paged_attention).
         scopes = names.str.extract(r'jit\(([^)]+)\)[^()]*/while/body/',
@@ -2037,10 +2016,8 @@ def d21_sequential_loop(f: features_lib.Features,
                 evidence=[
                     Evidence('loop ops per step', per_step),
                     Evidence('loop share', _pct(share), '%'),
-                    *([
-                        Evidence(
-                            'dominant loop scope', 0.0, '', detail=top_scope)
-                    ] if top_scope else []),
+                    *([Evidence('dominant loop scope', top_scope)]
+                      if top_scope else []),
                     *_base_op_evidence(f, phase, loop, 3),
                     _step_evidence(f, phase, sid),
                 ],
@@ -2237,16 +2214,6 @@ def d25_host_driven_transfer(f: features_lib.Features,
                 ' are moved per request.'),
         )
     ]
-
-
-# A capture of host-driven transfers (copy programs only), not of serving.
-_COPY_PROGRAM = r'^jit__?(identity|copy|device_put|convert_element_type)\b'
-
-
-def _is_copy_program(f: features_lib.Features) -> bool:
-    so = f.step_ops
-    return (not so.empty
-            and so['module'].astype(str).str.contains(_COPY_PROGRAM).all())
 
 
 ALL_DETECTORS: tuple[Callable[..., list[Finding]], ...] = (

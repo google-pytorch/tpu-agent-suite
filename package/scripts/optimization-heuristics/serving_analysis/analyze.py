@@ -24,7 +24,7 @@ import json
 from typing import Any
 
 import pandas as pd
-from serving_analysis import catalog_detectors
+from serving_analysis import catalog_detectors, code_locations
 from serving_analysis import context as context_lib
 from serving_analysis import detectors
 from serving_analysis import features as features_lib
@@ -32,6 +32,9 @@ from serving_analysis import findings as findings_lib
 from serving_analysis import (guardrails, headroom_detectors, op_classes,
                               planner, segmenter)
 from serving_analysis import trace_table as trace_table_lib
+
+# Hot code locations per phase in the Markdown report.
+_HOT_CODE_ROWS = 5
 
 
 @dataclasses.dataclass
@@ -43,6 +46,9 @@ class AnalysisResult:
     notes: list[str]
     errors: list[str]
     serving_command: str | None = None
+    # Phase -> the source lines with the most step time (code_locations).
+    hotspots: dict[str, list[findings_lib.CodeLocation]] = dataclasses.field(
+        default_factory=dict)
 
     @property
     def ranked(self) -> list[findings_lib.Finding]:
@@ -83,6 +89,10 @@ class AnalysisResult:
             _records(ct),
             'top_ops':
             _top_ops_records(f),
+            'code_hotspots': {
+                phase: [dataclasses.asdict(loc) for loc in locs]
+                for phase, locs in self.hotspots.items()
+            },
             'notes':
             self.notes,
             'errors':
@@ -122,6 +132,18 @@ class AnalysisResult:
         if self.errors:
             lines.append('Detector errors: ' + '; '.join(self.errors))
             lines.append('')
+        hot = [(p, locs[:_HOT_CODE_ROWS]) for p, locs in self.hotspots.items()]
+        if any(locs for _, locs in hot):
+            lines.append(
+                '**Hot code** (step time by the source line that emitted it)')
+            lines.append('')
+            for phase, locs in hot:
+                if locs:
+                    lines.append(f'{phase}:')
+                    lines.append('')
+                    lines.extend(
+                        findings_lib.location_markdown(loc) for loc in locs)
+                    lines.append('')
         rec_cmd = self.recommended_command
         if rec_cmd and rec_cmd != (self.serving_command or ''):
             lines.append('## Ready-to-run configuration patch')
@@ -205,10 +227,18 @@ def analyze(
     notes = list(seg.notes) + guard_notes
     if ctx.serving_config is None:
         notes.append('No serving config provided: knob states are unknown.')
+    hotspots: dict[str, list[findings_lib.CodeLocation]] = {}
+    try:
+        index = code_locations.LocationIndex(feats)
+        code_locations.attach(found, index)
+        hotspots = index.hotspots()
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        errors.append(f'code_locations: {type(e).__name__}: {e}')
     return AnalysisResult(sid,
                           fw,
                           found,
                           feats,
                           notes,
                           errors,
-                          serving_command=ctx.serving_command)
+                          serving_command=ctx.serving_command,
+                          hotspots=hotspots)

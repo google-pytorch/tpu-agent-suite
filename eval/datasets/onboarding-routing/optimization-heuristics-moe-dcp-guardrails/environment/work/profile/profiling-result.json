@@ -1,0 +1,34 @@
+{
+  "status": "reported",
+  "summary": "Decode engine profiles on tpu7x 2x2x2 (TP=8, PCP=2, DCP=16, MTP=3 -> 4 tokens/req): at concurrency 12 (48 decode tokens, 64-token bucket) sparse MLA indexer takes 19.3% of the decode step; at concurrency 20 (80 decode tokens, 128-token bucket) MoE TP decode crosses the 64-row kernel limit and falls back to gmm_v2 at 28.0% of the decode step.",
+  "run_id": "seeded",
+  "decode_serve_command": "TPU_FUSED_QK_NORM_ROPE=1 TPU_LATENT_PROJ_INTRA_CHIP_TP=1 TPU_SMALL_ALL_REDUCE_MAX_ROWS=128 TPU_SMALL_ALL_REDUCE_FORM=oneshot vllm serve zai-org/GLM-5-FP8 --port 8200 --tensor-parallel-size 8 --prefill-context-parallel-size 2 --decode-context-parallel-size 16 --kv-cache-dtype fp8 --kv-cache-memory-bytes 36000000000 --max-model-len 202752 --max-num-seqs 32 --enable-prefix-caching --async-scheduling --speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3}' --kv-transfer-config '{\"kv_connector\":\"TpuRaidenConnector\",\"kv_role\":\"kv_consumer\"}'",
+  "traces": [
+    {
+      "path": "/workspace/profile/decode-8k8k-c12",
+      "label": "decode_c12_48tok",
+      "role": "decode",
+      "point": "8192:8192:12",
+      "captured": true,
+      "tool_outputs": [
+        {
+          "tool": "create_events_db",
+          "artifact": "/workspace/profile/events/decode-c12-48tok-dcp16.parquet"
+        }
+      ]
+    },
+    {
+      "path": "/workspace/profile/decode-8k8k-c20",
+      "label": "decode_c20_80tok",
+      "role": "decode",
+      "point": "8192:8192:20",
+      "captured": true,
+      "tool_outputs": [
+        {
+          "tool": "create_events_db",
+          "artifact": "/workspace/profile/events/decode-c20-80tok-dcp16.parquet"
+        }
+      ]
+    }
+  ]
+}

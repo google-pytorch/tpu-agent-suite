@@ -56,6 +56,7 @@ _AXIS_DEPENDENT_DETECTORS: dict[str, tuple[str, ...]] = {
         'D31_gmm_tile_misalignment',
         'D32_excess_collectives_per_layer',
         'D36_hbm_limited_decode_batch',
+        'D52_moe_tp_decode_row_limit',
     ),
     'ep': (
         'D5_moe_permute',
@@ -66,6 +67,7 @@ _AXIS_DEPENDENT_DETECTORS: dict[str, tuple[str, ...]] = {
         'D31_gmm_tile_misalignment',
         'D37_moe_weight_precision',
         'D44_moe_combine_not_chunked',
+        'D52_moe_tp_decode_row_limit',
     ),
     'dp': (
         'D2_padding_waste',
@@ -86,9 +88,15 @@ _AXIS_DEPENDENT_DETECTORS: dict[str, tuple[str, ...]] = {
     ),
     'dcp': (
         'D8_kv_head_padding',
+        'D18_attn_indexer',
+        'D20_mla_attention_tp',
         'D36_hbm_limited_decode_batch',
     ),
-    'pcp': ('D7_collective_bound', ),
+    'pcp': (
+        'D7_collective_bound',
+        'D18_attn_indexer',
+        'D20_mla_attention_tp',
+    ),
 }
 
 # Mesh axis aliases (vLLM CLI, MaxText yml, candidate mesh dicts).
@@ -305,6 +313,13 @@ def extract_sharding_constraints(
                 ' logical sharding specs (`activation_btd`, `ffw_hidden_btf`,'
                 ' `query_btnh`, `keyvalue_bskh`) with the mesh to eliminate'
                 ' per-layer reshard collectives.')
+
+        elif det_id.startswith('D52'):
+            guidance.append(
+                'D52 (MoE TP decode row limit): Enable Expert Parallelism'
+                ' (`--enable-expert-parallel`) on the decode leg when at least'
+                ' half of decode step time is in steps above 64 token rows'
+                ' (`moe_tp_decode` hard limit).')
 
     return {
         'phase_stats': phase_stats,

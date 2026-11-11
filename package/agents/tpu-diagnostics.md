@@ -25,8 +25,10 @@ scripts:
   - scripts/optimization-heuristics/serving_analysis/__init__.py
   - scripts/optimization-heuristics/serving_analysis/analyze.py
   - scripts/optimization-heuristics/serving_analysis/catalog_detectors.py
+  - scripts/optimization-heuristics/serving_analysis/code_locations.py
   - scripts/optimization-heuristics/serving_analysis/composer.py
   - scripts/optimization-heuristics/serving_analysis/context.py
+  - scripts/optimization-heuristics/serving_analysis/detector_utils.py
   - scripts/optimization-heuristics/serving_analysis/detectors.py
   - scripts/optimization-heuristics/serving_analysis/features.py
   - scripts/optimization-heuristics/serving_analysis/findings.py
@@ -34,6 +36,7 @@ scripts:
   - scripts/optimization-heuristics/serving_analysis/headroom_detectors.py
   - scripts/optimization-heuristics/serving_analysis/intervals.py
   - scripts/optimization-heuristics/serving_analysis/knobs.py
+  - scripts/optimization-heuristics/serving_analysis/limits.py
   - scripts/optimization-heuristics/serving_analysis/op_classes.py
   - scripts/optimization-heuristics/serving_analysis/planner.py
   - scripts/optimization-heuristics/serving_analysis/segmenter.py

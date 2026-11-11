@@ -116,6 +116,7 @@ test-eval:
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_claude_session_supervisor.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_invoked_subagent.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_cpu_batch_verifier.py" -v
+	$(PYTHON) -m unittest discover -s eval/tests -p "test_moe_dcp_guardrails_verifier.py" -v
 
 
 # Live harness CLI tests. Each test skips itself when its binary is absent,

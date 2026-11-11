@@ -1,0 +1,58 @@
+{
+  "deployments": [
+    {
+      "model_id": "zai-org/GLM-5-FP8",
+      "engine": "vllm",
+      "port": 8200,
+      "tensor_parallel_size": 8,
+      "data_parallel_size": 1,
+      "prefill_context_parallel_size": 2,
+      "decode_context_parallel_size": 16,
+      "max_num_seqs": 32,
+      "max_model_len": 202752,
+      "kv_cache_dtype": "fp8",
+      "kv_cache_memory_bytes": 36000000000,
+      "enable_prefix_caching": true,
+      "async_scheduling": true,
+      "speculative_config": {
+        "method": "mtp",
+        "num_speculative_tokens": 3
+      },
+      "kv_transfer_config": {
+        "kv_connector": "TpuRaidenConnector",
+        "kv_role": "kv_consumer"
+      },
+      "parallelism": {
+        "source": "disaggregated_1p1d",
+        "reason": "16-device tpu7x 2x2x2 decode slice with TP=8 x PCP=2 and DCP=16"
+      }
+    },
+    {
+      "model_id": "zai-org/GLM-5-FP8",
+      "engine": "vllm",
+      "port": 8100,
+      "tensor_parallel_size": 8,
+      "data_parallel_size": 1,
+      "prefill_context_parallel_size": 2,
+      "decode_context_parallel_size": 16,
+      "max_num_seqs": 32,
+      "max_model_len": 202752,
+      "kv_cache_dtype": "fp8",
+      "kv_cache_memory_bytes": 36000000000,
+      "enable_prefix_caching": true,
+      "async_scheduling": true,
+      "speculative_config": {
+        "method": "mtp",
+        "num_speculative_tokens": 3
+      },
+      "kv_transfer_config": {
+        "kv_connector": "TpuRaidenConnector",
+        "kv_role": "kv_producer"
+      },
+      "parallelism": {
+        "source": "disaggregated_1p1d",
+        "reason": "16-device tpu7x 2x2x2 prefill slice with TP=8 x PCP=2 and DCP=16"
+      }
+    }
+  ]
+}

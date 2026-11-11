@@ -170,6 +170,54 @@ _KNOBS: tuple[Knob, ...] = (
         'Slice rotary cos/sin caches to max model len at load to remove the '
         'per-step layout copy.',
     ),
+    _tt(
+        'TPU_MOE_LOWTOK_MAX_TOKENS',
+        '0',
+        'Run the few-token MoE kernel (kernels/moe_lowtok) for EP calls up to '
+        'this many tokens, walking hit experts with routing weights as the row '
+        'mask without sort/permute/pad/unpermute.',
+    ),
+    _tt(
+        'TPU_SMALL_ALL_REDUCE_MAX_ROWS',
+        '0',
+        'Row cap of the Pallas small all-reduce kernel '
+        '(kernels/collectives/small_all_reduce.py) on the collectives it '
+        'serves; needs an expert-parallel group. envs.py says 0 keeps XLA, '
+        'but current layers/vllm/small_all_reduce_op.py reads 0 as 64 rows.',
+    ),
+    _tt(
+        'TPU_TOKEN_BUCKET_STEP',
+        '0',
+        'Add linear token buckets every STEP rows from 1/4 of the token budget '
+        'up to max prompt pass length on top of the power-of-two ladder.',
+    ),
+    _tt(
+        'TPU_ROPE_CACHE_ROW_MAJOR',
+        '0',
+        'Materialize rotary cos/sin caches in row-major {1, 0} device layout '
+        'at load (avoids the per-step layout copy; may cost more HBM due to '
+        'padding).',
+    ),
+    _tt(
+        'TPU_FUSED_QK_NORM_ROPE',
+        '0',
+        'Qwen3-Next attention (text-only, gated, neox RoPE): one Pallas call '
+        'for the q/gate split, Q/K RMSNorm, RoPE and gate on steps of <= 64 '
+        'rows; larger steps keep the unfused path.',
+    ),
+    _tt(
+        'TPU_LATENT_PROJ_INTRA_CHIP_TP',
+        '0',
+        "Shard Kimi K3's latent-MoE down/up projections column-parallel "
+        "across each chip's cores (halves weight reads per core; one "
+        'on-package all-gather per projection, two per layer).',
+    ),
+    _tt(
+        'TPU_SMALL_ALL_REDUCE_FORM',
+        '',
+        'Small decode all-reduce form (oneshot=all-gather+sum, '
+        'twoshot=reduce-scatter+all-gather; empty = chosen by block size).',
+    ),
     # ---- Upstream vLLM engine CLI (both TPU backends) ---------------------
     Knob(
         key='vllm.cli.data_parallel_size',
@@ -265,6 +313,80 @@ _KNOBS: tuple[Knob, ...] = (
         description='Fraction of device memory reserved for model + KV cache.',
         source_path=VLLM_ARG_UTILS,
         source_token='--gpu-memory-utilization',
+    ),
+    Knob(
+        key='vllm.cli.decode_context_parallel_size',
+        framework='vllm',
+        kind='cli',
+        name='--decode-context-parallel-size',
+        default='1',
+        description=(
+            'Ranks that shard the decode KV cache (no extra processes); '
+            'without PCP it reuses TP ranks, so tensor_parallel_size must be '
+            'divisible by it.'),
+        source_path=VLLM_ARG_UTILS,
+        source_token='decode_context_parallel_size',
+    ),
+    Knob(
+        key='vllm.cli.prefill_context_parallel_size',
+        framework='vllm',
+        kind='cli',
+        name='--prefill-context-parallel-size',
+        default='1',
+        description=(
+            'Ranks that split prefill sequence computation (expands the world '
+            'size). vLLM-TPU (tpu_inference sharding.py) also requires an even '
+            'size, NEW_MODEL_DESIGN=1, decode CP 1 and no SPMD data '
+            'parallelism.'),
+        source_path=VLLM_ARG_UTILS,
+        source_token='prefill_context_parallel_size',
+    ),
+    Knob(
+        key='vllm.cli.kv_cache_memory_bytes',
+        framework='vllm',
+        kind='cli',
+        name='--kv-cache-memory-bytes',
+        default='',
+        description=(
+            'Explicit per-rank HBM KV cache pool size in bytes (overrides '
+            '--gpu-memory-utilization when set).'),
+        source_path=VLLM_ARG_UTILS,
+        source_token='kv_cache_memory_bytes',
+    ),
+    Knob(
+        key='vllm.cli.enable_prefix_caching',
+        framework='vllm',
+        kind='cli',
+        name='--enable-prefix-caching',
+        default='',
+        description=('Enable automatic prefix caching across requests (or '
+                     '--no-enable-prefix-caching to disable).'),
+        source_path=VLLM_ARG_UTILS,
+        source_token='enable_prefix_caching',
+    ),
+    Knob(
+        key='vllm.cli.cp_kv_cache_interleave_size',
+        framework='vllm',
+        kind='cli',
+        name='--cp-kv-cache-interleave-size',
+        default='1',
+        description=(
+            'Token interleave granularity across context-parallel (DCP/PCP) '
+            'KV cache shards.'),
+        source_path=VLLM_ARG_UTILS,
+        source_token='cp_kv_cache_interleave_size',
+    ),
+    Knob(
+        key='vllm.cli.speculative_config',
+        framework='vllm',
+        kind='cli',
+        name='--speculative-config',
+        default='',
+        description=(
+            'JSON speculative decoding config (method, num_speculative_tokens, '
+            'synthetic_acceptance_length).'),
+        source_path=VLLM_ARG_UTILS,
+        source_token='speculative_config',
     ),
     # ---- vLLM-TPU (tpu_inference) env vars -------------------------------
     _env(

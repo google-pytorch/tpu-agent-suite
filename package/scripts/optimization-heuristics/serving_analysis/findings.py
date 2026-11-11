@@ -73,6 +73,11 @@ def _normalize(v: str) -> str:
     return s
 
 
+def is_true(value: object) -> bool:
+    """Whether a knob value enables its feature ('1', 'true', 'yes', 'on')."""
+    return _normalize(value) == 'true'
+
+
 @dataclasses.dataclass
 class Evidence:
     """A single quantitative observation backing a finding."""
@@ -82,6 +87,34 @@ class Evidence:
     unit: str = ''
     detail: str = ''
     xprof_link: str | None = None
+
+
+@dataclasses.dataclass
+class CodeLocation:
+    """Where in the served code step time is spent, as the trace records it.
+
+    XLA records the Python line that emitted each op. `path` is that file as an
+    import path (`tpu_inference/layers/common/fused_moe_gmm.py`). `line` is a
+    line of the build that was profiled, which can differ from the source at
+    hand.
+    """
+
+    path: str  # '' when the trace has no useful source line for the op.
+    line: int  # 0 when unknown.
+    function: str  # Innermost jitted function or layer, e.g. 'fused_moe_func'.
+    op: str  # Op or kernel name without its instance suffix, e.g. 'psum'.
+    op_type: str  # Framework primitive, e.g. 'psum', 'pallas_call'.
+    op_class: str
+    phase: str
+    ms_per_step: float
+    share: float  # Fraction of the phase's mean step time.
+    # In a library (jax, torch, torchax, ...) rather than serving code.
+    library: bool = False
+
+    @property
+    def where(self) -> str:
+        """'path:line', or the op name when the trace has no source line."""
+        return f'{self.path}:{self.line}' if self.path else self.op
 
 
 # Default (lever, couples_with) metadata for detectors that couple with ICI mesh
@@ -97,6 +130,7 @@ _DEFAULT_DETECTOR_COUPLING: dict[str, tuple[str, tuple[str, ...]]] = {
     'D32': ('logical_sharding', ('mesh', 'logical_sharding')),
     'D36': ('serving_knob', ('mesh', )),
     'D37': ('serving_knob', ('mesh', )),
+    'D52': ('mesh', ('mesh', )),
 }
 
 
@@ -117,6 +151,8 @@ class Finding:
     validation: str = ''
     kernel_followup: str | None = None  # Filled when no knob exists.
     source_refs: list[str] = dataclasses.field(default_factory=list)
+    # Where the trace spends this finding's time (code_locations.attach).
+    locations: list[CodeLocation] = dataclasses.field(default_factory=list)
     # Optimization lever class: 'mesh' | 'logical_sharding' | 'serving_knob' |
     # 'xla_flag' | 'kernel' | 'model' | 'diagnostic'.
     lever: str = ''
@@ -170,6 +206,23 @@ def _fmt_value(v: float | str) -> str:
     return str(v)
 
 
+def location_markdown(loc: CodeLocation) -> str:
+    """One code location as a Markdown list item."""
+    if loc.path:
+        where = f'`{loc.where}`'
+        if loc.function:
+            where += f' in `{loc.function}`'
+        what = f'`{loc.op}`'
+    else:
+        where = f'`{loc.op}`'
+        if loc.function:
+            where += f' in `{loc.function}`'
+        what = 'no source line in the trace'
+    lib = ' (library code)' if loc.library else ''
+    return (f'* {where}{lib}: {what}, {loc.ms_per_step:.3g} ms/step'
+            f' ({100 * loc.share:.1f}% of the {loc.phase} step)')
+
+
 def findings_to_markdown(findings: list[Finding]) -> str:
     """Renders findings as the `Serving Optimizations` plan section."""
     if not findings:
@@ -197,14 +250,22 @@ def findings_to_markdown(findings: list[Finding]) -> str:
             lines.append(
                 f'* {e.metric}: {_fmt_value(e.value)}{e.unit}{detail}{link}')
         lines.append('')
+        if f.locations:
+            lines.append('**Code** (where the trace spends this time)')
+            lines.append('')
+            lines.extend(location_markdown(loc) for loc in f.locations)
+            lines.append('')
         if f.knob_changes:
             lines.append('**Change**')
             lines.append('')
             for k in f.knob_changes:
                 state = {
-                    None: 'current value unknown',
-                    True: 'ALREADY SET',
-                    False: f'currently `{k.current_value}`',
+                    None:
+                    'current value unknown',
+                    True:
+                    'ALREADY SET',
+                    False: (f'currently `{k.current_value}`'
+                            if k.current_value else 'currently unset'),
                 }[k.already_set]
                 patch = f'; requires {k.requires_patch}' if k.requires_patch else ''
                 lines.append(

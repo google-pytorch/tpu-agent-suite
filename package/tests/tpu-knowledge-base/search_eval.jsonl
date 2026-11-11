@@ -780,3 +780,7 @@
 {"task": "general", "kind": "question", "query": "hill climbing serving optimization candidates tpu", "want": ["vllm-serving-heuristics", "vllm-sharding-heuristics"]}
 {"task": "general", "kind": "question", "query": "optimize serving throughput layout change measured gains", "want": ["vllm-sharding-heuristics"]}
 {"task": "general", "kind": "question", "query": "tp2xdp4 vs tp4xdp2 gemma mistral", "want": ["vllm-sharding-heuristics", "vllm-tp-dp-plan"]}
+{"task": "general", "kind": "question", "query": "moe tp decode 64 row limit speculative decoding enable expert parallel", "want": ["vllm-serving-heuristics"]}
+{"task": "general", "kind": "question", "query": "asymmetric decode context parallel dcp size 8 vs prefill dcp 16", "want": ["vllm-serving-heuristics"]}
+{"task": "general", "kind": "question", "query": "fused qk norm rope or small decode all-reduce oneshot vllm torchtpu", "want": ["vllm-serving-heuristics"]}
+{"task": "general", "kind": "question", "query": "replicated latent moe projection dual die intra chip tp", "want": ["vllm-serving-heuristics"]}

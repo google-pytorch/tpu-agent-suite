@@ -18,8 +18,8 @@ entry: vllm-serving-heuristics
 keyword: vllm-serving-heuristics
 url: not applicable -- see Sources
 authority: first-party-verified
-retrieved: 2026-10-23
-source_updated: 2026-10-23
+retrieved: 2026-11-06
+source_updated: 2026-11-06
 generator: authored
 ---
 
@@ -69,7 +69,14 @@ a change is chosen and judged; and what has been measured.
 | Prefill steps interleaved with decode steps stall in-flight decodes | `D3_prefill_decode_interference` | a smaller prefill chunk (`--max-num-batched-tokens`) where the engine takes one | never below the benchmark's prompt length: a budget under the prompt splits every prefill (Gemma-3 at 8k inputs: TTFT +67%) |
 | The device idles between decode steps and `--async-scheduling` is unset | `D29_async_scheduling_off` | `--async-scheduling` | no gain twice on Qwen3.8-27B (TTFT +18% at 128 users); a tie at every measured point on Mistral-Small-24B |
 | Ops sized by `--max-num-seqs` while far fewer requests are live | `D27_max_num_seqs_inflation` | a smaller `--max-num-seqs`, sized from the busiest benchmark point per DP replica | no change when that is not smaller than the current value (the server must still serve its busiest point) |
+| On a disaggregated decode engine (`kv_role` `kv_consumer`): sparse-attention indexer (`lightning_indexer` / `topk`) >= 8% of decode step time under `--decode-context-parallel-size` >= 16, `(TP * PCP) % 8 == 0`, and <= 16 concurrent decode sequences (or mean decode bucket <= 64 tokens) | `D18_attn_indexer` | `--decode-context-parallel-size=8` on the decode engine only | diagnostic on a unified or prefill engine, when the decode batch has more than 16 sequences and a mean decode bucket above 64 tokens, or when per-rank KV cache at DCP 8 exceeds `--kv-cache-memory-bytes` (36 GB assumed when unset); keep prefill DCP >= 16 (symmetric DCP 8 on GLM-5.2 1P1D halved KV capacity 11.89M -> 5.95M tokens, dropped prefix-cache hits 91.9% -> 80.2%, and lowered Mtok/$ 24.8% at concurrency 48) |
+| MLA attention >= 5% of step time under `--tensor-parallel-size` > 1 | `D20_mla_attention_tp` | `--tensor-parallel-size=1` with `--data-parallel-size` replicas | suppressed when `--decode-context-parallel-size` > 1, `--prefill-context-parallel-size` > 1, or unsharded MLA KV cache would exceed `--kv-cache-memory-bytes` (36 GB assumed when unset) |
 | Decode RPA v3 kernel whose compute chunk far exceeds the sliding window or the context (kernel name `RPAd-...-bkv_<block>_<chunk>`) | `D45_rpa_decode_block_oversized` | `TPU_RPA_DECODE_BLOCK_SIZES`: per layer kind, a block and chunk of one window for sliding layers, the smallest page-aligned chunk covering the context for global layers | needs the RPA v3 kernel (`--attention-backend FLASH_ATTN`) and a plugin patch when the image lacks the knob |
+| Decode step spends >= 8% in XLA `all-reduce` at <= 64 rows | `D47_small_decode_allreduce` | `TPU_SMALL_ALL_REDUCE_MAX_ROWS` sized to the step bucket | requires an expert-parallel group and serves only supported row-parallel / MoE combine paths |
+| Separate Q/K RMSNorm and RoPE ops >= 3% of step time | `D48_unfused_qk_norm_rope` | `TPU_FUSED_QK_NORM_ROPE=1` | proposed only for Qwen3-Next models (diagnostic on others); the fused kernel covers Qwen3-Next-style gated attention on steps of <= 64 rows |
+| Replicated latent-MoE projections >= 8% of step time on dual-core chips | `D49_replicated_latent_moe_proj` | `TPU_LATENT_PROJ_INTRA_CHIP_TP=1` | shards column-parallel across the two cores of each chip with an on-package all-gather |
+| Pallas `small_all_reduce` kernel (`oneshot` or `twoshot`) >= 8% of decode step | `D50_small_allreduce_form` | `TPU_SMALL_ALL_REDUCE_FORM` set to the other form (`oneshot` vs `twoshot`) | form trade-off depends on rows and devices |
+| TP-sharded MoE decode with MoE GMM >= 20% of decode step time and >= 50% of decode time in steps above 64 rows (`moe_tp_decode` hard limit, including `1 + num_speculative_tokens` per sequence) | `D52_moe_tp_decode_row_limit` | `--enable-expert-parallel` | below 64 decode rows `moe_tp_decode` stays active; suppressed on prefill-heavy unified workloads (inputs >= 2x outputs), not on disaggregated `kv_consumer` decode engines |
 | Decode attention >= 40% of the decode step on the batched RPA kernel (`--attention-backend CUSTOM`), whose decode blocks no knob tunes | `D46_batched_rpa_decode_untunable` | `--attention-backend FLASH_ATTN` with D45's `TPU_RPA_DECODE_BLOCK_SIZES` | reported without a change for models whose RPA v3 kernels fail to compile (Gemma-4-31B: VMEM, vLLM 0.29.0) |
 | MoE token padding in the expert kernels at the benchmarked loads | `D2_padding_waste` | `TPU_MOE_SKIP_PADDED_TOKENS=1` (vLLM-TorchTPU)[^vtt-envs] | tied at every point on gpt-oss-20b |
 | MoE experts sharded by TP in decode, no expert parallelism | `D24_moe_tp_without_ep` | expert parallelism | not on prefill-heavy traffic (inputs >= 2x outputs), where TP won |
@@ -100,9 +107,9 @@ a change is chosen and judged; and what has been measured.
 | `D15_torchtpu_fused_ep_moe` | MoE runs as all-gather + grouped matmul + reduce-scatter |
 | `D16_torchtpu_mla_layout` | sparse-MLA KV cache uses the TensorCore layout |
 | `D17_data_formatting` | relayout copies / per-token KV writes dominate |
-| `D18_attn_indexer` | sparse-attention indexer (scoring + top-k) is a hotspot |
+| `D18_attn_indexer` | sparse-attention indexer (scoring + top-k) >= 8% of step time; on the vLLM-TorchTPU decode engine of a disaggregated pair (`kv_consumer`) with DCP >= 16, `(TP * PCP) % 8 == 0` and <= 16 sequences (or mean decode bucket <= 64), proposes `--decode-context-parallel-size=8` when KV fits |
 | `D19_in_step_wait` | TensorCore idles inside the step program |
-| `D20_mla_attention_tp` | MLA attention under tensor parallelism |
+| `D20_mla_attention_tp` | MLA attention >= 5% of step time under `--tensor-parallel-size` > 1 (suppressed when DCP > 1, PCP > 1, or unsharded MLA KV cache exceeds `--kv-cache-memory-bytes`, 36 GB assumed when unset) |
 | `D22_moe_without_gmm` | MoE experts run without a grouped-matmul kernel |
 | `D24_moe_tp_without_ep` | MoE experts sharded by TP instead of EP (decode) |
 | `D25_host_driven_transfer` | a transfer driven by per-shard host copies while the device idles (diagnostic) |
@@ -122,6 +129,12 @@ a change is chosen and judged; and what has been measured.
 | `D44_moe_combine_not_chunked` | MoE combine collective is not chunked |
 | `D45_rpa_decode_block_oversized` | decode attention kernels whose compute chunk far exceeds the window or the context; proposes `TPU_RPA_DECODE_BLOCK_SIZES` with sizes computed from the kernel names and the workload's context (unmeasured) |
 | `D46_batched_rpa_decode_untunable` | decode attention on the batched RPA kernel (`--attention-backend CUSTOM`), which no knob tunes, while the stock RPA v3 decode blocks would be oversized; proposes `--attention-backend FLASH_ATTN` with D45's `TPU_RPA_DECODE_BLOCK_SIZES` (unmeasured against a CUSTOM baseline; reported without a change for models whose RPA v3 kernels failed to compile) |
+| `D47_small_decode_allreduce` | decode step spends >= 8% in XLA `all-reduce` at <= 64 rows; proposes `TPU_SMALL_ALL_REDUCE_MAX_ROWS` |
+| `D48_unfused_qk_norm_rope` | separate Q/K RMSNorm and RoPE ops >= 3% of step time; proposes `TPU_FUSED_QK_NORM_ROPE=1` on Qwen3-Next models (diagnostic on others) |
+| `D49_replicated_latent_moe_proj` | replicated latent-MoE projections >= 8% of step time on dual-core chips; proposes `TPU_LATENT_PROJ_INTRA_CHIP_TP=1` |
+| `D50_small_allreduce_form` | Pallas `small_all_reduce` kernel (`oneshot` or `twoshot`) >= 8% of decode step time; proposes A/B testing the other `TPU_SMALL_ALL_REDUCE_FORM` |
+| `D52_moe_tp_decode_row_limit` | TP-sharded MoE decode with MoE GMM >= 20% of decode step time and >= 50% of decode time in steps above 64 rows (`moe_tp_decode` hard limit); proposes `--enable-expert-parallel` |
+| `D53_prefill_microbatch_overlap` | collective-heavy long prefill with no microbatch comm/compute overlap (diagnostic) |
 
 ## Knobs and where they are defined
 
@@ -160,6 +173,8 @@ var and holds no sizes itself; it changes only the RPA v3 kernel.
   `propose.py`).
 - Rounds on tpu7x 2x2x1 with vLLM-TorchTPU: vLLM 0.31.0 (2026-10-19 and
   2026-10-21) and vLLM 0.32.0 (2026-10-23).
+- Disaggregated 1P1D GLM-5.2 FP8 serving on two tpu7x 2x2x2 slices (TP=16,
+  DCP=16 vs DCP=8, MTP=3) with vLLM-TorchTPU (2026-11).
 
 [^vtt-envs]: [vllm-torchtpu `envs.py`](https://github.com/vllm-project/vllm-torchtpu/blob/main/src/vllm_torchtpu/envs.py). code-reference. Defines `TPU_MOE_SKIP_PADDED_TOKENS` (default off); checked at commit a20f4a9b14e1. URL checked 2026-10-28.
 [^rpa-kv]: [tpu-inference RPA v3 `util.py`, `get_kv_cache_shape`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/ragged_paged_attention/v3/util.py). code-reference. KV cache rows `align_to(num_kv_heads * 2, packing)`, packing `32 // bits`; checked at commit 6b62267613be. URL checked 2026-10-28.

@@ -22,6 +22,7 @@ counted in step busy time but not in per-op shares.
 # pylint: disable=missing-function-docstring,missing-class-docstring,g-doc-args,g-doc-return-or-yield,g-docstring-has-escape,g-long-ternary,g-explicit-length-test,g-complex-comprehension,protected-access,cell-var-from-loop,comparison-with-itself,unused-argument
 
 import dataclasses
+import functools
 import re
 from typing import Any
 
@@ -42,6 +43,7 @@ _META_JOIN_COLS = [
     'opcode',
     'base_op',
     'tf_op_name',
+    'source_line',
 ]
 _COMPILE_RE = re.compile(
     r'backend_compile|compile_or_get_cached|XlaCompile|PjRtCompile|'
@@ -70,6 +72,11 @@ class Features:
     stop_trace: pd.DataFrame
     # host_transfers() summary.
     transfer: dict[str, float] = dataclasses.field(default_factory=dict)
+
+    @functools.cached_property
+    def collectives(self) -> pd.DataFrame:
+        """`collective_groups` over the step ops, computed once per analysis."""
+        return collective_groups(self.step_ops, self.meta, self.seg.steps)
 
 
 # -----------------------------------------------------------------------------
@@ -506,17 +513,18 @@ def compile_events(host: pd.DataFrame, steps: pd.DataFrame) -> pd.DataFrame:
     lo = int(steps['start_ns'].min())
     hi = int(steps['end_ns'].max())
     h = host[(host['start_ns'] >= lo) & (host['start_ns'] <= hi)]
-    return h[h['name'].str.contains(_COMPILE_RE)].reset_index(drop=True)
+    return h[h['name'].str.contains(_COMPILE_RE,
+                                    na=False)].reset_index(drop=True)
 
 
 def stop_trace_events(host: pd.DataFrame) -> pd.DataFrame:
     if host.empty:
         return host
-    return host[host['name'].str.contains(_STOP_TRACE_RE)].reset_index(
-        drop=True)
+    return host[host['name'].str.contains(_STOP_TRACE_RE,
+                                          na=False)].reset_index(drop=True)
 
 
-_HOST_COPY_RE = (r'^(ArrayImpl::CopyToDevices|DevicePutWithSharding|'
+_HOST_COPY_RE = (r'^(?:ArrayImpl::CopyToDevices|DevicePutWithSharding|'
                  r'BufferFromPyval|TransferToDevice|TransferLiteralToDevice|'
                  r'PjRtClient::BufferFromHostBuffer)')
 
@@ -544,8 +552,9 @@ def host_transfers(table: trace_table_lib.TraceTable) -> dict[str, float]:
             (mods['end_ns'] - mods['start_ns']).sum()) / 1e6 /
                                  max(len(table.devices), 1))
     if not host.empty:
-        c = host[host['name'].str.contains(_HOST_COPY_RE, regex=True)]
-        cp = c[c['name'].str.startswith('ArrayImpl::CopyToDevices')]
+        c = host[host['name'].str.contains(_HOST_COPY_RE, regex=True,
+                                           na=False)]
+        cp = c[c['name'].str.startswith('ArrayImpl::CopyToDevices', na=False)]
         out['n_copies'] = float(len(cp) if len(cp) else len(c))
         out['copy_ms'] = float((c['end_ns'] - c['start_ns']).sum()) / 1e6
     return out

@@ -70,8 +70,12 @@ _COLLECTIVE_TF_TYPES = {
     'distributed.reduce_scatter_tensor': 'reduce-scatter',
 }
 _MOE_SCOPE = re.compile(r'moe|expert|router|megablox|gmm', re.I)
-_GMM = re.compile(r'(^|[/_\-(])gmm|megablox|grouped_mat|fused[-_](ep[-_])?moe',
-                  re.I)
+_GMM = re.compile(
+    r'(^|[/_\-(])gmm|megablox|grouped_mat|fused[-_](ep[-_])?moe|'
+    # vLLM-TorchTPU fused MoE TP kernels, e.g. `moe_tp_decode-e_256-m_16-...`.
+    r'(^|/)moe_tp_(decode|prefill)\b',
+    re.I,
+)
 # Per-expert kernels (`.../expert_3/gating_3/pallas_call`).
 _EXPERT_MATMUL = re.compile(r'/expert_\d+/', re.I)
 # Dense shared-expert MLP inside an MoE block (DeepSeek-V3, GLM-5, Qwen3.5).
@@ -82,9 +86,11 @@ _MOE_SC_PERMUTE = re.compile(
 # Ragged paged attention: `RPA-` (fused) and the split decode / prefill /
 # mixed variants `RPAd-`, `RPAp-`, `RPAm-`.
 _ATTN = re.compile(
-    r'ragged_paged_attention|(^|/)RPA[dpm]?-|attn|attention|flash|splash|mla',
+    r'ragged_paged_attention|(?:^|/)RPA[dpm]?-|attn|attention|flash|splash|mla',
     re.I,
 )
+# Shared with the detectors, which match it with `Series.str.contains`.
+ATTENTION_SCOPE = _ATTN
 # MLA v2 KV-cache transpose kernels (tpu_inference kernels/mla/v2/transpose).
 _XPOSE_KERNEL = re.compile(r'(^|/)xpose_(pipeline|full)_shape', re.I)
 _COPY_CATEGORIES = ('data formatting', 'copy', 'transpose')
@@ -106,6 +112,22 @@ _KERNEL_COLLECTIVE_TYPE = (
 )
 # Pallas matmul kernels: `dot` / `.../linear/` custom calls.
 _KERNEL_MATMUL = re.compile(r'^(dot|matmul)|/linear/', re.I)
+# vLLM-TorchTPU collectives that run as named kernels or torch_tpu ops and
+# carry no framework scope: the Pallas small all-reduce
+# (`small_all_reduce_twoshot_r16`, vllm_torchtpu/layers/vllm/
+# small_all_reduce_op.py) and torch_tpu distributed ops
+# (`distributed_all_to_all_single`). Matched on the op name in any HLO
+# category.
+_NAMED_COLLECTIVE: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r'^small_all_reduce_', re.I), 'all-reduce'),
+    (re.compile(r'^distributed_all_to_all', re.I), 'all-to-all'),
+    (re.compile(r'^distributed_all_gather', re.I), 'all-gather'),
+    (re.compile(r'^distributed_reduce_scatter', re.I), 'reduce-scatter'),
+    (re.compile(r'^distributed_all_reduce', re.I), 'all-reduce'),
+)
+# vLLM-TorchTPU fp8 skinny (small-M) matmul kernels, e.g.
+# `fp8_skinny_n1024_b4_m16_k2048_n16384`.
+_NAMED_MATMUL = re.compile(r'^fp8_skinny_', re.I)
 # Flash-attention style kernel output: (out, running max, running sum), e.g.
 # (bf16[64,16,256], f32[64,16,128], f32[64,16,128]).
 _LAYOUT = r'(?:\{[^}]*\})?'
@@ -115,15 +137,34 @@ _FLASH_OUT = re.compile(r'=\s*\(\w+\[[\d,]+\]' + _LAYOUT +
 _INDEXER = re.compile(r'streamidx|indexer|sc_topk|lightning_index', re.I)
 _LINEAR_ATTN = re.compile(r'gdn|gated_delta|conv1d|linear_attn|kda|mamba|ssm',
                           re.I)
+LINEAR_ATTENTION_SCOPE = _LINEAR_ATTN
 _ROPE = re.compile(r'rotary|rope|cos_sin', re.I)
 _SHAPE = re.compile(r'=\s*\(?([a-z0-9]+)\[([0-9,]*)\]')
 _OPCODE = re.compile(r'\}\s+([a-z][a-z0-9\-]*)\(')
 _SCOPE_SPLIT = re.compile(r'/')
 
 
+def _text(value: object) -> str:
+    """`value` if it is a string, else '' (pandas NaN / None are not strings)."""
+    return value if isinstance(value, str) else ''
+
+
+def _collective_from_text(text: str) -> str:
+    """Serving collective type named in an op name / opcode / category, or ''."""
+    norm = _text(text).lower().replace('_', '-')
+    if not norm:
+        return ''
+    if 'all-reduce-scatter' in norm:
+        return 'reduce-scatter'
+    for t in _COLLECTIVE_TYPES:
+        if norm.startswith(t) or norm == f'{t} fusion':
+            return t
+    return ''
+
+
 def parse_output_shape(kernel_text: str) -> tuple[str, tuple[int, ...]]:
     """Returns (dtype, dims) of the first output in an HLO instruction string."""
-    m = _SHAPE.search(kernel_text or '')
+    m = _SHAPE.search(_text(kernel_text))
     if not m:
         return '', ()
     dims = tuple(int(x) for x in m.group(2).split(',') if x)
@@ -131,35 +172,35 @@ def parse_output_shape(kernel_text: str) -> tuple[str, tuple[int, ...]]:
 
 
 def parse_opcode(kernel_text: str) -> str:
-    m = _OPCODE.search(kernel_text or '')
+    m = _OPCODE.search(_text(kernel_text))
     return m.group(1) if m else ''
 
 
 def collective_type(hlo_category: str, tf_op_type: str,
                     kernel_text: str) -> str:
-    cat = (hlo_category or '').lower()
-    for t in _COLLECTIVE_TYPES:
-        if cat.startswith(t) or cat == f'{t} fusion':
-            return t
-    if 'all-reduce-scatter' in cat:
-        return 'reduce-scatter'
+    coll = _collective_from_text(_text(hlo_category))
+    if coll:
+        return coll
     if tf_op_type in _COLLECTIVE_TF_TYPES:
         return _COLLECTIVE_TF_TYPES[tf_op_type]
-    opcode = parse_opcode(kernel_text)
-    for t in _COLLECTIVE_TYPES:
-        if opcode.startswith(t):
-            return t
-    return ''
+    return _collective_from_text(parse_opcode(kernel_text))
 
 
 def layer_scope(tf_op_name: str) -> str:
     """Top framework scope below the jit wrapper, e.g. 'SharedFusedMoE'."""
-    parts = [p for p in _SCOPE_SPLIT.split(tf_op_name or '') if p]
+    parts = [p for p in _SCOPE_SPLIT.split(_text(tf_op_name)) if p]
     for p in parts:
         if p.startswith('jit(') and p.endswith(')'):
             continue
         return re.sub(r'\.\d+$', '', p)
     return ''
+
+
+def _in_moe(tf_op_name: str, op: str) -> bool:
+    """Whether an op belongs to an MoE block, by scope or kernel name."""
+    return bool(
+        _MOE_SCOPE.search(tf_op_name) or _GMM.search(op)
+        or _MOE_SC_PERMUTE.search(op))
 
 
 def classify_row(
@@ -174,12 +215,17 @@ def classify_row(
     tf = tf_op_name or ''
     if not tf and cat in ('copy-start', 'copy-done', 'async-start',
                           'async-done'):
-        return ASYNC_BOOKKEEPING, ''
-    in_moe = (bool(_MOE_SCOPE.search(tf)) or bool(_GMM.search(op or ''))
-              or bool(_MOE_SC_PERMUTE.search(op or '')))
+        coll = _collective_from_text(op or '') if cat.endswith('-done') else ''
+        return (COLLECTIVE, coll) if coll else (ASYNC_BOOKKEEPING, '')
+    in_moe = _in_moe(tf, op or '')
     coll = collective_type(cat, tf_op_type, kernel_text)
     if coll:
         return COLLECTIVE, coll
+    for pat, kind in _NAMED_COLLECTIVE:
+        if pat.search(op or ''):
+            return COLLECTIVE, kind
+    if _NAMED_MATMUL.search(op or ''):
+        return MATMUL, ''
     if cat == 'async-start':
         return ASYNC_BOOKKEEPING, ''
     is_kernel = cat == 'custom-call' or tf_op_type == 'pallas_call'
@@ -231,10 +277,9 @@ def classify_row(
     if cat in ('async-done', 'copy-done'):
         # SparseCore collectives are named with underscores
         # (`ragged_all_to_all_sc.call-done`).
-        name = (op or '').lower().replace('_', '-')
-        for t in _COLLECTIVE_TYPES:
-            if name.startswith(t):
-                return COLLECTIVE, t
+        coll = _collective_from_text(op or '')
+        if coll:
+            return COLLECTIVE, coll
         return ASYNC_WAIT, ''
     if _LINEAR_ATTN.search(tf):
         return LINEAR_ATTENTION, ''
@@ -265,9 +310,20 @@ def classify_row(
     return OTHER, ''
 
 
+_CLASSIFY_TEXT_COLS = (
+    'op',
+    'kernel_text',
+    'tf_op_name',
+    'tf_op_type',
+    'hlo_category',
+)
+
+
 def classify(op_meta: pd.DataFrame) -> pd.DataFrame:
     """Adds op_class, collective, layer_scope, out_dtype, out_dims columns."""
     df = op_meta.copy()
+    for c in _CLASSIFY_TEXT_COLS:
+        df[c] = df[c].fillna('').astype(str)
     res = [
         classify_row(o, k, t, ty, c) for o, k, t, ty, c in zip(
             df['op'],
@@ -281,8 +337,7 @@ def classify(op_meta: pd.DataFrame) -> pd.DataFrame:
     df['collective'] = [r[1] for r in res]
     df['layer_scope'] = df['tf_op_name'].map(layer_scope)
     df['moe_scope'] = [
-        bool(_MOE_SCOPE.search(t or '')) or bool(_GMM.search(o or ''))
-        for t, o in zip(df['tf_op_name'], df['op'])
+        _in_moe(t, o) for t, o in zip(df['tf_op_name'], df['op'])
     ]
     shapes = df['kernel_text'].map(parse_output_shape)
     df['out_dtype'] = shapes.map(lambda s: s[0])
@@ -305,7 +360,7 @@ def base_op_name(op: str) -> str:
     op: HLO op name.
   """
     prev = None
-    s = op or ''
+    s = _text(op)
     while prev != s:
         prev, s = s, _INSTANCE_TOKEN.sub('', s)
     return s

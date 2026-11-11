@@ -59,9 +59,9 @@ The mesh change in full: {{data:tpu-knowledge-base/pages/vllm-tp-dp-plan.md}}.
 | `D15_torchtpu_fused_ep_moe` | MoE runs as all-gather + grouped matmul + reduce-scatter |
 | `D16_torchtpu_mla_layout` | sparse-MLA KV cache uses the TensorCore layout |
 | `D17_data_formatting` | relayout copies / per-token KV writes dominate |
-| `D18_attn_indexer` | sparse-attention indexer (scoring + top-k) is a hotspot |
+| `D18_attn_indexer` | sparse-attention indexer (scoring + top-k) >= 8% of step time; on the vLLM-TorchTPU decode engine of a disaggregated pair (`kv_consumer`) with DCP >= 16, `(TP * PCP) % 8 == 0` and <= 16 sequences (or mean decode bucket <= 64), proposes `--decode-context-parallel-size=8` when KV fits |
 | `D19_in_step_wait` | TensorCore idles inside the step program |
-| `D20_mla_attention_tp` | MLA attention under tensor parallelism |
+| `D20_mla_attention_tp` | MLA attention >= 5% of step time under `--tensor-parallel-size` > 1 (suppressed when DCP > 1, PCP > 1, or unsharded MLA KV cache exceeds `--kv-cache-memory-bytes`, 36 GB assumed when unset) |
 | `D22_moe_without_gmm` | MoE experts run without a grouped-matmul kernel |
 | `D24_moe_tp_without_ep` | MoE experts sharded by TP instead of EP (decode) |
 | `D25_host_driven_transfer` | a transfer driven by per-shard host copies while the device idles (diagnostic) |
@@ -81,6 +81,12 @@ The mesh change in full: {{data:tpu-knowledge-base/pages/vllm-tp-dp-plan.md}}.
 | `D44_moe_combine_not_chunked` | MoE combine collective is not chunked |
 | `D45_rpa_decode_block_oversized` | decode attention kernels whose compute chunk far exceeds the window or the context; proposes `TPU_RPA_DECODE_BLOCK_SIZES` with sizes computed from the kernel names and the workload's context (unmeasured) |
 | `D46_batched_rpa_decode_untunable` | decode attention on the batched RPA kernel (`--attention-backend CUSTOM`), which no knob tunes, while the stock RPA v3 decode blocks would be oversized; proposes `--attention-backend FLASH_ATTN` with D45's `TPU_RPA_DECODE_BLOCK_SIZES` (unmeasured against a CUSTOM baseline; reported without a change for models whose RPA v3 kernels failed to compile) |
+| `D47_small_decode_allreduce` | decode step spends >= 8% in XLA `all-reduce` at <= 64 rows; proposes `TPU_SMALL_ALL_REDUCE_MAX_ROWS` |
+| `D48_unfused_qk_norm_rope` | separate Q/K RMSNorm and RoPE ops >= 3% of step time; proposes `TPU_FUSED_QK_NORM_ROPE=1` on Qwen3-Next models (diagnostic on others) |
+| `D49_replicated_latent_moe_proj` | replicated latent-MoE projections >= 8% of step time on dual-core chips; proposes `TPU_LATENT_PROJ_INTRA_CHIP_TP=1` |
+| `D50_small_allreduce_form` | Pallas `small_all_reduce` kernel (`oneshot` or `twoshot`) >= 8% of decode step time; proposes A/B testing the other `TPU_SMALL_ALL_REDUCE_FORM` |
+| `D52_moe_tp_decode_row_limit` | TP-sharded MoE decode with MoE GMM >= 20% of decode step time and >= 50% of decode time in steps above 64 rows (`moe_tp_decode` hard limit); proposes `--enable-expert-parallel` |
+| `D53_prefill_microbatch_overlap` | collective-heavy long prefill with no microbatch comm/compute overlap (diagnostic) |
 
 ## Reading a trace for sharding
 
