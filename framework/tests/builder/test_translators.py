@@ -391,6 +391,24 @@ class TestContractSchemaTemplates(unittest.TestCase):
                 self.assertEqual(prompt_contracts.result_contract_lines(empty),
                                  [])
 
+    def test_only_a_unit_with_a_shell_is_told_to_keep_the_journal(self):
+        """A skill that lists no tools counts as having a shell."""
+        manifest = {"name": "pkg", "version": "1.0.0"}
+        section = "## Session journal"
+        for tools, expected in ((["shell"], True), (["read"], False)):
+            with self.subTest(agent_tools=tools):
+                agent = {"name": "worker", "tools": tools, "delegates": []}
+                self.assertEqual(
+                    section in prompt_contracts.agent_execution_contract(
+                        manifest, agent, "claude-code"), expected)
+        for tools, expected in (([], True), (["read", "shell"], True),
+                                (["read"], False)):
+            with self.subTest(skill_tools=tools):
+                skill = {"name": "entry", "tools": tools, "delegates": []}
+                self.assertEqual(
+                    section in prompt_contracts.skill_package_contract(
+                        manifest, skill, "claude-code"), expected)
+
 
 class TestCopyAssetExclusions(unittest.TestCase):
     """copy_asset never ships wikify working state, agent-skill installs, or raw/code."""

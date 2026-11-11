@@ -187,6 +187,7 @@ def load_package(package_dir: Path,
                                             jsonio.load_json(manifest_path),
                                             manifest)
     package_checks.reject_removed_fields(raw_manifest)
+    package_checks.reject_nested_units(package_dir)
     manifest_schema = utils.get_package_manifest_schema()
 
     raw_schema_errors = utils.validate_instance(

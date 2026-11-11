@@ -51,13 +51,13 @@
     },
     "host_dependencies": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Python package names this document's scripts need on the host. Unioned by the compiler across the package."
+      "items": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$" },
+      "description": "Python package names this document's scripts need on the host, without versions or extras (those belong in requirements-client.txt). Unioned by the compiler across the package."
     },
     "tpu_dependencies": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Python package names this document's scripts need in the TPU workload environment. Unioned by the compiler across the package."
+      "items": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$" },
+      "description": "Python package names this document's scripts need in the TPU workload environment, without versions or extras (those belong in requirements-tpu.txt). Unioned by the compiler across the package."
     }
   },
   "additionalProperties": false

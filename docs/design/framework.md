@@ -116,9 +116,10 @@ has a shell: how to record hypotheses, experiments and results with
 - **Uninstalls from the central store.** Each version's
   `framework/installer.py` is copied into its central directory, so an install can be removed without the
   distribution it came from. The ledger names the package and version.
-- **Asks nothing.** The installer checks only the Python packages on the
-  user's machine. Compute is set up and checked by the first session (the
-  `compute-setup` guide, through `runtime compute setup plan|apply|verify`).
+- **Asks nothing.** The installer checks only the harness version and Python
+  packages on the user's machine. Compute is set up and checked by the first
+  session (the `compute-setup` guide, through
+  `runtime compute setup plan|apply|verify`).
 - **Merges, never replaces.** Changes to the harness's config files only add
   entries. If an entry would conflict with an existing setting, the install
   stops with an error.
@@ -149,15 +150,12 @@ are kept there rather than repeated here.
 | Claude Code | `agents/<name>.md` | `Agent` | `.claude/settings.json` |
 | Codex | `agents/<name>.toml` | `spawn_agent`, which has not yet been validated end to end, so `translate` prints a warning | `.codex/config.toml` |
 | Antigravity | `agents/<name>.md` | `invoke_subagent` | none |
-| Cursor | `.cursor/rules/<package>.mdc` and `skills/`; the rule file inlines each skill that delegates | `Task` | `.cursor/hooks.json` |
+| Cursor | `.cursor/rules/<package>.mdc` and `skills/`; the rule file inlines each agent and delegating skill | none (agents run as personas in one context) | `.cursor/hooks.json` |
 
 - Tool names and hook event names for each harness live in two tables,
   `tool-mappings.json` and `event-mappings.json`. Each harness has one
   adaptor module under `framework/harnesses/`; a test keeps the adaptors
   and the tables naming the same harnesses.
-- Each harness has a parity test suite. It checks that every prose unit is
-  built, that every prompt has its execution contract, and that no token is
-  left unreplaced.
 
 ## Guarantees
 

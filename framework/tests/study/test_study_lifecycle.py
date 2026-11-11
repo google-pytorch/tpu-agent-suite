@@ -381,6 +381,26 @@ class TestRunToStudyCardinality(StudyStoreTestCase):
         self.assertEqual(study.load_study("second")["runs"], [])
 
 
+class TestStudyRound(RoundRecordTestCase):
+    """The round number counts attached runs."""
+
+    RUNS = ("20260917T120000Z-0123456789ab", "20260917T130000Z-abcdef012345")
+
+    def test_each_attached_run_is_a_round_and_recording_is_not(self):
+        self.start("rounds")
+        self.assertEqual(study.study_round(study.load_study("rounds")), 0)
+        for run in self.RUNS:
+            study.attach_run_to_study("rounds", run)
+        self.assertEqual(study.study_round(study.load_study("rounds")), 2)
+
+        doc = study.record_round(
+            "rounds", {"arms": [open_arm("a1", "fuse the epilogue")]})
+        self.assertEqual(study.study_round(doc), 2)
+        self.assertEqual(study.study_round(study.load_study("rounds")), 2)
+        self.assertEqual(
+            [e["round"] for e in study.read_study_events("rounds")], [1, 2])
+
+
 class TestEventRouting(StudyStoreTestCase):
     """Strict lookup: no inference, no fan-out."""
 

@@ -28,7 +28,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from framework import bg_ledger, paths  # noqa: E402
+from framework import bg_ledger, jsonio, paths  # noqa: E402
 from framework.hooks import dispatch, events  # noqa: E402
 from framework.tests.hooks import helpers  # noqa: E402
 
@@ -302,6 +302,46 @@ class TestBackgroundIdleGate(unittest.TestCase):
         self.assertIn("hook failed (exception)", stderr.getvalue())
         self.assertIn("no session id", stderr.getvalue())
         self.assertEqual(self._ledger(), [])
+
+    def test_a_background_launch_from_an_agent_without_a_shell_is_refused(
+            self):
+        build_file = (self.central_home / paths.PACKAGES_DIRNAME / self.PKG /
+                      "tpu-agent-suite-build.json")
+        jsonio.write_json(
+            build_file, {
+                **jsonio.load_json(build_file), "agent_tools": {
+                    "parent-orch": ["read", "delegate"],
+                    "shell-orch": ["read", "delegate", "shell"],
+                }
+            })
+
+        def launch(agent_type, background=True):
+            tool_input = {"subagent_type": "child-worker", "prompt": "go"}
+            if background:
+                tool_input["run_in_background"] = True
+            res, code = self._dispatch(
+                "PreToolUse", {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": self.SESSION,
+                    "tool_name": "Agent",
+                    "tool_input": tool_input,
+                    "tool_use_id": "toolu_1",
+                    "agent_id": self.PARENT,
+                    "agent_type": agent_type,
+                }, "track-background")
+            self.assertEqual(code, 0)
+            return res["hookSpecificOutput"]
+
+        refused = launch("parent-orch")
+        self.assertEqual(refused["permissionDecision"], "deny")
+        self.assertIn("`parent-orch` has no shell",
+                      refused["permissionDecisionReason"])
+        for agent_type, background in (("shell-orch", True), ("parent-orch",
+                                                              False)):
+            with self.subTest(agent_type=agent_type, background=background):
+                self.assertEqual(
+                    launch(agent_type, background)["permissionDecision"],
+                    "allow")
 
     def test_harness_reported_idle_flag_still_skips_on_antigravity(self):
         # Antigravity says `fullyIdle` itself and resumes the paused agent;

@@ -214,6 +214,34 @@ class LayoutDiscoveryTest(_LayoutTest):
                                    ])
         self.assertEqual([str(f) for f in findings], [])
 
+    def test_a_token_naming_a_missing_file_fails_the_load(self):
+        self._append("agents/worker.md", "\nRun `{{script:absent.py}}`.\n")
+        message = self._load_error()
+        self.assertIn("agent worker names script 'scripts/absent.py'", message)
+        self.assertIn("has no such file", message)
+
+    def test_inheritance_through_references_is_transitive(self):
+        _write(self.pkg, "references/a.md",
+               "---\nreferences:\n  - references/b.md\n---\nA.\n")
+        _write(self.pkg, "references/b.md",
+               "---\nscripts:\n  - scripts/x.py\n---\nB.\n")
+        _write(self.pkg, "scripts/x.py", "print('x')\n")
+        self._replace("agents/worker.md", "  - references/loop.md\n",
+                      "  - references/loop.md\n  - references/a.md\n")
+        self._append("agents/worker.md", "\nRun `{{script:x.py}}`.\n")
+        manifest = self._load()
+        worker = next(a for a in manifest["agents"] if a["name"] == "worker")
+        self.assertIn("scripts/x.py", worker["scripts"])
+        self.assertIn("references/b.md", worker["references"])
+
+    def test_a_script_token_needs_a_declaration_the_document_reads(self):
+        """helper.py is declared only by loop.md, which aux does not read."""
+        self._append("skills/aux/SKILL.md",
+                     "Then run `{{script:helper.py}}`.\n")
+        message = self._load_error()
+        self.assertIn("skill aux names script 'scripts/helper.py'", message)
+        self.assertIn("does not declare it", message)
+
 
 class LayoutTranslationTest(_LayoutTest):
 

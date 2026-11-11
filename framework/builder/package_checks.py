@@ -15,7 +15,8 @@
 
 Catches agents that call each other in a loop or nest too deep, unknown or
 misspelled tools, hooks on events they can't run on, `{{...}}` references to
-files the unit doesn't ship, and manifest fields that were removed.
+files the unit doesn't ship, manifest fields that were removed, and
+subdirectories under skills/<name>/ or agents/.
 """
 
 from __future__ import annotations
@@ -311,3 +312,26 @@ def reject_removed_fields(manifest: dict[str, Any]) -> None:
             " supported:\n" +
             "\n".join(f"  {key}: {REMOVED_MANIFEST_FIELDS[key]}"
                       for key in found))
+
+
+def reject_nested_units(package_dir: Path) -> None:
+    """Fail if skills/<name>/ or agents/ contains a subdirectory.
+
+    Files there would never be loaded or shipped. Put nested files under
+    references/ or scripts/ instead.
+    """
+    roots = [package_dir / utils.AGENTS_DIRNAME]
+    skills_dir = package_dir / utils.SKILLS_DIRNAME
+    if skills_dir.is_dir():
+        roots.extend(sorted(p for p in skills_dir.iterdir() if p.is_dir()))
+    nested = sorted(
+        path.relative_to(package_dir).as_posix() for root in roots
+        if root.is_dir() for path in root.iterdir() if path.is_dir()
+        and not package_discovery.dist_excluded(path.relative_to(package_dir)))
+    if nested:
+        raise utils.TpuAgentSuiteError(
+            "skills and agents may not contain subdirectories (a skill is"
+            f" {utils.SKILLS_DIRNAME}/<name>/{utils.SKILL_DOCUMENT}, an agent"
+            f" is {utils.AGENTS_DIRNAME}/<name>.md); move nested files under"
+            f" {utils.REFERENCES_DIRNAME}/ or {utils.SCRIPTS_DIRNAME}/:\n" +
+            "\n".join(f"  {rel}/" for rel in nested))

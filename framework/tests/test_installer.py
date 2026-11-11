@@ -259,6 +259,65 @@ class TestInstaller(_TranslatedInstallerTestCase):
         self.assertIn(f"Restart Claude Code in {workspace.resolve()}",
                       out.getvalue())
 
+    def test_a_conflicting_user_setting_stops_the_install_untouched(self):
+        """A conflicting setting stops the install before anything is written,
+        even with --force."""
+        workspace = self._workspace("workspace_setting_conflict")
+        settings = workspace / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        original = json.dumps({
+            "theme": "dark",
+            "env": {
+                "BASH_DEFAULT_TIMEOUT_MS": "60000"
+            }
+        })
+        settings.write_text(original, encoding="utf-8")
+
+        for kwargs in ({}, {"force": True}):
+            with self.subTest(**kwargs):
+                with self.assertRaisesRegex(
+                        utils.TpuAgentSuiteError,
+                        "refusing to replace existing JSON setting: "
+                        "env/BASH_DEFAULT_TIMEOUT_MS"):
+                    self._install(workspace, **kwargs)
+                self.assertEqual(settings.read_text(encoding="utf-8"),
+                                 original)
+                self.assertFalse((workspace / ".tpu-agent-suite" /
+                                  "ownership.json").exists())
+                self.assertFalse((workspace / ".claude" / "skills").exists())
+                self.assertFalse((workspace / ".claude" / "agents").exists())
+                self.assertFalse((self.central_home / "packages").exists())
+
+    def test_install_refuses_a_harness_version_outside_the_target(self):
+        """A version outside the target's range is refused; one inside
+        installs."""
+        workspace = self._workspace("workspace_harness_version")
+        plan = jsonio.load_json(self.dist_dir / "tpu-agent-suite-install.json")
+
+        def install_with_harness(version_output: str) -> mock.MagicMock:
+            with mock.patch.object(installer.subprocess,
+                                   "run",
+                                   return_value=subprocess.CompletedProcess(
+                                       plan["version_command"], 0,
+                                       version_output, "")) as run:
+                installer.install(distribution=self.dist_dir,
+                                  destination=workspace,
+                                  non_interactive=True)
+            return run
+
+        with self.assertRaisesRegex(
+                utils.TpuAgentSuiteError,
+                r"'1\.9\.9 \(Claude Code\)' is outside"
+                r" >=2\.0\.0"):
+            install_with_harness("1.9.9 (Claude Code)\n")
+        self.assertEqual(list(workspace.iterdir()), [])
+        self.assertFalse((self.central_home / "packages").exists())
+
+        run = install_with_harness("2.1.0 (Claude Code)\n")
+        self.assertEqual(run.call_args.args[0], plan["version_command"])
+        self.assertTrue(
+            (workspace / ".tpu-agent-suite" / "ownership.json").is_file())
+
     def test_reinstall_keeps_profiles_written_by_config(self):
         workspace = self._workspace("workspace_profiles")
         install = functools.partial(self._install, workspace)
@@ -433,8 +492,16 @@ class TestInstaller(_TranslatedInstallerTestCase):
         install = functools.partial(self._install, workspace)
         install()
         ledger = workspace / ".tpu-agent-suite" / "ownership.json"
+        header = jsonio.load_json(ledger)
         self.assertEqual(
-            jsonio.load_json(ledger)["ledger_schema"], installer.LEDGER_SCHEMA)
+            {
+                key: header.get(key)
+                for key in ("ledger_schema", "package", "version")
+            }, {
+                "ledger_schema": installer.LEDGER_SCHEMA,
+                "package": "pkg",
+                "version": "1.0.0"
+            })
         jsonio.write_json(
             ledger, {
                 **jsonio.load_json(ledger), "ledger_schema":

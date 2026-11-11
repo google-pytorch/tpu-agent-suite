@@ -13,13 +13,12 @@ questions with a citation.
 - The package releases skills, and a user can start any of them. For TPU work
   the one to start is `tpu-agent`: it can read and write files and ask the
   user questions, and it routes every request to a specialist rather than
-  running anything itself, because a router that can run commands tends to do
-  the work instead of delegating. (On Codex, which gives every agent a shell,
-  `write` makes that shell able to change the workspace, so there the rule
-  rests on the router's prompt.) A second skill, `tpu-agent-export-trajectory`,
-  saves a session for later diagnosis. Behind tpu-agent sit specialist
-  agents. [The specialists](#the-specialists) lists them and what each one
-  does.
+  doing the work itself, because a router that runs workloads tends to do
+  the work instead of delegating. Its prompt limits its shell access to
+  checking the TPU and environment before routing (query understanding). A
+  second skill, `tpu-agent-export-trajectory`, saves a session for later
+  diagnosis. Behind tpu-agent sit specialist agents. [The specialists](#the-specialists)
+  lists them and what each one does.
 - Nobody yet knows the best way to build these agents. So we build competing
   versions side by side and let evals decide which one ships.
 - A tenet for every agent we develop: the performance numbers it claims come
@@ -80,9 +79,9 @@ Every claim the agents make about TPUs must cite something a reader can check.
   during the session and cites that URL. The failure it exists to prevent is a
   URL the model recalls from memory without fetching it, which may be wrong or
   may not exist.
-- **Some reference pages ship directly.** Pallas and torch_tpu concept pages
-  that kernel and performance agents need to read in full live under
-  `references/`.
+- **Some reference pages ship directly.** Model onboarding recipes, Pallas
+  kernel guides, tuning heuristics, and step-by-step agent procedures live
+  under `references/` so agents can read them in full.
 - **The curated knowledge base does not ship.** It stays in the repository, in
   `data/knowledgebase/`, and CI still validates it. Whether to keep it has not
   been decided. We will likely use a subset of the pages as a fallback if there

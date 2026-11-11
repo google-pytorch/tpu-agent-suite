@@ -128,12 +128,13 @@ entirely.
 | Field | Skill | Agent | Reference | Meaning |
 | --- | --- | --- | --- | --- |
 | `name`, `description` | required | required | optional | The harness matches a user's request against the description. |
-| `tools` | yes | yes | no | Portable tool names, such as `read` or `shell`. For an agent, the build grants only these tools, so the list is an upper bound on what it can call. A skill runs in the main session with that session's tools. |
+| `tools` | yes | yes | no | Portable tool names, such as `read` or `shell`. For an agent, the build grants only these tools (or sets the agent's sandbox on Codex; Cursor has no per-agent limit). For a skill, the `skill-tools` hook limits the main session to these tools while the skill is active. |
 | `delegates` | yes | yes | yes | The agents, or rarely skills, that this prose unit may start. |
 | `references` | yes | yes | yes | Files or directories under `references/`. |
 | `scripts` | yes | yes | yes | Files under `scripts/`. |
 | `accepts`, `produces` | no | yes | no | The schemas for the agent's request and result. |
-| `host_dependencies`, `tpu_dependencies` | yes | yes | yes | Python packages the prose unit needs on the user's machine and on the TPU host, by name only. Versions are pinned centrally. |
+| `effort` | no | yes | no | How much the agent thinks (`low` to `max`), on harnesses that let an agent definition set it (Claude Code). Other harnesses use their default. |
+| `host_dependencies`, `tpu_dependencies` | yes | yes | yes | Python packages the prose unit needs on the user's machine and on the TPU host, by name only. Versions and extras are pinned centrally. |
 
 A reference's frontmatter is inherited: every prose unit that reads a reference
 gains the scripts, references, delegates and dependencies the reference
@@ -160,8 +161,8 @@ the installed path when it builds for a harness.
 | `{{runs}}` | the central runs directory |
 | `{{runtime}}` | the command that runs the installed runtime |
 | `{{package_tag}}` | this package's `<name>@<version>` |
-| `{{harness}}`, `{{skills_dir}}` | the harness being built, and the directory it loads skills from |
-| `{{built-in:<name>}}` | a tool the harness provides, such as the tool that asks the user a question |
+| `{{harness}}` | the harness being built |
+| `{{built-in:ask_user_question}}` | the harness's tool for asking the user a question, or the words "ask the user" on a harness that has none |
 
 The compiler also knows `{{package}}`, the package's install root, but you
 should not build paths on it. `verify` rejects `{{package}}/scripts/foo.py`;
@@ -191,7 +192,7 @@ exists.
   `data/tpu-knowledge-base`.
 - **Installation:** `environment` (the settings questions that compute
   setup and `config set` read, and a schema for
-  environment.json), `workspace_memory`, `hooks` and `post_install`.
+  environment.json), `workspace_memory` and `hooks`.
 - **Targets:** `compatibility_targets`, one entry per harness, each with the
   range of harness versions it supports.
 
@@ -230,8 +231,7 @@ one or more harnesses. We may relax these, if all the harnesses allow it.
   the runtime's idle gate refuses the stop, names the live work, and tells the
   caller to wait, or to stop the work and report the failure.
 - **At most three levels deep.** The compiler rejects a chain of delegation
-  more than three levels below a released skill, rejects cycles, and rejects
-  agents that nothing can reach.
+  more than three levels below a released skill, and rejects cycles.
 - **Only a skill may ask the user a question.** A skill runs in the
   conversation the user sees. An agent runs out of view while its caller waits
   for its result, so it has no way to reach the user. When an agent needs an
@@ -305,7 +305,6 @@ flowchart LR
 - Two catalogs at the package root pin every version:
   `requirements-client.txt` for the user's machine and `requirements-tpu.txt`
   for the TPU host.
-- A build ships both catalogs trimmed to the packages its prose units declare,
-  plus the few packages the shipped runtime itself imports.
+- A build ships both catalogs trimmed to the packages its prose units declare.
 - `verify` fails if a catalog entry has no version pin. `lint` warns about a
   catalog entry that no prose unit declares, since that entry will never ship.

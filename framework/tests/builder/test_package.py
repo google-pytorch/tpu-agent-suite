@@ -189,6 +189,23 @@ class TestDocumentDrivenLoading(helpers.CompilerTestCase):
                       str(ctx.exception))
 
 
+class TestUnitLayout(helpers.CompilerTestCase):
+    """skills/<name>/ and agents/ may not contain subdirectories."""
+
+    def test_load_rejects_a_subdirectory_in_a_skill_or_agents(self):
+        pkg_dir = self._create_valid_package()
+        for nested in (pkg_dir / "skills" / "entry" / "references",
+                       pkg_dir / "agents" / "group"):
+            nested.mkdir()
+            (nested / "doc.md").write_text("# Doc\n", encoding="utf-8")
+        with self.assertRaises(utils.TpuAgentSuiteError) as ctx:
+            package_loader.load_package(pkg_dir)
+        message = str(ctx.exception)
+        self.assertIn("may not contain subdirectories", message)
+        self.assertIn("  skills/entry/references/", message)
+        self.assertIn("  agents/group/", message)
+
+
 class TestPackageRequirements(helpers.CompilerTestCase):
     """Requirements files and catalog dependencies."""
 
@@ -263,6 +280,28 @@ class TestPackageRequirements(helpers.CompilerTestCase):
         self.assertEqual(len(warnings), 2, warnings)
         self.assertIn("requirements-client.txt lists extra-host", warnings[0])
         self.assertIn("requirements-tpu.txt lists extra-tpu", warnings[1])
+
+    def test_a_frontmatter_dependency_is_a_bare_name(self):
+        pkg_dir = self._create_valid_package()
+        (pkg_dir / "requirements-client.txt").write_text("pydantic>=2.0.0\n",
+                                                         encoding="utf-8")
+        (pkg_dir / "requirements-tpu.txt").write_text("torch>=2.4.0\n",
+                                                      encoding="utf-8")
+        self._declare_dependencies(pkg_dir, host=["pydantic"], tpu=["torch"])
+        verify.verify_package(pkg_dir)
+        for host, tpu, field in (
+            (["pydantic>=2"], [], "$/host_dependencies/0"),
+            (["pydantic[email]"], [], "$/host_dependencies/0"),
+            (["pydantic"], ["torch==2.4.0"], "$/tpu_dependencies/0"),
+        ):
+            with self.subTest(host=host, tpu=tpu):
+                self._declare_dependencies(pkg_dir, host=host, tpu=tpu)
+                with self.assertRaises(utils.TpuAgentSuiteError) as ctx:
+                    package_loader.load_package(pkg_dir)
+                message = str(ctx.exception)
+                self.assertIn("invalid YAML frontmatter in agent document",
+                              message)
+                self.assertIn(f"{field}: string does not match", message)
 
 
 class TestWorkspaceMemory(helpers.CompilerTestCase):
@@ -433,6 +472,40 @@ class TestFrontmatterSchema(helpers.CompilerTestCase):
         self.assertIn(
             "frontmatter name 'invalid' does not match expected agent name "
             "'worker'", str(ctx.exception))
+
+    def test_each_kind_takes_only_its_own_frontmatter_fields(self):
+        """A skill can't declare `accepts`, a reference can't declare
+        `tools`, and an agent needs a `description`."""
+        skill = Path("skills") / "entry" / "SKILL.md"
+        worker = Path("agents") / "worker.md"
+        cases = (
+            (skill, "description: Entry description\n",
+             "description: Entry description\naccepts: schemas/in.json\n",
+             "skill document", "accepts"),
+            (worker, "delegates: []\n",
+             "delegates: []\nreferences:\n  - references/r.md\n",
+             "reference '", "tools"),
+            (worker, "description: Worker\n", "", "agent document 'worker.md'",
+             "description"),
+        )
+        pkg_dir = self._create_valid_package()
+        (pkg_dir / "references").mkdir(exist_ok=True)
+        (pkg_dir / "references" / "r.md").write_text(
+            "---\ntools:\n  - read\n---\nR.\n", encoding="utf-8")
+        for rel, old, new, label, field in cases:
+            with self.subTest(field=field):
+                path = pkg_dir / rel
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(old, text)
+                path.write_text(text.replace(old, new, 1), encoding="utf-8")
+                try:
+                    with self.assertRaises(utils.TpuAgentSuiteError) as ctx:
+                        package_loader.load_package(pkg_dir)
+                finally:
+                    path.write_text(text, encoding="utf-8")
+                message = str(ctx.exception)
+                self.assertIn("invalid YAML frontmatter in " + label, message)
+                self.assertIn(field, message)
 
 
 if __name__ == "__main__":

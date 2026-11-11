@@ -229,6 +229,32 @@ class TestHookDispatch(helpers.RuntimeTestCase):
         self.assertEqual(json.loads(captured.getvalue()),
                          {"decision": "allow"})
 
+    def test_a_hook_runs_from_the_workspace_root_wherever_it_was_started(self):
+        elsewhere = self.temp_dir / "elsewhere"
+        elsewhere.mkdir()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(elsewhere)
+        seen = self.temp_dir / "cwd.txt"
+        self._write_script(
+            "report_cwd.py", "import os, sys\n"
+            f"open({str(seen)!r}, 'w').write(os.getcwd())\n")
+        for name, action in (("script", {
+                "script_rel": "scripts/report_cwd.py"
+        }), ("command", {
+                "command": f"pwd -P > '{seen}'"
+        })):
+            with self.subTest(name):
+                seen.unlink(missing_ok=True)
+                res, code = self._dispatch(harness="antigravity",
+                                           hook_name=f"cwd-{name}",
+                                           event="PreToolUse",
+                                           raw_input_text="{}",
+                                           **action)
+                self.assertEqual((code, res), (0, {"decision": "allow"}))
+                self.assertEqual(
+                    Path(seen.read_text(encoding="utf-8").strip()).resolve(),
+                    self.workspace_dir.resolve())
+
 
 class TestHookTimeoutVerdictBeatsHarness(unittest.TestCase):
     """A hung hook's deny must be written before the harness gives up on it.

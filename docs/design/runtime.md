@@ -39,7 +39,8 @@ the same path in the repository and in a build, and its imports have one form,
 | `framework/journal.py` | The session journal: one experiment timeline per run. |
 | `framework/bg_ledger.py` | The per-agent ledger of background work and the idle gate: a subagent does not finish while a child or command it launched is still running. |
 | `framework/trajectory/` | The trajectory export. |
-| `framework/utils.py` | Shared helpers: schema validation, safe path handling, locating runs and packages. |
+| `framework/utils.py` | Shared helpers: schema validation and safe path handling. |
+| `framework/paths.py` | Locating the central store, runs, sessions, studies, and installed packages. |
 | `framework/schemas/` | The schemas the runtime checks hooks, studies and contracts against. |
 | `framework/installer.py` | Installs and uninstalls the build. See [Framework: Installer](framework.md#installer). |
 
@@ -89,7 +90,7 @@ expect back, so the runtime sits in between:
 - It converts the hook's decision (`allow` or `deny`, with a reason) back into
   the format the harness expects.
 
-The runtime also provides five built-in hooks that a package can enable in its
+The runtime also provides six built-in hooks that a package can enable in its
 `package.release.json`:
 
 | Built-in | What it does |
@@ -98,6 +99,7 @@ The runtime also provides five built-in hooks that a package can enable in its
 | `validate-schema` | Checks each delegation request against the callee's `accepts` schema, and each agent result against its `produces` schema. |
 | `reap-jobs` | When a session ends, cancels compute jobs that it left running. |
 | `record-event` | Appends lifecycle events to the study a run belongs to. |
+| `skill-tools` | Keeps the main conversation to the active skill's `tools` list. |
 | `track-background` | Records each background agent or command an agent launches, refuses a background delegation from an agent with no shell to wait with, and clears the record when the session ends. The stop gate reads the record to tell a pause from a finished subagent. |
 
 A hook can fail without reaching a decision: it may crash, time out, or print
@@ -248,8 +250,8 @@ later diagnosis with one command, which a skill runs for them.
   `config set --user-confirmed`. The runtime never picks a destination on its
   own.
 - **How it finds the session.** The `start-run` hook records each session
-  under the workspace. The export looks up the record for the active run, so
-  the user does not have to supply an id.
+  under `~/.tpu-agent-suite/sessions/`. The export looks up the session's
+  record from its `run_id`, so the user does not have to supply a session id.
 - **Consent for more than was asked.** If the runtime cannot find where the
   skill's work began, it refuses rather than exporting the whole session. The
   user can then agree to export everything, and the manifest records that they
