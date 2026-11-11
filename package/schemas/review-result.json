@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-result.json",
+  "title": "Review Result",
+  "description": "Output payload of the tpu-critical-review agent, for a claim or a stop. `pass` is what the caller routes on; the verdict, the fix list and, for a stop, the continuations say why. The full review stays on disk in `report_artifact`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "run_id"
+  ],
+  "status_requires": {
+    "reviewed": [
+      "verdict",
+      "pass",
+      "report_artifact"
+    ],
+    "invalid_input": [
+      "missing"
+    ]
+  },
+  "dependentRequired": {
+    "continuations": [
+      "termination_class"
+    ]
+  },
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "reviewed",
+        "invalid_input",
+        "failed"
+      ],
+      "description": "'reviewed': the review reached a verdict, including UNVERIFIABLE. 'invalid_input': the request names no claim or no artifact; every gap is listed in `missing`. 'failed': the review could not run. The fields each status owes are declared in `status_requires`."
+    },
+    "summary": {
+      "type": "string",
+      "description": "The verdict and the one finding that decided it."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "CONFIRMED",
+        "PARTIALLY CONFIRMED",
+        "REFUTED",
+        "UNVERIFIABLE",
+        "ESTABLISHED",
+        "PLAUSIBLE-UNCONFIRMED",
+        "NOT SUPPORTED",
+        "EXIT JUSTIFIED",
+        "EXIT PREMATURE",
+        "EXIT MISCLASSIFIED"
+      ],
+      "description": "kind claim: CONFIRMED / PARTIALLY CONFIRMED / REFUTED / UNVERIFIABLE for a document, ESTABLISHED / PLAUSIBLE-UNCONFIRMED / NOT SUPPORTED for an A/B result. kind stop: EXIT JUSTIFIED / EXIT PREMATURE / EXIT MISCLASSIFIED / UNVERIFIABLE."
+    },
+    "pass": {
+      "type": "boolean",
+      "description": "kind claim: true only for CONFIRMED or ESTABLISHED, when the claim may be reported as stated. kind stop: true only for EXIT JUSTIFIED, when the stop stands."
+    },
+    "fixes": {
+      "type": "array",
+      "description": "The fix list: findings ranked most severe first.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "finding",
+          "traced_to"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "CRITICAL",
+              "HIGH",
+              "MEDIUM",
+              "LOW"
+            ]
+          },
+          "finding": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What is claimed, what is the case, and the consequence if uncorrected."
+          },
+          "traced_to": {
+            "type": "string",
+            "enum": [
+              "arithmetic",
+              "artifact",
+              "judgement"
+            ]
+          }
+        }
+      }
+    },
+    "termination_class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimed",
+        "actual"
+      ],
+      "description": "kind stop only: the class the stop claimed and the one the evidence supports. They differ on EXIT MISCLASSIFIED.",
+      "properties": {
+        "claimed": {
+          "type": "string"
+        },
+        "actual": {
+          "type": "string"
+        }
+      }
+    },
+    "continuations": {
+      "type": "array",
+      "description": "kind stop only, so it requires `termination_class`: at most three priced continuations, ranked. Empty when none survives pricing.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "owner",
+          "brief",
+          "cost",
+          "expected_value",
+          "drop_if"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The agent or procedure that owns it."
+          },
+          "brief": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Specific enough to dispatch as-is."
+          },
+          "cost": {
+            "type": "string",
+            "minLength": 1,
+            "description": "TPU jobs and servers it would launch."
+          },
+          "expected_value": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Ceiling in ms/step or percent, times a stated rough probability."
+          },
+          "drop_if": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The cheap observation that kills it first."
+          }
+        }
+      }
+    },
+    "report_artifact": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path of the full review: reproduction table, findings, strongest cases, what survives, what could not be checked."
+    },
+    "missing": {
+      "type": "array",
+      "description": "Inputs the caller must add, when status is 'invalid_input'.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "reason"
+        ],
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "Diagnostic message when status is 'failed'."
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace."
+    }
+  },
+  "examples": [
+    {
+      "status": "reviewed",
+      "summary": "NOT SUPPORTED: recomputed delta is -3.9%, not -8.1%; the candidate arm read back a different max-num-batched-tokens.",
+      "verdict": "NOT SUPPORTED",
+      "pass": false,
+      "fixes": [
+        {
+          "severity": "CRITICAL",
+          "finding": "Arms ran different shapes: recipe.yaml read-back shows mnbt 8192 vs 4096, so the delta is not the flag's.",
+          "traced_to": "artifact"
+        }
+      ],
+      "report_artifact": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/g03-critical.md",
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "reviewed",
+      "summary": "EXIT PREMATURE: the floor divides by HBM bandwidth but the op is MXU bound; the recomputed floor is 0.21 ms against 0.48 ms measured.",
+      "verdict": "EXIT PREMATURE",
+      "pass": false,
+      "termination_class": {
+        "claimed": "floor",
+        "actual": "unfinished"
+      },
+      "continuations": [
+        {
+          "owner": "tpu-pallas",
+          "brief": "Remove the D_rope 64->256 contraction padding in QK Rope at decode-b64.",
+          "cost": "3 TPU jobs",
+          "expected_value": "0.15 ms/step at p=0.4",
+          "drop_if": "a padded-vs-unpadded microbench shows under 0.05 ms"
+        }
+      ],
+      "report_artifact": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/g01-exit.md",
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "invalid_input",
+      "summary": "No artifact to recompute the claim from.",
+      "missing": [
+        {
+          "input": "artifacts",
+          "reason": "A review recomputes from raw sources; none was given."
+        }
+      ],
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}

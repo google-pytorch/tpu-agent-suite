@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review Request",
+  "description": "Input payload for the tpu-critical-review agent. `kind: claim` attacks a claimed result; `kind: stop` attacks a decision to stop and must name its `termination_class` and `budget_left`. Both recompute from the raw sources this request points at, never from the author's summary, so the request carries pointers, not conclusions. A request with no claim or no artifact returns `invalid_input`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "claim",
+    "artifacts",
+    "run_id"
+  ],
+  "oneOf": [
+    {
+      "description": "kind stop: the stop names its class",
+      "required": [
+        "termination_class"
+      ]
+    },
+    {
+      "description": "kind claim: no stop fields",
+      "properties": {
+        "kind": {
+          "const": "claim"
+        }
+      },
+      "additionalProperties": {}
+    }
+  ],
+  "dependentRequired": {
+    "termination_class": [
+      "budget_left"
+    ],
+    "budget_left": [
+      "termination_class"
+    ],
+    "unexamined": [
+      "termination_class"
+    ]
+  },
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "claim",
+        "stop"
+      ],
+      "description": "'claim': a result, document or hypothesis list. 'stop': a decision to stop; carries `termination_class` and `budget_left`, which a claim must not."
+    },
+    "claim": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The claim under review, in the author's words: the result and its numbers for a claim, or the stop and its stated reason for a stop."
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "Paths of the raw sources behind the claim: write-ups, ledgers, gap files, bench logs, profile reports, roofline results.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "job_ids": {
+      "type": "array",
+      "description": "Compute job ids whose logs and artifacts back the claim, readable with `compute job logs` and `compute job artifacts`.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "image_digests": {
+      "type": "array",
+      "description": "Image digests each arm ran on, as `<arm>=<digest>`.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "recipe_paths": {
+      "type": "array",
+      "description": "Paths of each job's `recipe.yaml` read-back, the record of what actually ran.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "noise_floor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spread_pct",
+        "source"
+      ],
+      "description": "The harness's run-to-run spread for this measurement. Absent means unmeasured, which the review reports as such.",
+      "properties": {
+        "spread_pct": {
+          "type": "number",
+          "minimum": 0
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the spread was measured: the job ids or the artifact."
+        }
+      }
+    },
+    "termination_class": {
+      "type": "string",
+      "enum": [
+        "floor",
+        "ceiling",
+        "refuted",
+        "budget",
+        "blocked"
+      ],
+      "description": "kind stop only, required there: the class the stop claims."
+    },
+    "budget_left": {
+      "type": "string",
+      "description": "kind stop only, required there: what the caller's ledger still allows, in TPU jobs and servers it may launch. No continuation may exceed it."
+    },
+    "unexamined": {
+      "type": "array",
+      "description": "kind stop only: candidates or cost classes the work never examined.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace."
+    }
+  },
+  "examples": [
+    {
+      "kind": "claim",
+      "claim": "Flag --xla_tpu_enable_async_all_gather gives -8.1% T_mix on the stack head (4820 vs 5245 us).",
+      "artifacts": [
+        "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/hill-climb/gaps/g03.md"
+      ],
+      "job_ids": [
+        "j-0a1b2c3d-1111-4222-8333-444455556666",
+        "j-0a1b2c3d-7777-4888-9999-aaaabbbbcccc"
+      ],
+      "image_digests": [
+        "stack=sha256:3f2a",
+        "candidate=sha256:3f2a"
+      ],
+      "recipe_paths": [
+        "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/j-0a1b2c3d-1111-4222-8333-444455556666/recipe.yaml",
+        "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/j-0a1b2c3d-7777-4888-9999-aaaabbbbcccc/recipe.yaml"
+      ],
+      "noise_floor": {
+        "spread_pct": 1.2,
+        "source": "baseline run x2, j-0a1b2c3d-1111-4222-8333-444455556666"
+      },
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "kind": "stop",
+      "claim": "MLA QK Rope gap stops at 31% closed: the kernel is at the floor.",
+      "artifacts": [
+        "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/hill-climb/gaps/g01.md",
+        "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/roofline/qk_rope_rows.md"
+      ],
+      "termination_class": "floor",
+      "budget_left": "6 TPU jobs, 2 servers",
+      "unexamined": [
+        "neighbour copy before QK Rope"
+      ],
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}
