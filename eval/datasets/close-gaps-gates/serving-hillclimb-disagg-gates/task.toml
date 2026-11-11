@@ -1,0 +1,38 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+version = "1.0"
+
+artifacts = [
+  { source = "/workspace", destination = "workspace" },
+  { source = "/root/.tpu-agent-suite/runs", destination = "tpu_agent_suite_runs" },
+]
+
+[task]
+name = "close-gaps-gates/serving-hillclimb-disagg-gates"
+description = "For disaggregated 1P1D vLLM serving of zai-org/GLM-5.2-FP8 on two tpu7x 8-chip slices (16 chips total, c=48 multi-turn long-context sessions, baseline DECODE_BATCH_CAP=16, MTP=1, MTP_NUM_SPECULATIVE_TOKENS=3, DCP_SIZE=16), inspect the baseline per-leg server metrics (/workspace/metrics/server_metrics_export.csv), the served vllm-torchtpu source checkout (/workspace/repo), the four proposed next arms (/workspace/candidates.json), and the live aiperf telemetry outputs (/workspace/telemetry/baseline_aiperf.txt and /workspace/telemetry/inflight_arm_aiperf.txt). This session has no TPU and no compute backend, so do not launch or submit any compute job. Write /logs/artifacts/answer.json with keys `binding_leg` (\"decode\", \"prefill\", or \"balanced\"), `arm_decisions` (mapping each candidate ID in /workspace/candidates.json to {\"decision\": \"launch\" | \"reject\" | \"needs_kernel_extension\", \"reason\": \"...\"}), `selected_arm` (the single candidate ID ready to launch directly without kernel modifications), `inflight_action` (\"stop\", \"keep\", or \"watch\" for /workspace/telemetry/inflight_arm_aiperf.txt), and `inflight_reason`."
+
+[metadata]
+category = "close-gaps-gates"
+
+[agent]
+timeout_sec = 1800.0
+
+[verifier]
+timeout_sec = 300.0
+
+[environment]
+workdir = "/workspace"
+cpus = 2
+memory_mb = 8192
+storage_mb = 10240

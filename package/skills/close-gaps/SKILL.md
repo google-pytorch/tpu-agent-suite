@@ -3,8 +3,27 @@ name: close-gaps
 description: A simple optimization loop for one served job — microbenchmark the job, rank its gaps with decompose-optimization, then work the list top to bottom, digging into each gap until it is closed (XLA / libtpu flag tuning, env knobs, a code change, a kernel via write-tpu-kernels, and the ops around it), verifying every gain with a workload-microbenchmark A/B, then stacking every win, projecting the combined gain and confirming it with one end-to-end rerun of the original job. Use when asked to "close the gaps on job j-…", "optimize this job end to end", "work the decompose list", "go deep on each problem". Runs as an autonomous loop from start to E2E with no human gates — one ledger file, stops only when done or blocked. Runs in the main thread.
 scripts:
 - scripts/common/serve_vllm.sh
+- scripts/optimization-heuristics/hillclimb/__init__.py
+- scripts/optimization-heuristics/hillclimb/code_gap.py
+- scripts/optimization-heuristics/hillclimb/code_limits.py
+- scripts/optimization-heuristics/hillclimb/early_verdict.py
+- scripts/optimization-heuristics/hillclimb/hillclimb_cli.py
+- scripts/optimization-heuristics/hillclimb/kv_replay.py
+- scripts/optimization-heuristics/hillclimb/ledger.py
+- scripts/optimization-heuristics/hillclimb/legs.py
+- scripts/optimization-heuristics/hillclimb/lessons.py
+- scripts/optimization-heuristics/hillclimb/metrics.py
+- scripts/optimization-heuristics/hillclimb/microbench.py
+- scripts/optimization-heuristics/hillclimb/model_plugins.py
+- scripts/optimization-heuristics/hillclimb/ports.py
+- scripts/optimization-heuristics/hillclimb/predictor.py
+- scripts/optimization-heuristics/hillclimb/preflight.py
+- scripts/optimization-heuristics/hillclimb/run_history.py
+- scripts/optimization-heuristics/hillclimb/trace_roofline.py
+- scripts/optimization-heuristics/hillclimb/verify.py
 references:
 - references/close-gaps/LEDGER-TEMPLATE.md
+- references/close-gaps/serving-hillclimb-gates.md
 delegates:
 - tpu-diagnostics
 ---
@@ -45,6 +64,17 @@ main-thread skill too — invoke it from here, not from a subagent.
 
 * Microbenchmark usage: use microbenchmark to replace the full end-to-end (e2e) run except the final
   one.
+
+### Serving hill-climb CPU gates (`hillclimb_cli.py`)
+
+For vLLM-TorchTPU serving jobs, `python3 {{script:optimization-heuristics/hillclimb/hillclimb_cli.py}}`
+runs deterministic stdlib checks on CPU (step mapping, flags and decision rules in
+{{reference:close-gaps/serving-hillclimb-gates.md}}). They keep no state: they read past outcomes
+from the ledger and gap files. They decide no wins: that stays `cost_model.json` in 2.4 and
+{{skill:critical-review}} in step 4.
+
+* **Digging & pre-launch (`arm_preflight`)** — `roofline` (tabular op floor join when raw `.xplane.pb` is not on hand; `decompose-optimization` and `roofline-analysis` stay primary on full profiles), `code-limits`, `code-gap`, `ports`, and for P/D jobs `legs` and `kv-replay` in 2.2; `preflight` before any 2.3 / `needs-e2e` serving arm (an ERROR blocks launch); `microbench` (`--repo`) to test a single kernel bucket extension with `float64` numerics before building an image for `workload-microbenchmark`; and `predict` for schedule-changing `needs-e2e` levers (`DECODE_BATCH_CAP`, speculative tokens, P/D leg balance) that fixed-step `T_mix` cannot score.
+* **In-flight & post-run readings (`arm_verdict`)** — `microbench --bench-log` on 1-host kernel logs; `early-verdict`, `verify` (resolves `serving_analysis` detector IDs and slugs) and `noise` as advisory readings on step-4 arms, which still run to completion; `diagnose-failure` before a relaunch.
 
 ## Invocation
 
@@ -245,6 +275,8 @@ Try the levers in cost order, and stop climbing as soon as one closes the gap:
 5. **Win** (significant, no guardrail regression) → merge into the stack branch, new stack image,
    ledger: stack sha, digest, the A/B job ids, cumulative `T_mix`. **Not a win** → revert, record
    what was learned in the gap file, back to 2.2 with it.
+   Either way, and for a job that crashed, add one line to the gap file: `- outcome: win`,
+   `not a win` or `crash`, then each changed knob or env flag as a backticked `KEY=VALUE`.
 
 If the change alters the schedule (mnbt, chunk size, spec tokens, admission), `T_mix` cannot decide
 it — park it as `needs-e2e` and carry it to step 4 as its own arm.
@@ -339,7 +371,7 @@ speedup is not significant — that is a stop, so {{skill:exit-review}} it first
    with the image and `VLLM_SERVER_CMD` read back from the stack E2E job's `recipe.yaml`.
 4. Record the E2E result in the run's artifacts directory, `{{runs}}/<run_id>/artifacts/close-gaps/<job-id>/`
    — each win with its A/B evidence, the stack as the combined result. Only now is anything
-   `accepted`.
+   `accepted`. In the ledger, add an `- outcome:` line (as in 2.4) for each `needs-e2e` arm.
 5. Write `FINAL.md` beside the ledger: the list with each row's class and closed %, the projected vs
    measured gain, the stack branch and digest, and what is still open with its route.
 

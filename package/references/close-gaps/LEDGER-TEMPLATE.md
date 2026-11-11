@@ -39,6 +39,9 @@
 
 **Parked (examined, not selected):** `<op — reason>`, …
 
+**Outcomes** (one line per A/B, `needs-e2e` arm or crashed job, here or in its gap file):
+`- outcome: <win | not a win | crash>` then each changed `KEY=VALUE` in backticks
+
 ## Spend
 
 | gap | A/B rounds | jobs | notes |

@@ -1,0 +1,5 @@
+endpoint_url,metric_name,avg,p50,p75,p90,max
+http://prefill-0:8081/metrics,vllm:num_requests_waiting,0.04,0.0,0.0,0.0,1.0
+http://prefill-0:8081/metrics,vllm:num_requests_running,0.28,0.0,1.0,1.0,1.0
+http://decode-0:8082/metrics,vllm:num_requests_waiting,4.20,4.0,6.0,8.0,12.0
+http://decode-0:8082/metrics,vllm:num_requests_running,15.80,16.0,16.0,16.0,16.0

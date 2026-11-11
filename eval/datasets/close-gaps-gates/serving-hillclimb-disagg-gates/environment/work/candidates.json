@@ -1,0 +1,62 @@
+{
+  "recipe": "glm5_fp8_1p1d_long_context",
+  "baseline_knobs": {
+    "CLIENT_CONCURRENCIES": "48",
+    "DCP_SIZE": "16",
+    "DECODE_BATCH_CAP": "16",
+    "MTP": "1",
+    "MTP_NUM_SPECULATIVE_TOKENS": "3"
+  },
+  "candidates": [
+    {
+      "id": "arm_prefill_drafter",
+      "description": "Tune prefill-leg drafter tensor parallelism only.",
+      "knobs": {
+        "CLIENT_CONCURRENCIES": "48",
+        "DCP_SIZE": "16",
+        "DECODE_BATCH_CAP": "16",
+        "MTP": "1",
+        "MTP_NUM_SPECULATIVE_TOKENS": "3",
+        "EXTRA_ENV_PREFILL": "DRAFTER_TP=4"
+      }
+    },
+    {
+      "id": "arm_sym_dcp8",
+      "description": "Lower symmetric DCP_SIZE from 16 to 8 across both prefill and decode legs.",
+      "knobs": {
+        "CLIENT_CONCURRENCIES": "48",
+        "DCP_SIZE": "8",
+        "DECODE_BATCH_CAP": "16",
+        "MTP": "1",
+        "MTP_NUM_SPECULATIVE_TOKENS": "3"
+      }
+    },
+    {
+      "id": "arm_cap20_mtp3",
+      "description": "Raise DECODE_BATCH_CAP from 16 to 20 with MTP=1 and 3 speculative tokens (80 decode tokens/step) directly on the unpatched repo.",
+      "knobs": {
+        "CLIENT_CONCURRENCIES": "48",
+        "PREFILL_DCP_SIZE": "16",
+        "DECODE_DCP_SIZE": "16",
+        "DECODE_BATCH_CAP": "20",
+        "MTP": "1",
+        "MTP_NUM_SPECULATIVE_TOKENS": "3"
+      }
+    },
+    {
+      "id": "arm_asym_dcp",
+      "description": "Use asymmetric P/D DCP (PREFILL_DCP_SIZE=16, DECODE_DCP_SIZE=8) with non-striped KV layout, has indexer mode and whole packed rows (DECODE_INTERLEAVE=8) at cap=16.",
+      "knobs": {
+        "CLIENT_CONCURRENCIES": "48",
+        "PREFILL_DCP_SIZE": "16",
+        "DECODE_DCP_SIZE": "8",
+        "DECODE_INTERLEAVE": "8",
+        "INDEXER_KV_CACHE_MODE": "has",
+        "EXTRA_ENV": "TPU_KV_STRIPED_LAYOUT=0",
+        "DECODE_BATCH_CAP": "16",
+        "MTP": "1",
+        "MTP_NUM_SPECULATIVE_TOKENS": "3"
+      }
+    }
+  ]
+}
