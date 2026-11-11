@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "code-stack-request.json",
+  "title": "tpu-code-stack Request",
+  "description": "Input payload for the tpu-code-stack agent, the only agent that runs git on plugin code. One action on the campaign repo: the pinned image's vllm_torchtpu history as `base`, branch `stack`, a branch per hypothesis. Each action owes its own fields (the `oneOf`); which caller may take it is the agent's to enforce, and a write action from another caller returns `refused`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "caller",
+    "repo",
+    "run_id"
+  ],
+  "oneOf": [
+    {
+      "description": "init: probe the image, tag base, branch stack",
+      "properties": {
+        "action": {
+          "const": "init"
+        }
+      },
+      "required": [
+        "image",
+        "profile"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "branch: a hypothesis branch and its worktree",
+      "properties": {
+        "action": {
+          "const": "branch"
+        },
+        "name": {
+          "pattern": "^hyp/[A-Za-z0-9._-]+$"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "commit: the plugin changes in a worktree",
+      "properties": {
+        "action": {
+          "const": "commit"
+        }
+      },
+      "required": [
+        "worktree",
+        "message"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "discard: tag a lost test or a given-up hypothesis",
+      "properties": {
+        "action": {
+          "const": "discard"
+        },
+        "name": {
+          "pattern": "^hyp/[A-Za-z0-9._-]+$"
+        }
+      },
+      "required": [
+        "name",
+        "what"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "win: cherry-pick a branch onto stack",
+      "properties": {
+        "action": {
+          "const": "win"
+        },
+        "name": {
+          "pattern": "^hyp/[A-Za-z0-9._-]+$"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "stack: a branch from base with branches cherry-picked",
+      "properties": {
+        "action": {
+          "const": "stack"
+        }
+      },
+      "required": [
+        "name",
+        "branches"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "ref: a ref as a plugin record",
+      "properties": {
+        "action": {
+          "const": "ref"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "show: log, diff and tags of a ref",
+      "properties": {
+        "action": {
+          "const": "show"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "push: stack as an image",
+      "properties": {
+        "action": {
+          "const": "push"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": {}
+    }
+  ],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "init",
+        "branch",
+        "commit",
+        "discard",
+        "win",
+        "stack",
+        "ref",
+        "show",
+        "push"
+      ],
+      "description": "init, branch, discard, win, stack and push are hill-climb's; commit is a writer's; ref and show are read-only, show for the reviewer and hill-climb, ref for any caller."
+    },
+    "caller": {
+      "type": "string",
+      "enum": [
+        "hill-climb",
+        "writer",
+        "reviewer"
+      ],
+      "description": "Who asks: hill-climb (tpu-agent), a writer (tpu-pallas, a code arm), or the reviewer (tpu-critical-review)."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The campaign repo, e.g. `./.work/<MODEL_DIR>/hill-climb/<job-id>/plugin`, which init creates; or a copy of the pinned image's plugin tree on this host, e.g. `/workspace/vllm-torchtpu`, which init uses in place.",
+      "pattern": "^(?!-)(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9._/-]+$"
+    },
+    "image": {
+      "type": "string",
+      "minLength": 1,
+      "description": "init: the pinned image, by digest.",
+      "pattern": "^(?!-)[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$"
+    },
+    "profile": {
+      "type": "string",
+      "minLength": 1,
+      "description": "init: the compute profile the probe job runs on; unused for a host copy.",
+      "pattern": "^(?!-)(?!.*\\.\\.)[A-Za-z0-9._-]+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "branch, discard, win: the hypothesis branch `hyp/<rank>-<slug>`. stack: the new branch. push: the image name.",
+      "pattern": "^(?!-)(?!.*\\.\\.)[A-Za-z0-9._/-]+$"
+    },
+    "from": {
+      "type": "string",
+      "minLength": 1,
+      "description": "branch: the commit to branch from. Default `stack`.",
+      "pattern": "^(?!-)(?!.*\\.\\.)[A-Za-z0-9._/-]+$"
+    },
+    "worktree": {
+      "type": "string",
+      "minLength": 1,
+      "description": "commit: the worktree whose plugin changes are committed.",
+      "pattern": "^(?!-)(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9._/-]+$"
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "description": "commit: the commit message: the lever and the job ids that measured it. Written to a file and committed with `git commit -F`, never interpolated into a command."
+    },
+    "what": {
+      "type": "string",
+      "enum": [
+        "test",
+        "hypothesis"
+      ],
+      "description": "discard: `test` tags the branch head `tried/<slug>/<n>` and resets it one commit; `hypothesis` tags it `discarded/<slug>` and removes the branch and its worktree."
+    },
+    "branches": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!-)(?!.*\\.\\.)[A-Za-z0-9._/-]+$"
+      },
+      "description": "stack: the branches cherry-picked onto base, in order."
+    },
+    "ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ref, show: the branch, tag or commit.",
+      "pattern": "^(?!-)(?!.*\\.\\.)[A-Za-z0-9._/-]+$"
+    },
+    "against": {
+      "type": "string",
+      "minLength": 1,
+      "description": "show: the commit the diff is taken from. Default `base`.",
+      "pattern": "^(?!-)(?!.*\\.\\.)[A-Za-z0-9._/-]+$"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace; the probe job's slot is booked in it."
+    }
+  },
+  "examples": [
+    {
+      "action": "commit",
+      "caller": "writer",
+      "repo": "./.work/GLM-5.2-FP8/hill-climb/j-0a1b/plugin",
+      "worktree": "./.work/GLM-5.2-FP8/hill-climb/j-0a1b/hyp-2-rpa",
+      "message": "rpa: fused decode kernel, block 256 (j-0a1b2c3d-7777)",
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "action": "init",
+      "caller": "hill-climb",
+      "repo": "./.work/GLM-5.2-FP8/hill-climb/j-0a1b/plugin",
+      "image": "us-docker.pkg.dev/p/r/vllm-tpu@sha256:3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a",
+      "profile": "v6e-gke",
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "action": "discard",
+      "caller": "hill-climb",
+      "repo": "./.work/GLM-5.2-FP8/hill-climb/j-0a1b/plugin",
+      "name": "hyp/2-rpa",
+      "what": "test",
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}

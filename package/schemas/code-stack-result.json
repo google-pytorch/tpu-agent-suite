@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "code-stack-result.json",
+  "title": "tpu-code-stack Result",
+  "description": "Output payload of the tpu-code-stack agent. `recorded` owes what its action returns (the `oneOf`); every other status says why the repo did not change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "run_id"
+  ],
+  "status_requires": {
+    "recorded": [
+      "action"
+    ],
+    "skipped": [
+      "reason"
+    ],
+    "conflict": [
+      "reason",
+      "conflicts"
+    ],
+    "refused": [
+      "reason"
+    ],
+    "blocked": [
+      "reason"
+    ],
+    "invalid_input": [
+      "missing"
+    ]
+  },
+  "oneOf": [
+    {
+      "description": "recorded commit, win, stack or ref: the plugin",
+      "properties": {
+        "status": {
+          "const": "recorded"
+        },
+        "action": {
+          "enum": [
+            "commit",
+            "win",
+            "stack",
+            "ref"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "plugin"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "recorded init or branch: the branch and its worktree",
+      "properties": {
+        "status": {
+          "const": "recorded"
+        },
+        "action": {
+          "enum": [
+            "init",
+            "branch"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "plugin",
+        "worktree"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "recorded discard: the tag",
+      "properties": {
+        "status": {
+          "const": "recorded"
+        },
+        "action": {
+          "const": "discard"
+        }
+      },
+      "required": [
+        "action",
+        "tag"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "recorded show: log, diff and tags",
+      "properties": {
+        "status": {
+          "const": "recorded"
+        },
+        "action": {
+          "const": "show"
+        }
+      },
+      "required": [
+        "action",
+        "log",
+        "diff_path",
+        "tags"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "recorded push: the image",
+      "properties": {
+        "status": {
+          "const": "recorded"
+        },
+        "action": {
+          "const": "push"
+        }
+      },
+      "required": [
+        "action",
+        "image"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "description": "not recorded",
+      "properties": {
+        "status": {
+          "enum": [
+            "skipped",
+            "conflict",
+            "refused",
+            "blocked",
+            "invalid_input",
+            "failed"
+          ]
+        }
+      },
+      "additionalProperties": {}
+    }
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "recorded",
+        "skipped",
+        "conflict",
+        "refused",
+        "blocked",
+        "invalid_input",
+        "failed"
+      ],
+      "description": "'recorded': the action ran and the repo holds its result. 'skipped': push could not run here (no registry, docker or git, no `image` command, or a backend without the field); `reason` says which. 'conflict': a cherry-pick or rebase conflicted and was aborted; the repo is unchanged. 'refused': the caller may not take this action, or the change touches files outside the plugin, does not descend from base, or is empty. 'blocked': the image's plugin is not a clean git checkout (probe exit 7), or no slot could be claimed for the probe. 'invalid_input': the request cannot be run as given; every gap is in `missing`. 'failed': git or a job failed. The fields each status owes are declared in `status_requires`."
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "init",
+        "branch",
+        "commit",
+        "discard",
+        "win",
+        "stack",
+        "ref",
+        "show",
+        "push"
+      ],
+      "description": "The action the request asked for."
+    },
+    "summary": {
+      "type": "string",
+      "description": "What changed in the repo, or why nothing did."
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "base_sha",
+        "ref",
+        "sha",
+        "patch"
+      ],
+      "description": "The ref as one diff from base, the shape every arm's `plugin` takes: commit, branch and init the branch's head, win the new stack, stack the new branch, ref the ref asked for.",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The campaign repo."
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "`base`: the image's own vllm_torchtpu commit."
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The branch or tag, e.g. `stack`, `hyp/2-moe-gate`."
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "The commit `ref` names now."
+        },
+        "patch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "`git diff base..sha`, written beside the repo's work dir in `patches/`: the one patch a job applies, so it replays without the repo."
+        }
+      }
+    },
+    "worktree": {
+      "type": "string",
+      "minLength": 1,
+      "description": "init: the repo's own work dir, on `stack`. branch: the new worktree, on the branch."
+    },
+    "tag": {
+      "type": "string",
+      "minLength": 1,
+      "description": "discard: the tag made, `tried/<slug>/<n>` or `discarded/<slug>`."
+    },
+    "log": {
+      "type": "string",
+      "description": "show: `git log --oneline` from `against` to `ref`."
+    },
+    "diff_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "show: the diff from `against` to `ref`, written beside the repo's work dir."
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "show: the `tried/` and `discarded/` tags of the ref's slug."
+    },
+    "image": {
+      "type": "string",
+      "minLength": 1,
+      "description": "push: the pushed image, by digest."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "skipped, refused, blocked, conflict: why, verbatim where a tool printed it."
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "conflict: the files both sides changed."
+    },
+    "missing": {
+      "type": "array",
+      "description": "Inputs the caller must add, when status is 'invalid_input'.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "reason"
+        ],
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "Diagnostic message when status is 'failed'."
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace."
+    }
+  },
+  "examples": [
+    {
+      "status": "recorded",
+      "action": "commit",
+      "summary": "Committed the fused decode kernel on hyp/2-rpa.",
+      "plugin": {
+        "repo": "./.work/GLM-5.2-FP8/hill-climb/j-0a1b/plugin",
+        "base_sha": "0123456789abcdef0123456789abcdef01234567",
+        "ref": "hyp/2-rpa",
+        "sha": "89abcdef0123456789abcdef0123456789abcdef",
+        "patch": "./.work/GLM-5.2-FP8/hill-climb/j-0a1b/patches/hyp-2-rpa-89abcde.patch"
+      },
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "conflict",
+      "action": "win",
+      "summary": "hyp/3-rope conflicts with stack; aborted.",
+      "reason": "cherry-pick of 4d5e6f7 conflicts",
+      "conflicts": [
+        "vllm_torchtpu/layers/rope.py"
+      ],
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "skipped",
+      "action": "push",
+      "summary": "No image registry configured; stack not pushed.",
+      "reason": "IMAGE_REGISTRY_NOT_CONFIGURED",
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}
