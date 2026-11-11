@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pallas-result.json",
+  "title": "tpu-pallas Result",
+  "description": "Output payload of the tpu-pallas agent: a kernel commit on the gap's branch, on the requested stack head, with its verdict against the incumbent, or why there is none. The full report stays on disk in `final_report`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "run_id"
+  ],
+  "status_requires": {
+    "patched": [
+      "verdict",
+      "plugin",
+      "applies_to",
+      "final_report"
+    ],
+    "at_floor": [
+      "final_report"
+    ],
+    "invalid_input": [
+      "missing"
+    ]
+  },
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "patched",
+        "at_floor",
+        "invalid_input",
+        "blocked",
+        "failed"
+      ],
+      "description": "'patched': a candidate was committed, measured and apply-checked on the stack head. 'at_floor': the baseline is within the gate of its floor and the fusion prize is under noise, so no kernel is warranted; tpu-critical-review's stop review agreed. 'invalid_input': the request cannot be run as given; every gap is in `missing`. 'blocked': the fix lies outside the vllm_torchtpu plugin, no slot could be claimed, or the kernel cannot be lowered after the stop review's continuation. 'failed': infrastructure failed past the relaunch limit, or the apply check exited 4 (`base mismatch`: the ref's base is not the image's plugin commit). Every slot claimed is released before any of them is returned."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Verdict and per-phase speedup in one line."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "win",
+        "tie",
+        "loss",
+        "invalid"
+      ],
+      "description": "Against the verbatim incumbent, whole-call, per phase, on the stack head. 'win': faster above noise in some phase, no phase regressed, tpu-critical-review passed. 'tie': within noise. 'loss': slower in a phase. 'invalid': the oracle or tpu-critical-review rejected the claim."
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "base_sha",
+        "ref",
+        "sha",
+        "patch"
+      ],
+      "description": "The kernel: the gap's branch and the commit tpu-code-stack made of tpu-pallas's kernel on it, `patch` its `git diff base..sha` (final/kernel_patch.diff).",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The campaign repo (references/common/plugin-git.md)."
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "`base`: the image's own vllm_torchtpu commit."
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The branch or tag measured, e.g. `stack`, `hyp/2-moe-gate`."
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "The commit `ref` named when it was measured."
+        },
+        "patch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "`git diff base..sha` as plugin_source.py diff wrote it: the one patch the job applies, kept so the arm replays without the repo."
+        }
+      }
+    },
+    "applies_to": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "stack_sha",
+        "exit_code",
+        "job_id"
+      ],
+      "description": "The apply check: `plugin.patch` applied on the stack head's image in a compute job, and apply_vllm_patch.sh's exit code for it.",
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stack_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "The `stack` commit the kernel commit descends from."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            0
+          ],
+          "description": "0 applied. Exit 4 is status `failed` with failure_reason `base mismatch`, never a verdict."
+        },
+        "job_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "carried": {
+      "type": "array",
+      "description": "Findings that are not kernel changes, each with its owner, including the end-to-end accuracy check a win still owes when it was not run here.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "final_report": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path of final/final_report.md."
+    },
+    "missing": {
+      "type": "array",
+      "description": "What the caller must change, when status is 'invalid_input'.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "reason"
+        ],
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "What stopped the campaign, when status is 'blocked' or 'failed'."
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace."
+    }
+  },
+  "examples": [
+    {
+      "status": "patched",
+      "summary": "win: decode_last 1.31x, decode_first 1.18x, prefill 1.00x; applies on the stack head.",
+      "verdict": "win",
+      "plugin": {
+        "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+        "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+        "ref": "hyp/2-rpa",
+        "sha": "a7b0c3d6e9f2a5b8c1d4e7f0a3b6c9d2e5f8a1b4",
+        "patch": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-pallas/rpa-g02/final/kernel_patch.diff"
+      },
+      "applies_to": {
+        "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+        "stack_sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+        "exit_code": 0,
+        "job_id": "j-5a6b7c8d-0000-4111-8222-333344445555"
+      },
+      "carried": [
+        "end-to-end mmlu_pro on the stacked image -> caller (tpu-serving-bench eval)"
+      ],
+      "final_report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-pallas/rpa-g02/final/final_report.md",
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "blocked",
+      "summary": "The relayout the gap needs is in torch_tpu, outside the vllm_torchtpu plugin.",
+      "failure_reason": "fix outside plugin: the copy is emitted by torch_tpu's lowering of index_select, which no vllm_torchtpu patch reaches.",
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}

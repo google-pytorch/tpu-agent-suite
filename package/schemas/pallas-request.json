@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tpu-pallas Request",
+  "description": "Input payload for the tpu-pallas agent: build or tune a Pallas/Mosaic TPU kernel for one block of a served vLLM job and return it as a commit on the gap's branch of the campaign repo, on the given stack head. Every input the kernel method needs is required; a missing one fails validation rather than becoming a question.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "block",
+    "checkout",
+    "model",
+    "cell",
+    "mesh",
+    "precisions",
+    "target",
+    "stack_head",
+    "floor",
+    "diagnosis",
+    "budget",
+    "run_id"
+  ],
+  "properties": {
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "function"
+      ],
+      "description": "The block of compute, or the existing kernel to beat, inside the vllm_torchtpu plugin.",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path relative to the checkout root, under vllm_torchtpu/."
+        },
+        "function": {
+          "type": "string",
+          "minLength": 1
+        },
+        "incumbent_kernel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional file:function of the kernel production runs today, when it differs from the block."
+        }
+      }
+    },
+    "checkout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "branch",
+        "revision"
+      ],
+      "description": "A worktree of the campaign repo on the gap's branch, where the kernel is committed.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The gap's branch, e.g. `hyp/2-rpa`."
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "The `stack` commit the branch starts from: `stack_head.plugin.sha`."
+        }
+      }
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "HuggingFace model id, org included."
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "isl",
+        "osl",
+        "concurrency"
+      ],
+      "description": "The deployment cell. The agent derives the kernel's shapes from it; a caller-supplied shape is a hypothesis.",
+      "properties": {
+        "isl": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "osl": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "serving_flags": {
+          "type": "string",
+          "description": "Optional VLLM_SERVER_CMD or flag string that shapes the phases (page size, max batch, mnbt, cache dtype)."
+        }
+      }
+    },
+    "mesh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tp",
+        "dp",
+        "ep",
+        "topology"
+      ],
+      "description": "Sharding degrees and the slice. The kernel sees one device's slice.",
+      "properties": {
+        "tp": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dp": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ep": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "topology": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Slice topology, e.g. 2x2x1."
+        }
+      }
+    },
+    "precisions": {
+      "type": "array",
+      "description": "Storage, movement and accumulation dtype per operand.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operand",
+          "storage",
+          "movement",
+          "accumulation"
+        ],
+        "properties": {
+          "operand": {
+            "type": "string",
+            "minLength": 1
+          },
+          "storage": {
+            "type": "string",
+            "minLength": 1
+          },
+          "movement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accumulation": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chip",
+        "hardware"
+      ],
+      "description": "The TPU the kernel serves on and the slots its jobs claim.",
+      "properties": {
+        "chip": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Chip type, e.g. tpu7x."
+        },
+        "hardware": {
+          "type": "string",
+          "minLength": 1,
+          "description": "tpu_slots hardware key; every slot is claimed with --hardware set to it."
+        }
+      }
+    },
+    "stack_head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "plugin"
+      ],
+      "description": "The current stack head: the pinned image and branch `stack` of the campaign repo. The returned kernel commit descends from it.",
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Image pinned by digest."
+        },
+        "plugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repo",
+            "base_sha",
+            "ref",
+            "sha",
+            "patch"
+          ],
+          "description": "Branch `stack`; at `base` before the first win, with an empty patch.",
+          "properties": {
+            "repo": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The campaign repo (references/common/plugin-git.md)."
+            },
+            "base_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "`base`: the image's own vllm_torchtpu commit."
+            },
+            "ref": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The branch or tag measured, e.g. `stack`, `hyp/2-moe-gate`."
+            },
+            "sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "The commit `ref` named when it was measured."
+            },
+            "patch": {
+              "type": "string",
+              "minLength": 1,
+              "description": "`git diff base..sha` as plugin_source.py diff wrote it: the one patch the job applies, kept so the arm replays without the repo."
+            }
+          }
+        }
+      }
+    },
+    "floor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_path",
+        "summary"
+      ],
+      "description": "The gap's modelled floor, as tpu-roofline returned it.",
+      "properties": {
+        "result_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "diagnosis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report_path",
+        "summary"
+      ],
+      "description": "Why the block costs more than its floor, as tpu-diagnostics reported it.",
+      "properties": {
+        "report_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobs"
+      ],
+      "description": "The most TPU jobs the campaign may launch, apply check included.",
+      "properties": {
+        "jobs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace. The agent claims its slots from this run's parallel.json."
+    }
+  },
+  "examples": [
+    {
+      "block": {
+        "file": "vllm_torchtpu/attention/ops/ragged_paged_attention.py",
+        "function": "ragged_paged_attention"
+      },
+      "checkout": {
+        "path": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/hyp-2-rpa",
+        "branch": "hyp/2-rpa",
+        "revision": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9"
+      },
+      "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+      "cell": {
+        "isl": 8192,
+        "osl": 1024,
+        "concurrency": 64
+      },
+      "mesh": {
+        "tp": 1,
+        "dp": 8,
+        "ep": 8,
+        "topology": "2x2x1"
+      },
+      "precisions": [
+        {
+          "operand": "kv_cache",
+          "storage": "fp8_e4m3fn",
+          "movement": "fp8_e4m3fn",
+          "accumulation": "fp32"
+        }
+      ],
+      "target": {
+        "chip": "tpu7x",
+        "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a"
+      },
+      "stack_head": {
+        "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+        "plugin": {
+          "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+          "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+          "ref": "stack",
+          "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+          "patch": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/bench/2-rpa-stack.patch"
+        }
+      },
+      "floor": {
+        "result_path": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/roofline/g02.json",
+        "summary": "decode_last attention floor 41us, HBM bound."
+      },
+      "diagnosis": {
+        "report_path": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/diagnostics/g02.md",
+        "summary": "Single-buffered KV DMA; 38% of the kernel is DMA wait."
+      },
+      "budget": {
+        "jobs": 12
+      },
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}

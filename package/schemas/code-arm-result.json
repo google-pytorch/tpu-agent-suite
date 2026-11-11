@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "code-arm-result.json",
+  "title": "tpu-code-arm Result",
+  "description": "Output payload of the tpu-code-arm agent: a vllm_torchtpu commit on the gap's branch with the probes behind it, an evidenced refutation, or why there is neither.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "run_id"
+  ],
+  "status_requires": {
+    "changed": [
+      "plugin",
+      "evidence"
+    ],
+    "refuted": [
+      "evidence"
+    ],
+    "blocked": [
+      "reason"
+    ],
+    "invalid_input": [
+      "missing"
+    ]
+  },
+  "oneOf": [
+    {
+      "description": "changed: outputs match, the op is faster, the review passed",
+      "properties": {
+        "status": {
+          "const": "changed"
+        },
+        "evidence": {
+          "required": [
+            "probe_jobs",
+            "commits",
+            "op_before_ms",
+            "op_after_ms",
+            "outputs_match",
+            "review"
+          ],
+          "properties": {
+            "outputs_match": {
+              "const": true
+            }
+          },
+          "additionalProperties": {}
+        }
+      },
+      "additionalProperties": {}
+    },
+    {
+      "description": "every other status",
+      "properties": {
+        "status": {
+          "enum": [
+            "refuted",
+            "blocked",
+            "invalid_input",
+            "failed"
+          ]
+        }
+      },
+      "additionalProperties": {}
+    }
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "changed",
+        "refuted",
+        "blocked",
+        "invalid_input",
+        "failed"
+      ],
+      "description": "'changed': the change is committed, the plugin imports, the op's outputs match the incumbent's and it is faster than it by more than the larger of noise_floor_pct and the probes' spreads; tpu-critical-review passed the claim. 'refuted': the outputs do not match, or the plugin does not import, after one fix; or the op is not faster above that threshold. 'blocked': the fix needs something outside the vllm_torchtpu plugin, tpu-code-stack refused the commit, no slot could be claimed, or tpu-critical-review did not pass the claim. 'invalid_input': the request cannot be run as given; every gap is in `missing`. 'failed': infrastructure failed past the relaunch limit, or a probe's applier exited 4 (`base mismatch`), never `refuted`. Every slot claimed is released before any of them is returned."
+    },
+    "summary": {
+      "type": "string",
+      "description": "The change and the op's before and after in one line."
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "base_sha",
+        "ref",
+        "sha",
+        "patch"
+      ],
+      "description": "The change: the gap's branch and the commit tpu-code-stack made of it, `patch` its `git diff base..sha`.",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The campaign repo (references/common/plugin-git.md)."
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "`base`: the image's own vllm_torchtpu commit."
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The branch or tag measured, e.g. `stack`, `hyp/2-moe-gate`."
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "The commit `ref` named when it was measured."
+        },
+        "patch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "`git diff base..sha` as plugin_source.py diff wrote it: the one patch the job applies, kept so the arm replays without the repo."
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_jobs"
+      ],
+      "description": "What the probes measured, on the stack head's image, against the incumbent (the stack head's own plugin).",
+      "properties": {
+        "probe_jobs": {
+          "type": "array",
+          "description": "Every probe job id, incumbent and candidate.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "commits": {
+          "type": "array",
+          "description": "Every commit the arm made on the gap's branch, in order; the caller discards one test per entry.",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "op_before_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The op's time per occurrence on the incumbent (measured)."
+        },
+        "op_after_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The op's time per occurrence on the candidate (measured)."
+        },
+        "outputs_match": {
+          "type": "boolean",
+          "description": "The op's outputs match the incumbent's on the gap's shapes."
+        },
+        "review": {
+          "type": "string",
+          "minLength": 1,
+          "description": "tpu-critical-review's report for the `kind: claim` review."
+        }
+      }
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Why the arm is blocked."
+    },
+    "missing": {
+      "type": "array",
+      "description": "What the caller must change, when status is 'invalid_input'.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "reason"
+        ],
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "What failed, when status is 'failed'."
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace."
+    }
+  },
+  "examples": [
+    {
+      "status": "changed",
+      "summary": "One sorted gather in _gather_tokens: moe_gather 61.0 -> 38.4 us per occurrence, outputs bitwise equal.",
+      "plugin": {
+        "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+        "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+        "ref": "hyp/3-moe-gather",
+        "sha": "d4e7f0a3b6c9d2e5f8a1b4c7d0e3f6a9b2c5d8e1",
+        "patch": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/patches/hyp-3-moe-gather-d4e7f0a.patch"
+      },
+      "evidence": {
+        "probe_jobs": [
+          "j-6c7d8e9f-0000-4111-8222-333344445555",
+          "j-6c7d8e9f-6666-4777-8888-99990000aaaa"
+        ],
+        "commits": [
+          "d4e7f0a3b6c9d2e5f8a1b4c7d0e3f6a9b2c5d8e1"
+        ],
+        "op_before_ms": 0.061,
+        "op_after_ms": 0.0384,
+        "outputs_match": true,
+        "review": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/3-moe-gather-critical.md"
+      },
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "refuted",
+      "summary": "The sorted gather reorders tokens the combine step reads in expert order: outputs differ after one fix.",
+      "evidence": {
+        "probe_jobs": [
+          "j-6c7d8e9f-0000-4111-8222-333344445555",
+          "j-6c7d8e9f-6666-4777-8888-99990000aaaa",
+          "j-6c7d8e9f-bbbb-4ccc-8ddd-eeeeffff0000"
+        ],
+        "op_before_ms": 0.061,
+        "outputs_match": false
+      },
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "blocked",
+      "summary": "The copy is emitted by torch_tpu, outside the vllm_torchtpu plugin.",
+      "reason": "fix outside plugin: torch_tpu's lowering of index_select emits the copy.",
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}
