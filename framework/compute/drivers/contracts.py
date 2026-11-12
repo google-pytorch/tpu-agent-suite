@@ -56,6 +56,7 @@ class HardwareProfile:
     details: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """The fields as a JSON-ready dict."""
         return dataclasses.asdict(self)
 
 
@@ -68,6 +69,7 @@ class SynchronousExecutionResult:
     details: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """The fields as a JSON-ready dict."""
         return dataclasses.asdict(self)
 
 
@@ -76,7 +78,8 @@ class SynchronousExecutionResult:
 # wait. Absent means the driver does not know, which also reads as wait.
 PENDING_QUEUED = "queued"  # a queue holds it and admits in order
 PENDING_STARTING = "starting"  # on a node, pulling or starting
-PENDING_ADMITTED_NO_NODE = "admitted_no_node"  # a queue admitted it; no node fits
+# A queue admitted it; no node fits.
+PENDING_ADMITTED_NO_NODE = "admitted_no_node"
 PENDING_UNSCHEDULED = "unscheduled"  # no node, no queue: no claim on chips
 PENDING_REASONS = frozenset({
     PENDING_QUEUED, PENDING_STARTING, PENDING_ADMITTED_NO_NODE,
@@ -100,6 +103,7 @@ class AsynchronousExecutionResult:
     details: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """The fields as a JSON-ready dict."""
         return dataclasses.asdict(self)
 
 
@@ -134,4 +138,5 @@ class PreflightReport:
         return next((s for s in ("fail", "warn") if s in statuses), "ok")
 
     def to_dict(self) -> dict[str, Any]:
+        """The fields and the overall `status` as a JSON-ready dict."""
         return {**dataclasses.asdict(self), "status": self.status}

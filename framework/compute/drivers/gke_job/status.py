@@ -253,9 +253,11 @@ def job_pods(kube: Kubectl, job_id: str) -> list[dict[str, Any]]:
 
 
 def pick_live_pod(pods: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The pod to read: Running, else Pending, else the first one. In a
-    multi-host Job, the leader's (index 0), which serves and prints the
-    result."""
+    """The pod to read: Running, else Pending, else the first one.
+
+    In a multi-host Job, the leader's (index 0), which serves and prints the
+    result.
+    """
     ranked = {"Running": 0, "Pending": 1}
     return min(
         pods,
@@ -268,8 +270,11 @@ def pick_live_pod(pods: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def _lagging_host(pods: list[dict[str, Any]],
                   hosts: int) -> tuple[int, dict[str, Any] | None] | None:
-    """The first of `hosts` indexes with no pod Running (or done), and its
-    pod if it has one; None when every host is up."""
+    """The first of `hosts` indexes with no pod Running (or done), and its pod.
+
+    The pod is None if the index has none; the result is None when every
+    host is up.
+    """
     up = {
         pod_index(pod)
         for pod in pods

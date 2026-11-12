@@ -162,8 +162,11 @@ class TestGkeJobInspect(unittest.TestCase):
         }
 
     def _node_pull(self, image, policy=None, driver=None, **responses):
-        """Preflight of `image` on a gke_* context, with the TPU nodes in
-        pool 'tpu-pool' running as the default Compute Engine account."""
+        """Preflight of `image` on a gke_* context.
+
+        The TPU nodes in pool 'tpu-pool' run as the default Compute Engine
+        account.
+        """
         pools = [{
             "name": "tpu-pool",
             "config": {
@@ -222,8 +225,11 @@ class TestGkeJobInspect(unittest.TestCase):
             self.assertEqual(checks["image:node_pull"].status, "ok", member)
 
     def test_preflight_node_pull_picks_a_scaled_down_pool_by_topology(self):
-        """No TPU nodes to name the pool: the pool of that topology, or with
-        none of that topology, a generic account rather than every pool's."""
+        """No TPU nodes to name the pool: the pool of that topology.
+
+        With none of that topology, a generic account rather than every
+        pool's.
+        """
         pools = json.dumps([{
             "placementPolicy": {
                 "tpuTopology": "2x2x1"
@@ -248,8 +254,10 @@ class TestGkeJobInspect(unittest.TestCase):
             self.assertNotIn("cpu@x", checks["image:node_pull"].detail)
 
     def test_preflight_reachability(self):
-        """A cluster that never answers is not a credentials problem, and
-        nothing is asked of it; one that answers flags only what is unset."""
+        """A cluster that never answers is not a credentials problem.
+
+        Nothing is asked of it; one that answers flags only what is unset.
+        """
         report, checks, _ = self._preflight({
             "version": (1, "", "Unable to connect to the server: context "
                         "deadline exceeded")
@@ -386,8 +394,8 @@ class TestGkeJobInspect(unittest.TestCase):
         self.assertIn("-n ns", " ".join(fake.find("get pvc hf-cache")))
 
     def test_preflight_judges_an_unusable_hf_cache_pvc(self):
-        # A missing claim leaves every Job naming it Pending, so the
-        # installer must flag it before anything is written.
+        # A missing claim leaves every Job naming it Pending, so preflight
+        # must flag it before a Job is submitted.
         pending = self._pvc(phase="Pending")
         forbidden = (1, "", "Error from server (Forbidden)")
         cases = [
@@ -425,10 +433,13 @@ class TestGkeJobInspect(unittest.TestCase):
                                   " ".join(fake.find("get storageclass")))
 
     def test_a_pool_with_no_node_still_reports_the_profiles_tpu(self):
-        """Review on #840: an autoscaled pool at zero nodes read as
-        `accelerator: none`, leaving a CPU preflight Job nothing to plan for
-        and TP nothing to be sized to. What the profile names is reported in
-        `details`, and the top-level fields still say no node is there."""
+        """Review on #840: a pool scaled to zero read as `accelerator: none`.
+
+        An autoscaled pool at zero nodes left a CPU preflight Job nothing to
+        plan for and TP nothing to be sized to. What the profile names is
+        reported in `details`, and the top-level fields still say no node is
+        there.
+        """
         fake = FakeKubectl({"get nodes": (0, json.dumps({"items": []}), "")})
         with patch.object(gke_job.manifest,
                           "_chip_spec",

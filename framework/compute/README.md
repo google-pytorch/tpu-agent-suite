@@ -85,7 +85,7 @@ These flags are supported across all `compute` actions:
 - `--backend <backend>`: Explicitly select or override the compute backend (e.g. `--backend gce_tpu_vm`).
 - `--workspace <path>`: Workspace root whose `.tpu-agent-suite/environment.json` is consulted (default: the current directory or, outside any workspace with an active run, the workspace of the run leased to this session).
 - `--package <name@version>`: Package whose `environment.json` supplies the configuration. Every `{{runtime}} compute` in a compiled instruction carries this automatically; only hand-typed invocations need to pass it.
-- `--interpreter <path>`: Optional path to Python interpreter (e.g. `/opt/conda/bin/python`).
+- `--interpreter <path>` (`run`, `submit` and `versions` only): Optional path to Python interpreter (e.g. `/opt/conda/bin/python`).
 - `--json`: Format output as JSON (supported by every subcommand for structured agent parsing).
 
 Backend-specific flags registered by drivers (e.g. `--tpu-name`, `--zone`, `--project`, `--pod`, `--namespace`) can also be passed directly on the CLI and outrank configured values.
@@ -281,8 +281,8 @@ uses the run's profile, so it can still be cancelled.
 **ADC retry** (`gke_pod`, `gke_job`): if the cluster refuses the gcloud
 account, kubectl is retried once with application default credentials: a token
 from `gcloud auth application-default print-access-token`, passed to gcloud
-(and so `gke-gcloud-auth-plugin`) as `CLOUDSDK_AUTH_ACCESS_TOKEN`, as
-`eval/run.py` does for `GKE_AUTH_ACCOUNT=adc`. If ADC works, the rest of
+(and so `gke-gcloud-auth-plugin`) as `CLOUDSDK_AUTH_ACCESS_TOKEN`. If ADC
+works, the rest of
 the command uses it and preflight adds a `credentials:adc` warning. If ADC is
 refused too, or there is none, preflight fails the `cluster` check and compute
 commands raise `CLUSTER_ACCESS_DENIED`, naming both identities and the fix.
@@ -640,10 +640,10 @@ To add a new compute driver to the package, create a module in `framework/comput
 import argparse
 from pathlib import Path
 from typing import Any
-from . import base
+from . import base, registry
 
 
-@base.register_driver("my_backend")
+@registry.register_driver("my_backend")
 class MyBackendDriver(base.ComputeDriver):
   # The one declaration of what a complete profile needs. `--target` is
   # marked required in generated docs because it is listed here.
@@ -663,7 +663,7 @@ class MyBackendDriver(base.ComputeDriver):
 
   @classmethod
   def register_cli_args(cls, parser: Any) -> None:
-    # Do not pass `default=`: see "Flag defaults" above.
+    # Do not pass `default=`: see "Flag defaults" below.
     cls.add_cli_arg(
         parser,
         "--target",

@@ -18,7 +18,8 @@
 - every JSON schema it ships is a valid schema,
 - every harness in `compatibility_targets` is supported,
 - the strict content checks pass: links in instructions and references
-  resolve, and the environment contract holds,
+  resolve, the environment contract holds, and no instruction, reference or
+  memory block spells out an installed asset path,
 - Python dependencies live only in `requirements-client.txt` and
   `requirements-tpu.txt`, and every dependency the package declares is listed
   there with a version.
@@ -73,7 +74,8 @@ def verify_package(
     for req_file in package_dir.rglob("*requirements*.txt"):
         rel_path = req_file.relative_to(package_dir)
         if package_discovery.dist_excluded(rel_path):
-            continue  # never ships (pinned source checkouts under raw/code, tool state)
+            # Never ships (pinned source checkouts under raw/code, tool state).
+            continue
         if req_file.resolve() not in allowed_reqs:
             raise utils.TpuAgentSuiteError(
                 f"Scattered requirements file found at '{rel_path}'. "

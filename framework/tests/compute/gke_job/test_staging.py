@@ -97,8 +97,11 @@ class TestGkeJobStaging(unittest.TestCase):
         return client, blob
 
     def test_iam_signing_failure_names_the_missing_role(self):
-        """A GCE/GKE identity has no key; it is refreshed for its real
-        email and token, and those go to the IAM signBlob path."""
+        """A GCE/GKE identity has no key.
+
+        It is refreshed for its real email and token, and those go to the IAM
+        signBlob path.
+        """
 
         class GceCreds:
             service_account_email = "default"
@@ -166,8 +169,10 @@ class TestGkeJobStaging(unittest.TestCase):
         self.assertEqual(checks[0].status, "ok")
 
     def test_preflight_does_not_ask_a_pod_token_setup_to_sign(self):
-        """With pod_service_account nothing is signed, so a
-        person's login, which cannot sign, is not a warning."""
+        """With pod_service_account nothing is signed.
+
+        So a person's login, which cannot sign, is not a warning.
+        """
         with self._fake_storage(_UserCreds()) as (_, blob):
             checks = gcs_staging.preflight_checks("b",
                                                   pod_service_account="ksa")
@@ -247,8 +252,11 @@ class TestGkeJobStaging(unittest.TestCase):
 
     @unittest.skipUnless(_google_auth_errors, "needs google-auth")
     def test_credentials_that_will_not_refresh_cannot_sign(self):
-        """An ambient identity whose token cannot be had, off GCE or with
-        no network: a ComputeConfigError, which callers fall back on."""
+        """An ambient identity whose token cannot be had: a ComputeConfigError.
+
+        This happens off GCE or with no network; callers fall back on the
+        error.
+        """
 
         class AmbientCreds:
             service_account_email = "default"
@@ -301,9 +309,10 @@ class TestGkeJobStaging(unittest.TestCase):
     def test_run_stages_with_its_own_credential(self, mock_upload, mock_sign,
                                                 mock_download, mock_delete,
                                                 mock_creds, mock_client):
-        """With a staging credential configured, every staging
-        call acts as it, and nothing sets $GOOGLE_APPLICATION_CREDENTIALS
-        for kubectl to inherit."""
+        """With a staging credential configured, every staging call acts as it.
+
+        Nothing sets $GOOGLE_APPLICATION_CREDENTIALS for kubectl to inherit.
+        """
         mock_sign.return_value = "https://storage.googleapis.com/test-url"
         client = mock_client.return_value
         fake = self._finished_job()
@@ -497,8 +506,10 @@ class TestGkeJobSmallFiles(unittest.TestCase):
                 outputs=[base.StagedFile(str(self.tmp / "p"), "p.tgz")])
 
     def test_an_output_too_large_for_the_log_asks_for_a_pod_upload(self):
-        """A bucket set, but ADC that cannot sign, lost a 20 MiB
-        profile, and the error asked for the bucket that was already set."""
+        """A bucket set, but ADC that cannot sign, lost a 20 MiB profile.
+
+        The error asked for the bucket that was already set.
+        """
         refused = ComputeConfigError("cannot sign",
                                      error_code="SIGNING_UNSUPPORTED")
         with patch.object(gcs_staging,
@@ -517,8 +528,10 @@ class TestGkeJobSmallFiles(unittest.TestCase):
         self.assertEqual(res.details["setup_fields"], ["staging_bucket"])
 
     def test_artifacts_lost_in_the_log_fail_with_why_at_submit(self):
-        """The reason is the one recorded at submit: a bucket set since then
-        would not have helped that Job."""
+        """The reason is the one recorded at submit.
+
+        A bucket set since then would not have helped that Job.
+        """
         jobs.JobRecord.create(job_id="run-1",
                               backend="gke_job",
                               extra={
@@ -592,8 +605,10 @@ class TestGkeJobSmallFiles(unittest.TestCase):
         all(shutil.which(t) for t in ("bash", "base64", "sha256sum")),
         "needs bash, base64 and sha256sum")
     def test_bootstrap_sends_outputs_when_the_pod_is_stopped(self):
-        """SIGTERM (a timeout, a preemption) reaches the workload, and its
-        outputs come back before the grace period's SIGKILL."""
+        """SIGTERM (a timeout, a preemption) reaches the workload.
+
+        Its outputs come back before the grace period's SIGKILL.
+        """
         mount = self.tmp / "mount"
         mount.mkdir()
         (mount / "job.py").write_text("import time\n"
@@ -623,8 +638,10 @@ class TestGkeJobSmallFiles(unittest.TestCase):
             for t in ("bash", "base64", "sha256sum", "curl", "sed")),
         "needs bash, base64, sha256sum, curl and sed")
     def test_bootstrap_frames_an_output_the_bucket_refuses(self):
-        """An upload that fails comes back in the log and its GCS copy; so
-        does one with no Workload Identity token to send."""
+        """An upload that fails comes back in the log and its GCS copy.
+
+        So does one with no Workload Identity token to send.
+        """
         mount = self.tmp / "mount"
         mount.mkdir()
         (mount / "job.py").write_text("open('r.bin', 'wb').write(b'res')\n")
@@ -686,8 +703,10 @@ class TestGcsStagingBucket(unittest.TestCase):
 
 
 class TestGkeJobWorkloadIdentity(unittest.TestCase):
-    """With `pod_service_account`, the pod moves staged files
-    with its own Workload Identity token, so nothing has to be signed."""
+    """With `pod_service_account`, the pod moves staged files itself.
+
+    It uses its own Workload Identity token, so nothing has to be signed.
+    """
 
     @patch.object(gcs_staging, "CONFIGMAP_MAX_BYTES", 0)
     def test_submit_runs_the_pod_as_the_account_and_signs_nothing(self):
@@ -727,9 +746,11 @@ class TestGkeJobWorkloadIdentity(unittest.TestCase):
 
 
 class TestGkeJobPodToken(unittest.TestCase):
-    """With a staging bucket and no pod_service_account, the pod gets a GCS
-    token limited to its own folder and the bucket's checkpoints, in a Secret
-    the Job owns."""
+    """With a staging bucket and no pod_service_account, the pod gets a token.
+
+    It is a GCS token limited to its own folder and the bucket's
+    checkpoints, in a Secret the Job owns.
+    """
 
     TOKEN = "fake-pod-token-value"
 
@@ -785,8 +806,10 @@ class TestGkeJobPodToken(unittest.TestCase):
 
 
 class TestPodTokenRules(unittest.TestCase):
-    """What a pod token may reach: read/write under one folder, read-only
-    under others, nothing else."""
+    """What a pod token may reach.
+
+    Read/write under one folder, read-only under others, nothing else.
+    """
 
     def test_the_minted_token_carries_those_rules(self):
         # A prefix without its slash would let job-1 reach job-10/; an empty

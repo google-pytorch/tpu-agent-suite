@@ -39,10 +39,11 @@ class RegistryTest(unittest.TestCase):
                                                 "PreToolUse", "hk")
 
     def test_registry_matches_the_mapping_tables(self):
-        """A name in the tables but not the registry (or vice versa) is a
-        half-added harness; the registry alone decides what is supported.
-        Each table on its own: a block missing from one makes every lookup in
-        it empty."""
+        """A name in the tables or the registry alone is a half-added harness.
+
+        The registry alone decides what is supported. Each table on its own: a
+        block missing from one makes every lookup in it empty.
+        """
         for loader in (utils.get_tool_mappings, utils.get_event_mappings):
             table_names: set[str] = set()
             for entry in loader().values():

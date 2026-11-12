@@ -82,8 +82,9 @@ def _translate_hook_reply(
     """Translate a hook result into the reply expected by the firing native event.
 
     When a SubagentStop hook fires via a hand-back tool call (e.g. PreToolUse on
-    `send_message`), its verdict must be formatted as a permission decision for
-    that tool event rather than a native SubagentStop reply.
+    Claude Code's `SubagentHandback`), its verdict must be formatted as a
+    permission decision for that tool event rather than a native SubagentStop
+    reply.
     """
     if canonical_event == "SubagentStop" and events.is_handback_event(
             normalized_event):
@@ -212,7 +213,8 @@ def hook_dispatch_startup_failure(hints: dict[str, str | None],
                 kind="startup")
             print(json.dumps(response), flush=True)
             return code
-    except Exception as exc:  # noqa: BLE001 - the exit code still carries the policy
+    # BLE001: the exit code still carries the policy.
+    except Exception as exc:  # noqa: BLE001
         reason = f"{reason} (no reply could be shaped: {type(exc).__name__}: {exc})"
     print(
         f"runtime: [{hook_name}] hook failed (startup): {reason}; "
@@ -335,7 +337,8 @@ def _dispatch_hook_body(
                                          canonical_event, hook_name,
                                          normalized_event), 0
 
-    # 3. Matcher filtering (for harnesses that do not filter all events natively)
+    # 3. Matcher filtering (for harnesses that do not filter all events
+    #    natively)
     if matcher and matcher != "*":
         target = ""
         if canonical_event == "SubagentStop":
@@ -363,9 +366,9 @@ def _dispatch_hook_body(
 
     # 4. Execute hook action (with multi-subagent batch handling)
 
-    # If the harness invokes multiple subagents in a single call (e.g. the Google harnesses'
-    # Subagents array), run the hook for each subagent. If some are denied, filter them out via
-    # PreToolUse 'overwrite'.
+    # If the harness invokes multiple subagents in a single call (e.g. the
+    # Google harnesses' Subagents array), run the hook for each subagent. If
+    # some are denied, filter them out via PreToolUse 'overwrite'.
     subs_list = []
     subagents_key = None
     if normalized_event.get("tool") == "delegate":
@@ -436,7 +439,8 @@ def _dispatch_hook_body(
 
             if matched_sub_k:
                 subagent_name = str(sub_entry[matched_sub_k])
-                # Set both the canonical event envelope metadata and the tool call arg bag.
+                # Set both the canonical event envelope metadata and the tool
+                # call arg bag.
                 sub_event["subagent"] = subagent_name
                 sub_event["args"]["subagent"] = subagent_name
             if matched_prompt_k:
@@ -464,7 +468,8 @@ def _dispatch_hook_body(
                 deny_reasons.append(
                     f"{label}: {sub_res.get('reason', 'denied')}")
             else:
-                # If hook returned updated_args, reflect updates back to the subagent entry
+                # If hook returned updated_args, reflect updates back to the
+                # subagent entry
                 up_args = sub_res.get("updated_args")
                 if isinstance(up_args, dict):
                     updated_entry = dict(sub_entry)
@@ -483,7 +488,8 @@ def _dispatch_hook_body(
                 or "All subagents were denied",
             }
         elif deny_reasons:
-            # Partial allowance: allow tool call but overwrite with only allowed subagents
+            # Partial allowance: allow tool call but overwrite with only
+            # allowed subagents
             canonical_result = {
                 "decision": "allow",
                 "reason":
@@ -536,7 +542,7 @@ def _dispatch_hook_body(
     if adaptor is not None and dispatch_ctx is not None:
         adaptor.after_dispatch(dispatch_ctx, canonical_result)
 
-    # 4. Translate to target harness format
+    # 5. Translate to target harness format
     harness_response = _translate_hook_reply(
         canonical_result,
         harness,

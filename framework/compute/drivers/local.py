@@ -47,17 +47,19 @@ class LocalDriver(base.ComputeDriver):
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> LocalDriver:
+        """Build the driver; only `python_interpreter` is read, and optional."""
         return cls(python_interpreter=params.get("python_interpreter"))
 
     @classmethod
     def register_cli_args(cls, parser: Any) -> None:
-        pass
+        """Add nothing: the local backend has no flags of its own."""
 
     def inspect(self) -> base.HardwareProfile:
         """Probe local hardware for TPU chips, topology, and availability."""
         return shell.profile_from_dict(probe.probe_host(), {})
 
     def describe_target(self) -> str:
+        """This host, by hostname."""
         return f"this host ({socket.gethostname()})"
 
     def _preflight_target(self, checks: list[base.PreflightCheck]) -> bool:

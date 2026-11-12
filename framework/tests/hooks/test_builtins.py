@@ -190,8 +190,8 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         Supplying the context run_id to the validator alone would let the
         delegation through while the subagent still receives a prompt without
         one. It cannot recover it either: subagents bypass SessionStart, so the
-        prompt is their only source, and five shipped result schemas require
-        the value. The denial has to land on the caller, which holds the
+        prompt is their only source, and several shipped result schemas
+        require the value. The denial has to land on the caller, which holds the
         run_id and can resend.
         """
         run_id = "20260913T120000Z-abcdef123456"

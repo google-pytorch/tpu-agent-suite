@@ -225,8 +225,10 @@ class TestBackgroundIdleGate(unittest.TestCase):
             bg_ledger.ledger_dir(self.SESSION, self.PARENT).parent.exists())
 
     def test_pause_on_a_headless_run_is_refused_with_the_live_handles(self):
-        """Headless (`sdk-cli`), nothing resumes the agent: the stop is final
-        and refused. An unset variable refuses the same way."""
+        """Headless (`sdk-cli`), nothing resumes the agent: the stop is refused.
+
+        The stop is final. An unset variable refuses the same way.
+        """
         self._record_launches()
         stderr = io.StringIO()
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}), \
@@ -286,8 +288,11 @@ class TestBackgroundIdleGate(unittest.TestCase):
         self.assertEqual(self._ledger(), sorted([self.CHILD, self.SHELL]))
 
     def test_an_unfilable_launch_is_a_logged_failure_not_a_silent_allow(self):
-        """A launch the recorder cannot file would read as idle at the stop,
-        so it is raised; the dispatcher logs it and on_failure still allows."""
+        """A launch the recorder cannot file is raised.
+
+        It would otherwise read as idle at the stop; the dispatcher logs it
+        and on_failure still allows.
+        """
         payload = self._launch_agent()
         del payload["session_id"]
         stderr = io.StringIO()

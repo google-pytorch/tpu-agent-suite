@@ -19,7 +19,7 @@ shaped this way, is in [`docs/design/`](../docs/design/README.md).
 
 The framework is organized into distinct, specialized tools and modules:
 
-1. **`compiler.py`** *(CI / Build)*: The CLI that verifies a package and builds it for each harness. The build code lives in **`builder/`** (`package_loader`, `package_discovery`, `package_checks`, `tokens`, `prompt_contracts`, `harness_rules`, `hook_config`, `translators`, `dist_assets`, `verify`). Other code should use its public API (`load_package`, `verify_package`, `translate`, ...), exported from `builder/__init__.py`.
+1. **`compiler.py`** *(CI / Build)*: The CLI that verifies a package and builds it for each harness. The build code lives in **`builder/`** (`package_loader`, `package_discovery`, `package_checks`, `tokens`, `prompt_contracts`, `harness_rules`, `hook_config`, `translators`, `dist_assets`, `verify`, `overlays`). Other code should use its public API (`load_package`, `verify_package`, `translate`, ...), exported from `builder/__init__.py`.
 2. **`installer.py`** *(User Host)*: Distribution installation, environment setup, and uninstallation rollback.
 3. **`runtime.py`** *(Target Workspace)*: CLI entry point invoked by installed hooks and agents. Implementation is split across `hooks/`, `agent_contracts.py`, and `run_state.py`.
 4. **`hooks/`** *(Target Workspace)*: What `runtime.py hook-dispatch` runs for each harness event: `events.py` turns the harness payload into a canonical event, `dispatch.py` filters it and translates the reply, and `actions.py` runs the hook script, command or builtin.
@@ -182,9 +182,9 @@ what `package.release.json` releases.
 Packages declare all tools at the top level of `package.release.json`. Tool names must be globally unique across categories:
 
 1. **`native_tools`**: Standard portable harness primitives (`read`, `write`, `edit`, `search`, `shell`). **Optional** — when a package omits this key entirely, the compiler injects the standard catalog from `definitions/native_tools.json`. Most packages rely on that default and never declare it.
-2. **`scripts`**: Executables shipped in the package, specifying `visibility` (`internal` | `external`) and paired `action_level` (`effect` + `scope`).
+2. **`script_tools`**: Executables shipped in the package, specifying `visibility` (`internal` | `external`) and paired `action_level` (`effect` + `scope`).
 3. **`mcp_servers`**: Model Context Protocol servers with `visibility` and `action_level`.
-4. **`hooks`**: Declarative lifecycle hooks (`PreToolUse`, `PostToolUse`, `SubagentStop`, `SessionStart`) executing runtime actions or custom guard scripts.
+4. **`hooks`**: Declarative lifecycle hooks (`PreToolUse`, `PostToolUse`, `SubagentStop`, `SessionStart`, `Stop`, `SessionEnd`) executing runtime actions or custom guard scripts.
 
 An agent's `tools` list must be a subset of the names declared this way;
 `verify` rejects any agent referencing an undeclared tool.
@@ -237,7 +237,7 @@ Packages declare lifecycle hooks using portable primitives. Hooks can be declare
 2. **Command Hooks (`command: "<command>"`)**: A direct shell command, utility, pipeline, or inline script (e.g., `git diff --quiet`, `flake8`, or `python3 -c "..."`).
 
 At runtime, the embedded hook dispatcher (`runtime.py hook-dispatch`) wraps both types into a unified cross-harness lifecycle:
-- **Normalized Inbound Payload**: Normalizes inbound payloads from Claude Code, Antigravity (`agy`), and Cursor into a single unified JSON schema on `stdin`.
+- **Normalized Inbound Payload**: Normalizes inbound payloads from Claude Code, Codex, Antigravity (`agy`), and Cursor into a single unified JSON schema on `stdin`.
 - **Deterministic Working Directory**: Always executes hook actions with the target **workspace root** as `cwd`, avoiding harness-specific working directory discrepancies (such as `.agent/` vs `.`).
 - **Timeout Enforcement**: Enforces an execution timeout (`--timeout <seconds>`, defaulting to 10s or configured via `timeout` in `package.release.json`). If hook execution exceeds the timeout, the child process is terminated and the hook is settled by its `on_failure` policy (below). The harness itself is registered with the declared timeout plus `HOOK_DISPATCH_HEADROOM_S` (5s), so the dispatcher's verdict reaches the harness before the harness gives up on the hook and kills it.
 - **Batched Delegations**: When one tool call delegates to several subagents at once (Antigravity's `invoke_subagent` with more than one entry in `Subagents`), each `PreToolUse` hook runs once per subagent, concurrently, each run under the hook's own timeout, so the batch fits the same harness budget as a single call. Subagents the hook denies are removed from the call and the rest proceed; if it denies all of them, the call is denied. A hook script may therefore run alongside other copies of itself, and must be safe to do so.

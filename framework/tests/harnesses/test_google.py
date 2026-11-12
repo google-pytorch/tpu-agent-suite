@@ -164,8 +164,12 @@ class GoogleHarnessTest(unittest.TestCase):
     @mock.patch("framework.compute.reap_jobs")
     def test_subagent_stop_disambiguation_and_reap_bypass(
             self, mock_reap_jobs):
-        """A subagent finishing arrives on the same Stop; it is classified as
-        SubagentStop (including nested toolCall metadata) and never reaps."""
+        """A subagent's Stop is classified as SubagentStop and never reaps.
+
+        A subagent finishing arrives on the same Stop event as the root; it is
+        still classified as SubagentStop, including from nested toolCall
+        metadata.
+        """
         nested = {
             "conversationId": "sess-1",
             "toolCall": {

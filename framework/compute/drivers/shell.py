@@ -17,8 +17,8 @@
 the target and how they move files to and from it. Everything else -- the
 launch wrapper, the pid/exit-code status protocol, log retrieval, artifact
 copy-back, and cancellation -- is identical, so it lives here once. A subclass
-supplies three primitives (`_sh`, `_copy_in`, `_copy_out`), a `JOB_ROOT`, and
-its own `inspect()`.
+supplies four primitives (`_sh`, `_copy_in`, `_copy_out`, `_copy_out_file`), a
+`JOB_ROOT`, and its own `inspect()`.
 """
 
 from __future__ import annotations
@@ -148,6 +148,7 @@ class RemoteShellDriver(base.ComputeDriver):
     - how to run a  shell script on the target (`_sh`)
     - how to put a file there (`_copy_in`)
     - how to get a file from there (`_copy_out`)
+    - how to get one file from there (`_copy_out_file`)
     - how to inspect the target (`inspect`)
 
     `RemoteShellDriver` provides the following:
@@ -354,8 +355,9 @@ class RemoteShellDriver(base.ComputeDriver):
         spawned its own children -- an autotune sweep is exactly that -- leaves
         them holding the accelerator when only the parent dies.
 
-        Returns: a sentence for the caller's stderr, since this runs on a path
-        that has already failed and must not raise a second time.
+        Returns:
+            a sentence for the caller's stderr, since this runs on a path that
+            has already failed and must not raise a second time.
         """
         quoted = shlex.quote(pidfile)
         script = (f"if [ ! -f {quoted} ]; then echo NO_PIDFILE; exit 0; fi; "
@@ -564,8 +566,7 @@ def _started(pid: str) -> str:
 
 
 def _live_pid(quoted_dir: str) -> str:
-    """Shell that sets PID from pid.txt, and LIVE only if it is still the job.
-    """
+    """Shell setting PID from pid.txt, and LIVE only if it is still the job."""
     return (
         f"PID=$(cat {quoted_dir}/pid.txt); LIVE=; "
         f"if kill -0 $PID 2>/dev/null && {{ "

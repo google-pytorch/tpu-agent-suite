@@ -27,7 +27,7 @@ class Cursor(base.Harness):
     display_name = "Cursor"
     config_dir = ".cursor"
 
-    # --- runtime: outbound -------------------------------------------------
+    # Runtime: outbound.
     #
     # A refusal is `decision: cancel`, except on SubagentStop, which carries
     # a `followup_message` back to the subagent instead. `message` goes to
@@ -54,26 +54,33 @@ class Cursor(base.Harness):
         return response
 
     def reply_session_start(self, reply: base.HookReply) -> dict[str, Any]:
+        """Cancel on deny; otherwise forward `additional_context`."""
         return self._cancel_or_empty(reply, with_context=True)
 
     def reply_subagent_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """On deny, a `followup_message` sending the subagent back."""
         if reply.is_deny:
             return {"followup_message": reply.effective_reason}
         return {}
 
     def reply_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """Cancel on retry or deny; otherwise reply with nothing."""
         if reply.decision in ("retry", "deny"):
             return self._cancel(reply)
         return {}
 
     def reply_pre_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """Cancel on deny; otherwise reply with nothing."""
         return self._cancel_or_empty(reply)
 
     def reply_post_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """Cancel on deny; otherwise forward `additional_context`."""
         return self._cancel_or_empty(reply, with_context=True)
 
     def reply_session_end(self, reply: base.HookReply) -> dict[str, Any]:
+        """Cancel on deny; otherwise reply with nothing."""
         return self._cancel_or_empty(reply)
 
     def reply_unknown_event(self, reply: base.HookReply) -> dict[str, Any]:
+        """Cancel on deny; otherwise reply with nothing."""
         return self._cancel_or_empty(reply)

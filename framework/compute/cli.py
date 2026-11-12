@@ -137,7 +137,7 @@ def target_versions(package: str | None,
     recorded and for which image. Unknown is never a guess from this
     machine, whose packages need not be the target's.
     """
-    env, path = _environment(package, workspace)
+    env, path = _environment_or_empty(package, workspace)
     try:
         profiles, _ = config.normalize_environment_profiles(env)
         name, _ = config.resolve_profile_name(env, profile, run_id)
@@ -272,7 +272,7 @@ LAST_CHECK_FILE = "compute-preflight.json"
 SETUP_GUIDE = Path(__file__).resolve().parent / "compute-setup.md"
 
 
-def _environment(
+def _environment_or_empty(
         package: str | None,
         workspace: Path | str | None) -> tuple[dict[str, Any], Path | None]:
     """The package's environment.json and its path; ({}, None) if there is none."""
@@ -355,7 +355,7 @@ def _check_configured_target(
     Returns the report, or None if the check didn't finish.
     """
     env_hash = _profile_hash(
-        _environment(package, workspace)[0], profile, run_id)
+        _environment_or_empty(package, workspace)[0], profile, run_id)
     report = _within_budget(lambda: driver.preflight().to_dict(), budget,
                             "compute check")
     if report is None:
@@ -520,8 +520,11 @@ def _failed_message(package: str | None, name: str,
 def check_target_at_session_start(package: str | None,
                                   workspace: Path | str | None, run_id: str,
                                   hook_timeout: float) -> str | None:
-    """The session-start note: this machine's missing software, if any,
-    then the compute setup state (`_compute_state_note`)."""
+    """The session-start note for the agent, or None if there is nothing to say.
+
+    This machine's missing software, if any, then the compute setup state
+    (`_compute_state_note`).
+    """
     missing = setup.host_requirements_note()
     compute_note = _compute_state_note(package, workspace, run_id,
                                        hook_timeout)
@@ -540,7 +543,7 @@ def _compute_state_note(package: str | None, workspace: Path | str | None,
     says compute is ready, a failure reads as FAILED. None without an
     environment.json.
     """
-    env, path = _environment(package, workspace)
+    env, path = _environment_or_empty(package, workspace)
     if path is None:
         return None
     try:
@@ -605,7 +608,7 @@ def _recheck_if_environment_changed(args: argparse.Namespace) -> None:
     workspace = getattr(args, "workspace", None)
     profile = getattr(args, "profile", None)
     current = _profile_hash(
-        _environment(package, workspace)[0], profile, run_id)
+        _environment_or_empty(package, workspace)[0], profile, run_id)
     if current is None or current == _last_checked_hash(run_id):
         return
     print(
@@ -703,16 +706,16 @@ def _action_run(driver: ComputeDriver, args: argparse.Namespace) -> int:
 
 
 def _adopt_session(args: argparse.Namespace) -> None:
-    """Point `args` at the session's leased run and workspace, unless
-    `--workspace` is set.
+    """Point `args` at the session's leased run and workspace.
 
-    The active-run marker is one file per workspace, so with two sessions
-    open there it names whichever started last, and the other's `job list`
-    and `job reap` would act on a run not theirs. The lease names the harness
-    process, so when there is one it wins wherever the cwd is: inside the
-    workspace, in /tmp, or in another workspace, since a job launched from
-    this session is this session's to reap. To act on another workspace's
-    run, pass `--workspace` or `--run-id`.
+    Does nothing when `--workspace` is set. The active-run marker is one
+    file per workspace, so with two sessions open there it names whichever
+    started last, and the other's `job list` and `job reap` would act on a
+    run not theirs. The lease names the harness process, so when there is
+    one it wins wherever the cwd is: inside the workspace, in /tmp, or in
+    another workspace, since a job launched from this session is this
+    session's to reap. To act on another workspace's run, pass `--workspace`
+    or `--run-id`.
     """
     if getattr(args, "workspace", None) is not None:
         return
@@ -910,8 +913,7 @@ def _action_port_forward(driver: ComputeDriver,
 
 def _missing_declared_outputs(record: jobs.JobRecord | None,
                               out_dir: Path) -> list[str]:
-    """Declared `--output` files of a job that are not in `out_dir` after a fetch.
-    """
+    """Declared `--output` files of a job missing from `out_dir` after a fetch."""
     declared = record.extra.get("outputs") if record else None
     if not declared:
         return []
@@ -1430,8 +1432,9 @@ def handle_compute_cli(
     """Execute compute CLI subcommands (inspect, run, submit, job).
 
     Extracts a positive whitelist of parameters registered by compute drivers,
-    resolves the appropriate ComputeDriver via 3-tier precedence, and executes
-    the specified subaction.
+    resolves the appropriate ComputeDriver (CLI flags over the package's
+    compute profile; see `config.resolve_driver`), and executes the
+    specified subaction.
 
     Args:
         args: Parsed runtime arguments.

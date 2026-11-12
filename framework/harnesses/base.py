@@ -68,6 +68,7 @@ class HookReply:
 
     @property
     def is_deny(self) -> bool:
+        """Whether the hook refused (`decision` is `deny`)."""
         return self.decision == "deny"
 
     @property
@@ -133,7 +134,7 @@ class Harness:
             return handback
         return None
 
-    # --- runtime: inbound -------------------------------------------------
+    # Runtime: inbound.
 
     # Whether a SubagentStop without a subagent name is logged to stderr.
     # True when nameless stops come from internal helper agents; False when
@@ -190,7 +191,7 @@ class Harness:
         """Whether `event_payload` marks the actual end of the root session."""
         return event_payload.get("event") == "SessionEnd"
 
-    # --- runtime: dispatch lifecycle --------------------------------------
+    # Runtime: dispatch lifecycle.
 
     def before_dispatch(self, ctx: DispatchContext) -> HookReply | None:
         """A canonical reply to render without running the hook, or None."""
@@ -202,7 +203,7 @@ class Harness:
         """Record any per-turn state after the hook action has produced its verdict."""
         del ctx, canonical_result
 
-    # --- runtime: outbound -------------------------------------------------
+    # Runtime: outbound.
 
     # Whether the hook's `message` is announced on stderr before the reply.
     # True for harnesses whose reply has no field for it; Claude Code carries
@@ -233,21 +234,31 @@ class Harness:
         return self.reply_unknown_event(reply)
 
     def reply_pre_tool_use(self, reply: HookReply) -> dict[str, Any]:
+        """The reply before a tool runs: allow or refuse the call.
+
+        May forward `updated_args` (when set) as the call's rewritten
+        arguments, where the harness supports it.
+        """
         raise NotImplementedError(f"{self.name}: PreToolUse")
 
     def reply_post_tool_use(self, reply: HookReply) -> dict[str, Any]:
+        """The reply after a tool ran: flag a refusal or add `context`."""
         raise NotImplementedError(f"{self.name}: PostToolUse")
 
     def reply_subagent_stop(self, reply: HookReply) -> dict[str, Any]:
+        """The reply as a subagent finishes: let it stop or send it back."""
         raise NotImplementedError(f"{self.name}: SubagentStop")
 
     def reply_session_start(self, reply: HookReply) -> dict[str, Any]:
+        """The reply as a session starts: inject `context` or refuse it."""
         raise NotImplementedError(f"{self.name}: SessionStart")
 
     def reply_stop(self, reply: HookReply) -> dict[str, Any]:
+        """The reply as the agent stops: allow it, or block on retry or deny."""
         raise NotImplementedError(f"{self.name}: Stop")
 
     def reply_session_end(self, reply: HookReply) -> dict[str, Any]:
+        """The reply as a session ends."""
         raise NotImplementedError(f"{self.name}: SessionEnd")
 
     def reply_unknown_event(self, reply: HookReply) -> dict[str, Any]:

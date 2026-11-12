@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the session lifecycle: the start-run compute check and lease,
-and the SessionEnd reap hook.
+"""Unit tests for the session lifecycle.
+
+Covers the start-run compute check and lease, and the SessionEnd reap hook.
 """
 
 import contextlib

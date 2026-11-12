@@ -30,8 +30,9 @@ import sys
 from typing import Any, Sequence
 
 # Run as a script, this file has its own directory on sys.path, not the one
-# that holds the framework package: in the repository the root, in a distribution
-# or the central store the package directory. Add it, so `framework` imports.
+# that holds the framework package: in the repository the root, in a
+# distribution or the central store the package directory. Add it, so
+# `framework` imports.
 _PACKAGE_ROOT = str(pathlib.Path(__file__).resolve().parents[1])
 if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
@@ -53,9 +54,7 @@ safe_relative = utils.safe_relative
 validate_package_name = utils.validate_package_name
 version_satisfies = utils.version_satisfies
 
-# =====================================================================
-# Harness Detection & File Expansion
-# =====================================================================
+# Harness Detection & File Expansion.
 
 
 def check_harness(plan: dict[str, Any]) -> str:
@@ -132,9 +131,7 @@ def expand_copies(
     return expanded
 
 
-# =====================================================================
-# Ownership Management & Rollback
-# =====================================================================
+# Ownership Management & Rollback.
 
 
 def prune_empty_parents(destination: Path, owned: Sequence[str]) -> None:
@@ -315,8 +312,8 @@ def rollback_action(destination: Path, action: dict[str, Any]) -> None:
 
 
 # Central-store reference counting. The central store holds ONE immutable
-# copy of each name@version (~/.tpu-agent-suite/packages/<name>@<version>/) shared
-# by every workspace that installs it. To know when that copy may be
+# copy of each name@version (~/.tpu-agent-suite/packages/<name>@<version>/)
+# shared by every workspace that installs it. To know when that copy may be
 # deleted, each version directory carries a .refs.json ledger listing the
 # absolute paths of the workspaces using it: install appends the workspace
 # (register_central_ref), uninstall removes it (release_central_ref), and
@@ -459,9 +456,7 @@ def remove_owned(destination: Path,
     return modified
 
 
-# =====================================================================
-# Install & Uninstall Operations
-# =====================================================================
+# Install & Uninstall Operations.
 
 
 def warn_if_workspace_not_discoverable(
@@ -910,10 +905,9 @@ def summarize_installation(
     for merge in memory_merges:
         print(f"  Added a managed block to {destination / merge['path']}.")
 
-    # Claude Code and Codex installs pre-authorize ~/.tpu-agent-suite through their
-    # harness config; harnesses without a config writer need a one-time grant.
-    # Cursor is listed for when its package target becomes buildable -- its
-    # install spec writes no config either.
+    # Claude Code and Codex installs pre-authorize ~/.tpu-agent-suite through
+    # their harness config; harnesses without a config writer need a one-time
+    # grant. Cursor's install spec writes no config either.
     if harness == "cursor" or harnesses.is_google_harness(harness):
         print(
             f"\nNote: package assets and runs live in"

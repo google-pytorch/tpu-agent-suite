@@ -25,7 +25,7 @@ from .contracts import PreflightCheck
 from .errors import ClusterAccessDenied
 
 # gcloud, and so gke-gcloud-auth-plugin, authenticates with this token instead
-# of the active account. eval/run.py sets it the same way for ADC.
+# of the active account.
 ACCESS_TOKEN_ENV = "CLOUDSDK_AUTH_ACCESS_TOKEN"
 
 # kubectl's refusal prefixes, from StandardErrorMessage in kubectl's helpers.go.
@@ -116,13 +116,14 @@ def cluster_check(driver: Any,
                   checks: list[PreflightCheck],
                   kubeconfig: str | None = None,
                   namespace: str = "default") -> bool:
-    """The context, cluster and credential checks a GKE driver's preflight
-    shares, appended to `checks`; True if the cluster answered.
+    """Append the shared GKE context, cluster and credential checks to `checks`.
 
-    `kubectl` is the driver's command prefix, with the --kubeconfig (also
-    passed as `kubeconfig`, so a missing one can be named) and the pinned
-    --context it runs with. The credential checks run whatever happens,
-    since they help explain a cluster that does not answer.
+    Returns True if the cluster answered. These are the checks every GKE
+    driver's preflight shares. `kubectl` is the driver's command prefix,
+    with the --kubeconfig (also passed as `kubeconfig`, so a missing one can
+    be named) and the pinned --context it runs with. The credential checks
+    run whatever happens, since they help explain a cluster that does not
+    answer.
     """
     pinned = base.kube_context_check(kubeconfig, base.pinned_context(kubectl))
     if pinned:
@@ -140,8 +141,10 @@ def cluster_check(driver: Any,
 
 def _cluster(driver: Any, kubectl: list[str], kubeconfig: str | None,
              namespace: str) -> PreflightCheck:
-    """Whether the cluster `kubectl` points at answers and lets this account
-    in, retrying with ADC if it refuses the gcloud account."""
+    """Whether the cluster `kubectl` points at answers and lets this account in.
+
+    Retries with ADC if the cluster refuses the gcloud account.
+    """
     name = base.current_context(kubectl)
     if not name:
         return base.missing_kubeconfig(kubeconfig) or PreflightCheck(

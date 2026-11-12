@@ -187,14 +187,15 @@ class GoogleHarness(base.Harness):
     mapping_key = GOOGLE_HARNESS_MAPPING_KEY
     brain_dir: str  # conversation brains live at `~/.gemini/<brain_dir>/brain`
 
-    # --- runtime: inbound -------------------------------------------------
+    # Runtime: inbound.
     #
     # Stop, SessionEnd, and SubagentStop all ride the native `Stop` event, and
     # `SessionStart` rides per-turn `PreInvocation`. Brain descriptors under
     # `~/.gemini/<brain_dir>/brain` link subagent conversations to their parent
     # and carry subagent names when the payload omits them.
 
-    # Every root-session turn emits a nameless Stop, so logging them floods stderr.
+    # Every root-session turn emits a nameless Stop, so logging them floods
+    # stderr.
     report_nameless_stop = False
 
     def _subagent_descriptor(self,
@@ -217,10 +218,17 @@ class GoogleHarness(base.Harness):
         return matches[0] if matches else None
 
     def parent_session_id(self, session_id: str) -> str | None:
+        """The parent conversation ID: the brain holding the descriptor."""
         descriptor = self._subagent_descriptor(session_id)
         return descriptor.parents[2].name if descriptor else None
 
     def canonical_event(self, event: str, raw_payload: dict[str, Any]) -> str:
+        """`SubagentStop` for a Stop or SessionEnd a subagent fired.
+
+        A subagent is recognized by a subagent name in the payload, a
+        transcript under a subagent worktree, or a brain descriptor for the
+        session. Other events map as in the base adaptor.
+        """
         if event in ("Stop", "SessionEnd"):
             subagent_fields = self.event_mapping("SubagentStop").get(
                 "fields", {})
@@ -253,6 +261,11 @@ class GoogleHarness(base.Harness):
     def resolve_subagent(self,
                          session_id: str,
                          transcript_path: str = "") -> str | None:
+        """The subagent name for a session, or None if it can't be found.
+
+        Returns "subagent" for a transcript under a subagent worktree, else the
+        `typeName` or `role` from the session's brain descriptor.
+        """
         if transcript_path and "/worktrees/subagent-" in transcript_path:
             return "subagent"
         descriptor = self._subagent_descriptor(session_id)
@@ -273,6 +286,7 @@ class GoogleHarness(base.Harness):
         session_id: str = "",
         transcript_path: str = "",
     ) -> tuple[str, Any]:
+        """Resolve a missing name; take missing output from the transcript."""
         if not subagent and (session_id or transcript_path):
             subagent = self.resolve_subagent(session_id, transcript_path) or ""
         if output is None and transcript_path:
@@ -280,19 +294,21 @@ class GoogleHarness(base.Harness):
         return subagent, output
 
     def subagent_was_cut_short(self, event_payload: dict[str, Any]) -> bool:
+        """Whether the stop has a `stop_reason` that is not a completion."""
         args = event_payload.get("args")
         reason = args.get("stop_reason") if isinstance(args, dict) else None
         return bool(reason) and not _termination_reason_in(
             reason, _COMPLETED_SUBAGENT_TERMINATION_REASONS)
 
     def is_session_over(self, event_payload: dict[str, Any]) -> bool:
+        """Whether a SessionEnd is fully idle with a completed reason."""
         if event_payload.get("event") != "SessionEnd":
             return False
         term = event_payload.get("termination", {})
         return (term.get("fully_idle") is True and _termination_reason_in(
             term.get("reason"), _COMPLETED_SESSION_TERMINATION_REASONS))
 
-    # --- runtime: dispatch lifecycle --------------------------------------
+    # Runtime: dispatch lifecycle.
     #
     # Root `Stop` and `SessionEnd` hooks ignore subagent stops riding the
     # shared `Stop` event. `PreInvocation` fires before every model call:
@@ -302,6 +318,7 @@ class GoogleHarness(base.Harness):
 
     def before_dispatch(self,
                         ctx: base.DispatchContext) -> base.HookReply | None:
+        """Allow subagent stops on root hooks; replay later SessionStarts."""
         if (ctx.event in ("Stop", "SessionEnd")
                 and ctx.canonical_event == "SubagentStop"):
             return base.HookReply.allow(ctx.event, ctx.hook_name)
@@ -327,6 +344,7 @@ class GoogleHarness(base.Harness):
 
     def after_dispatch(self, ctx: base.DispatchContext,
                        canonical_result: dict[str, Any]) -> None:
+        """Cache SessionStart context and spool PostToolUse context."""
         if not ctx.session_id:
             return
         if ctx.canonical_event == "SessionStart":
@@ -349,7 +367,7 @@ class GoogleHarness(base.Harness):
                     ctx.package,
                 )
 
-    # --- runtime: outbound -------------------------------------------------
+    # Runtime: outbound.
     #
     # Replies are `decision` verdicts, except SessionStart, which injects
     # `ephemeralMessage` steps. `message` goes to stderr, since no reply
@@ -369,6 +387,7 @@ class GoogleHarness(base.Harness):
         return self._refusal(reply) if reply.is_deny else {}
 
     def reply_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """`continue` on retry, `deny` on deny, otherwise `stop`."""
         # "continue" is what re-enters the loop, and it is the whole point:
         # the conversation survives, so a resumed run picks up where it
         # stopped instead of repeating everything it had already done.
@@ -382,9 +401,11 @@ class GoogleHarness(base.Harness):
         return {"decision": "stop"}
 
     def reply_session_end(self, reply: base.HookReply) -> dict[str, Any]:
+        """The Stop reply, since the family emulates SessionEnd on Stop."""
         return self.reply_stop(reply)
 
     def reply_session_start(self, reply: base.HookReply) -> dict[str, Any]:
+        """`ephemeralMessage` steps for the context and any refusal."""
         inject_steps: list[dict[str, Any]] = []
         if reply.context:
             inject_steps.append({"ephemeralMessage": reply.context})
@@ -396,11 +417,13 @@ class GoogleHarness(base.Harness):
         return {"injectSteps": inject_steps}
 
     def reply_subagent_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """`continue` with the reason on deny; otherwise `allow`."""
         if reply.is_deny:
             return {"decision": "continue", "reason": reply.effective_reason}
         return {"decision": "allow"}
 
     def reply_pre_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """Deny, or allow with rewritten arguments as `overwrite`."""
         if reply.is_deny:
             return self._refusal(reply)
         res: dict[str, Any] = {"decision": "allow"}
@@ -409,7 +432,9 @@ class GoogleHarness(base.Harness):
         return res
 
     def reply_post_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """Deny on deny; otherwise reply with nothing."""
         return self._refuse_or_empty(reply)
 
     def reply_unknown_event(self, reply: base.HookReply) -> dict[str, Any]:
+        """Deny on deny; otherwise reply with nothing."""
         return self._refuse_or_empty(reply)

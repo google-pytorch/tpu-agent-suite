@@ -80,6 +80,7 @@ class GceTpuVmDriver(shell.RemoteShellDriver):
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> GceTpuVmDriver:
+        """Build the driver; tpu_name, zone and project are all required."""
         tpu_name = params.get("tpu_name")
         zone = params.get("zone")
         project = params.get("project")
@@ -105,6 +106,7 @@ class GceTpuVmDriver(shell.RemoteShellDriver):
 
     @classmethod
     def register_cli_args(cls, parser: Any) -> None:
+        """Add `--tpu-name`, `--zone` and `--project`."""
         cls.add_cli_arg(parser,
                         "--tpu-name",
                         help="Cloud TPU VM resource name (gce_tpu_vm)")
@@ -189,12 +191,12 @@ class GceTpuVmDriver(shell.RemoteShellDriver):
         }
 
     def describe_target(self) -> str:
+        """The TPU VM's name, zone and project."""
         return (f"Cloud TPU VM '{self.tpu_name}' (zone {self.zone}, project "
                 f"{self.project})")
 
     def _preflight_target(self, checks: list[base.PreflightCheck]) -> bool:
-        """An active gcloud account, and a TPU VM in the READY state.
-        """
+        """An active gcloud account, and a TPU VM in the READY state."""
         checks.append(base.gcloud_account_check())
         if checks[-1].status == "fail":
             return False

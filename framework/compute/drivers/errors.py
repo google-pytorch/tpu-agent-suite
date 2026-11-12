@@ -29,6 +29,7 @@ class ComputeConfigError(Exception):
         self.error_code = error_code
 
     def to_dict(self) -> dict[str, Any]:
+        """The error as a JSON-ready dict with status, error_code and message."""
         return {
             "status": "error",
             "error_code": self.error_code,
@@ -48,6 +49,7 @@ class ClusterAccessDenied(ComputeConfigError):
         self.fix = fix
 
     def to_dict(self) -> dict[str, Any]:
+        """The base error dict plus the refused identities and the fix."""
         return {
             **super().to_dict(), "identities": self.identities,
             "fix": self.fix
@@ -75,10 +77,12 @@ class NotConfigured(ComputeConfigError):
         self.missing, self.fix = missing, fix
 
     def set_fix(self, fix: str) -> None:
+        """Record the fix command and append it to the message."""
         self.fix = fix
         self.message = f"{self.message} Fix: {fix}"
 
     def to_dict(self) -> dict[str, Any]:
+        """The base error dict plus the missing fields and the fix, if set."""
         return {
             **super().to_dict(), "missing": self.missing,
             **({

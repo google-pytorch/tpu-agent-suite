@@ -63,6 +63,20 @@ repos:
       - --ignore=E501,F841
       - --per-file-ignores=__init__.py:F401
       - --extend-per-file-ignores=package/scripts/tpu-kernel-development/*:F821,package/scripts/tpu-kernel-development/*:F401
+  # Docstrings in framework/ follow the Google convention: a one-line summary
+  # ending in a period, with Args:/Returns: sections only where the signature
+  # is not self-explanatory. `__init__` is covered by its class docstring, and
+  # tests are exempt from needing docstrings, though not from their format.
+  - id: ruff
+    name: ruff (framework docstrings)
+    files: ^framework/
+    args:
+      - --output-format=github
+      - --no-fix
+      - --select=D
+      - --ignore=D105,D107
+      - --config=lint.pydocstyle.convention='google'
+      - --per-file-ignores=framework/tests/*:D1
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v20.1.3
   hooks:

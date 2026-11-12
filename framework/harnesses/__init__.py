@@ -63,9 +63,7 @@ def require(harness: str) -> Harness:
     return adaptor
 
 
-# ---------------------------------------------------------------------------
 # Facades derived from the registry, kept while callers migrate to it.
-# ---------------------------------------------------------------------------
 
 GOOGLE_HARNESSES: frozenset[str] = frozenset(
     name for name, adaptor in HARNESSES.items()

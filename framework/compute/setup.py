@@ -254,8 +254,9 @@ def validate_profile(name: str,
     return result
 
 
-def _environment(package: str | None,
-                 workspace: Path | str | None) -> tuple[dict[str, Any], Path]:
+def _require_environment(
+        package: str | None,
+        workspace: Path | str | None) -> tuple[dict[str, Any], Path]:
     """The installed package's environment.json and its path; never guessed."""
     if not package:
         raise ComputeConfigError(
@@ -304,10 +305,10 @@ def _update_environment(
     Returns `(saved_document, path)`; `saved_document` is None if nothing was
     written.
     """
-    _, path = _environment(package, workspace)
+    _, path = _require_environment(package, workspace)
     with _locked(path.parent):
         # Read again under the lock: another writer may have changed it.
-        existing = _environment(package, workspace)[0]
+        existing = _require_environment(package, workspace)[0]
         profiles, default = config.normalize_environment_profiles(existing)
         # A file from before profiles keeps its settings under `compute`,
         # which reads as no profiles and which the schema rejects. Dropping
@@ -373,7 +374,7 @@ def plan_setup(*,
     """
     if profile:
         _check_profile_name(profile.strip())
-    env, _ = _environment(package, workspace)
+    env, _ = _require_environment(package, workspace)
     profiles, _ = config.normalize_environment_profiles(env)
     name, _ = config.resolve_profile_name(env, profile, run_id)
     stored = profiles.get(name or "", {})
@@ -579,7 +580,7 @@ def config_show(*,
                 run_id: str | None = None,
                 profile_override: str | None = None) -> dict[str, Any]:
     """The profiles, the default, and which profile this run resolves to."""
-    env, path = _environment(package, workspace)
+    env, path = _require_environment(package, workspace)
     profiles, default = config.normalize_environment_profiles(env)
     active, source = config.resolve_profile_name(env, profile_override, run_id)
     results = jsonio.load_json_or_empty(path.parent / paths.VERIFICATION_FILE)
@@ -604,12 +605,12 @@ def config_show(*,
 def set_answers(environment: dict[str, Any], questions: dict[str, dict[str,
                                                                        Any]],
                 answers: dict[str, Any]) -> list[str]:
-    """Store settings outside the compute profiles where their questions put
-    them; a blank answer removes one.
+    """Store settings outside the compute profiles; a blank answer removes one.
 
-    Afterwards a setting is removed if its question would not have been
-    asked: its `when` names a setting whose value (or, if unset, default) is not listed, or that would
-    not have been asked itself. So turning trajectory sharing off also
+    Each setting goes where its question puts it. Afterwards a setting is
+    removed if its question would not have been asked: its `when` names a
+    setting whose value (or, if unset, default) is not listed, or that
+    would not have been asked itself. So turning trajectory sharing off also
     removes its sink, bucket and org. Returns what was removed, with the
     reason. Raises TpuAgentSuiteError for an invalid value.
     """
@@ -777,7 +778,7 @@ def config_set(*,
     if top_level:
         # The Harbor lookup can take seconds, so it runs before the lock
         # rather than holding up every other session's writes.
-        current = _environment(package, workspace)[0]
+        current = _require_environment(package, workspace)[0]
         proposed = copy.deepcopy(current)
         try:
             set_answers(proposed, questions, top_level)
@@ -855,7 +856,7 @@ def config_use(*,
                                  error_code="MISSING_FIELD")
     check(
         config.normalize_environment_profiles(
-            _environment(package, workspace)[0])[0])
+            _require_environment(package, workspace)[0])[0])
     jsonio.write_json(
         run_file, {
             **jsonio.load_json_or_empty(run_file), "compute_profile": target
@@ -949,8 +950,9 @@ def read_answers(answers_arg: str) -> dict[str, Any]:
 
 
 def host_requirements_note() -> str:
-    """'' when this machine meets the package's host requirements, else the
-    message asking the user to install what is missing.
+    """The message asking the user to install missing host requirements.
+
+    '' when this machine meets the package's host requirements.
 
     The installer runs the same check once and only warns, to whoever ran
     it; this is said to the agent at every session start until fixed. A
@@ -985,8 +987,10 @@ def _run_target_check(
         timeout: int = 300,
         out: Any = None
 ) -> tuple[PreflightCheck, dict[str, str | None] | None]:
-    """Run env_check.py on the target and return the result as check `name`,
-    with the package releases the check reported (None if it reported none).
+    """Run env_check.py on the target and return the result as check `name`.
+
+    Also returns the package releases the check reported (None if it
+    reported none).
 
     The requirements are passed as arguments, not as a file, because some
     backends can send a script but not files (gke_job without a staging
@@ -1125,7 +1129,7 @@ def verify_setup(*,
     profile returns INCOMPLETE, as `compute setup apply` does, and nothing
     runs.
     """
-    env, path = _environment(package, workspace)
+    env, path = _require_environment(package, workspace)
     name, source = config.resolve_profile_name(env, profile, run_id)
     if not name:
         raise ComputeConfigError(

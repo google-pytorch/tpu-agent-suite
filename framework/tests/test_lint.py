@@ -89,7 +89,7 @@ class TestLint(_LintTestCase):
             }],
         }
 
-    # --- instruction-links ------------------------------------------------
+    # instruction-links rule.
 
     def test_declared_external_and_runtime_links_are_clean(self):
         """Only links naming an undeclared package file are findings.
@@ -111,7 +111,7 @@ class TestLint(_LintTestCase):
         )
         self.assertEqual(self._run("instruction-links"), [])
 
-    # --- bare-paths -------------------------------------------------------
+    # bare-paths rule.
 
     def _add_agent_b(self, *, delegated_from_a: bool) -> None:
         """A second agent owning `agent_b/references/knobs.md`.
@@ -166,7 +166,7 @@ class TestLint(_LintTestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("not declared", findings[0].detail)
 
-    # --- reference-links --------------------------------------------------
+    # reference-links rule.
 
     def test_link_to_an_undeclared_sibling_is_flagged(self):
         """It resolves on disk, but nothing bundles it, so it dangles at run time."""
@@ -180,7 +180,7 @@ class TestLint(_LintTestCase):
             "agent_a/references/other.md")
         self.assertEqual(self._run("reference-links"), [])
 
-    # --- unused-declarations ----------------------------------------------
+    # unused-declarations rule.
 
     def test_only_a_declaration_nothing_names_is_flagged(self):
         """A file is used when the prompt names it, or a sibling names or imports it.
@@ -204,7 +204,7 @@ class TestLint(_LintTestCase):
         self.assertEqual([f.file for f in findings],
                          ["agent_a/scripts/orphan.py"])
 
-    # --- delegation-consistency -------------------------------------------
+    # delegation-consistency rule.
 
     def test_skill_delegates_are_checked_too(self):
         """A skill that names its delegate in prose declares it silently."""
@@ -225,7 +225,7 @@ class TestLint(_LintTestCase):
         self.assertIn("agent-c", findings[0].detail)
         self.assertIn("does not declare", findings[0].detail)
 
-    # --- compute-contract -------------------------------------------------
+    # compute-contract rule.
 
     def test_compute_contract_accepts_a_nested_subcommands_flag(self):
         """`setup plan --fields` is the runtime's own fix for a missing field."""
@@ -317,7 +317,7 @@ class TestLint(_LintTestCase):
                 "agy-tool", "harness-tool"
             })
 
-    # --- environment-contract ---------------------------------------------
+    # environment-contract rule.
 
     def _setup_environment(self, questions, properties, closed=True):
         self._write(
@@ -383,7 +383,7 @@ class TestLint(_LintTestCase):
         self.assertIn("conditional on 'flavour'", details)
         self.assertNotIn("'zone'", details)
 
-    # --- legacy-imports ---------------------------------------------------
+    # legacy-imports rule.
 
     def test_origin_rooted_imports_are_flagged(self):
         """Including in a companion *_test.py, which no frontmatter declares."""
@@ -406,7 +406,7 @@ class TestLint(_LintTestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("cannot be parsed", findings[0].detail)
 
-    # --- frontmatter-contracts --------------------------------------------
+    # frontmatter-contracts rule.
 
     def test_frontmatter_contract_violations(self):
         valid_rest = ("description: Desc.\naccepts: schemas/in.json\n"
@@ -469,7 +469,7 @@ class XprofOwnershipChecks(_LintTestCase):
             }],
         }
 
-    # --- xplane-access ----------------------------------------------------
+    # xplane-access rule.
 
     def test_script_reading_xplane_proto_is_flagged(self):
         self._declare_script(
@@ -480,13 +480,15 @@ class XprofOwnershipChecks(_LintTestCase):
         self.assertEqual([f.line for f in findings], [1, 2, 3])
         self.assertTrue(all("tpu-diagnostics" in f.detail for f in findings))
 
-    # --- xprof-outside-analyst -------------------------------------------
+    # xprof-outside-analyst rule.
 
     def test_the_analyst_is_known_by_name_wherever_its_prompt_sits(self):
-        """The exemption followed a directory, which the layout by kind
-        removed: the analyst's prompt is `agents/tpu-diagnostics.md` now. A
-        prompt beside it is not exempt -- a shared directory is not
-        ownership."""
+        """The analyst is exempt by name, not by its prompt's directory.
+
+        The exemption followed a directory, which the layout by kind removed:
+        the analyst's prompt is `agents/tpu-diagnostics.md` now. A prompt
+        beside it is not exempt -- a shared directory is not ownership.
+        """
         for name in ("tpu-diagnostics", "agent-a"):
             self._write(f"agents/{name}.md",
                         "Run `xprof get_overview LOGDIR`.")
@@ -495,7 +497,7 @@ class XprofOwnershipChecks(_LintTestCase):
         findings = self._run("xprof-outside-analyst")
         self.assertEqual([f.agent for f in findings], ["agent-a"])
 
-    # --- generic-compute-prose -------------------------------------------
+    # generic-compute-prose rule.
 
     def test_generic_compute_prose_is_flagged(self):
         self._write(

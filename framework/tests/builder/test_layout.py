@@ -184,8 +184,11 @@ class LayoutDiscoveryTest(_LayoutTest):
         self.assertIn("delegates to unknown agents", self._load_error())
 
     def test_skill_to_skill_delegation_is_warned_about(self):
-        """Allowed, and the guide expects it to be rare. A skill built only
-        because another delegates to it gets a second warning."""
+        """Allowed, and the guide expects it to be rare.
+
+        A skill built only because another delegates to it gets a second
+        warning.
+        """
         warnings = package_checks.delegation_warnings(self._load())
         self.assertEqual(len(warnings), 1, warnings)
         self.assertIn("skill 'main' delegates to skill 'aux'", warnings[0])
@@ -274,9 +277,11 @@ class LayoutTranslationTest(_LayoutTest):
             (self.dist / "framework/compute/compute-setup.md").exists())
 
     def test_a_package_file_named_by_path_fails_the_load(self):
-        """A path typed out is read from the workspace, where it is not. The
-        error names the token to write and, since the rule cannot tell a
-        package file from the user's, how to write a workspace path."""
+        """A path typed out is read from the workspace, where it is not.
+
+        The error names the token to write and, since the rule cannot tell a
+        package file from the user's, how to write a workspace path.
+        """
         cases = (
             ("agents/worker.md", "\nThen run `python3 scripts/helper.py`.\n",
              ("agent worker names package files by path",
@@ -302,8 +307,10 @@ class LayoutTranslationTest(_LayoutTest):
                 (self.pkg / rel).write_text(original)
 
     def test_skill_tools_are_checked_as_a_skill(self):
-        """Delegating or not; the twin agent must not report it instead. A
-        harness alias is pointed at its canonical tool."""
+        """Delegating or not; the twin agent must not report it instead.
+
+        A harness alias is pointed at its canonical tool.
+        """
         cases = (
             ("skills/main/SKILL.md", "tools:\n  - read\n",
              "tools:\n  - read\n  - bogus\n", "skill 'main'", "bogus", None),
@@ -342,8 +349,10 @@ class LayoutTranslationTest(_LayoutTest):
                 (self.pkg / rel).write_text(original)
 
     def test_an_unknown_token_kind_fails_the_load(self):
-        """`{{scripts:x}}` matched no pattern, so it shipped as written; the
-        built-in guard once matched [a-z_] only, so a typo slipped by."""
+        """`{{scripts:x}}` matched no pattern, so it shipped as written.
+
+        The built-in guard once matched [a-z_] only, so a typo slipped by.
+        """
         cases = (
             ("\nRun `{{scripts:helper.py}}`.\n",
              ("{{scripts:helper.py}}", "did you mean {{script:...}}?")),

@@ -125,7 +125,8 @@ def skill_tools_enforced(skill: dict[str, Any], harness: str) -> bool:
 
 
 # Tools the skill-tools hook always allows, as the hook sees them (portable
-# names for mapped tools, native names otherwise). None run commands or edit files.
+# names for mapped tools, native names otherwise). None run commands or edit
+# files.
 SKILL_ALWAYS_ALLOWED_TOOLS: dict[str, list[str]] = {
     "claude-code": [
         "delegate",
@@ -258,10 +259,11 @@ def build_harness_hooks_config(
         if harness_event not in hooks_dict[hook_name]:
             hooks_dict[hook_name][harness_event] = []
 
-        # On the Google harnesses, 'PreInvocation', 'PostInvocation', and 'Stop' events
-        # use a flat array of handler objects in hooks.json because they do not target specific tools.
-        # Tool events ('PreToolUse', 'PostToolUse'), as well as other harnesses, require
-        # grouping handlers under a 'matcher' object (e.g. {"matcher": "...", "hooks": [...]}).
+        # On the Google harnesses, 'PreInvocation' and 'Stop' events use a flat
+        # array of handler objects in hooks.json because they do not target
+        # specific tools. Tool events ('PreToolUse', 'PostToolUse'), as well as
+        # other harnesses, require grouping handlers under a 'matcher' object
+        # (e.g. {"matcher": "...", "hooks": [...]}).
         # Wrapping a loop-level handler in a matcher group makes it silently
         # never fire, which is why this is a shape difference and not a detail.
         if harnesses.is_google_harness(harness) and harness_event in (

@@ -103,6 +103,7 @@ def status(hypothesis: dict[str, Any], entries: list[dict[str, Any]]) -> str:
 
 
 def render(entries: list[dict[str, Any]], run_id: str) -> str:
+    """The experiment.md Markdown: a hypothesis table, then the timeline."""
     lines = [
         f"# Experiment journal: run {run_id}", "",
         f"Rendered from `{JOURNAL_FILE}` after every entry; do not edit.", ""
@@ -148,6 +149,7 @@ def _run_dir(run_id: str) -> Path:
 
 
 def read(run_id: str) -> list[dict[str, Any]]:
+    """The run's journal entries, oldest first."""
     return jsonio.read_jsonl(_run_dir(run_id) / JOURNAL_FILE)
 
 

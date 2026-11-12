@@ -14,13 +14,14 @@
 """Content checks for TPU agent suite packages.
 
 `compiler.py verify` shows a package is structurally sound: every declared file
-exists, the delegation graph is acyclic and reachable, tokens resolve. It says
-nothing about the prose inside instruction files, which is where a migrated
+exists, the delegation graph is acyclic and reachable, tokens resolve. That
+says nothing about the prose inside instruction files, which is where a migrated
 package tends to rot -- links that pointed somewhere in the source tree, paths
 left over from the origin build system, references to agents by their old names.
 
-The checks here cover that gap. They are deliberately kept out of `verify`:
-several are heuristics that can produce false positives on legitimate content.
+The checks here cover that gap. Most are kept out of `verify`: several are
+heuristics that can produce false positives on legitimate content. The few
+strict enough to gate on run in `verify` too (`verify.VERIFY_CONTENT_CHECKS`).
 
 Every check returns a list of `Finding`, so callers decide what is fatal.
 """
@@ -41,26 +42,26 @@ parse_frontmatter_document = frontmatter.parse_frontmatter_document
 
 # Markdown inline link: [text](target)
 _LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-# An inline code span, and a package path inside one. package/README.md tells
-# authors to reference bundled files by package-root-relative path rather than
-# by markdown link, so this -- not _LINK -- is the reference style that
-# dominates the prompts, and the code span is as often a whole command
-# (`python3 scripts/tpu-kernel-development/run_autotune.py --payload ...`) as a bare path.
-# Matching inside the span rather than requiring it to be the span is what
-# catches the README's own worked example.
+# An inline code span, and a package path inside one. A package file is named
+# by token (package/README.md), but a path typed out anyway is written in a
+# code span far more often than as a markdown link (_LINK), and the code span
+# is as often a whole command
+# (`python3 scripts/tpu-kernel-development/run_autotune.py --payload ...`) as a
+# bare path. Matching inside the span rather than requiring it to be the span
+# is what catches the command form.
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _PATH_TOKEN = re.compile(
     r"(?<![\w./-])"
     r"([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.(?:py|md|json|txt|ya?ml|sh|toml))"
     r"\b")
 # First path segments that are not package files: `workspace/` is the agent's
-# run directory and `.tpu-agent-suite/` is the install destination. Both are resolved
-# at run time, so neither can be checked against the package root.
+# run directory and `.tpu-agent-suite/` is the install destination. Both are
+# resolved at run time, so neither can be checked against the package root.
 _RUNTIME_PATH_ROOTS = frozenset({"workspace", ".tpu-agent-suite"})
 # A first segment written as a template placeholder the prompt defines itself,
-# e.g. tpu-sharding's `<artifacts> = .tpu-agent-suite/<pkg>/runs/<run_id>/artifacts`. A
-# path rooted at one is unresolvable at lint time by construction, so reporting
-# it as "does not resolve from the package root" is always a false positive.
+# e.g. tpu-sharding's `<artifacts> = {{runs}}/<run_id>/artifacts`. A path rooted
+# at one is unresolvable at lint time by construction, so reporting it as "does
+# not resolve from the package root" is always a false positive.
 _PLACEHOLDER_ROOT = re.compile(r"^<[^/>]+>$")
 # `[label](target)` written inside a code span. `check_instruction_links` owns
 # link targets, and the label is display text rather than a path reference, so
@@ -202,8 +203,9 @@ class Finding:
     def key(self) -> str:
         """Identity for baselining, unchanged when surrounding lines move.
 
-        Returns: `"<check>|<file>|<detail>"`. Deliberately excludes the line
-        number, so an unrelated edit above a finding does not create a new one.
+        Returns:
+            `"<check>|<file>|<detail>"`. Deliberately excludes the line number,
+            so an unrelated edit above a finding does not create a new one.
         """
         return f"{self.check}|{self.file}|{self.detail}"
 
@@ -278,10 +280,10 @@ def _delegate_declarations(
     has already proven the graph acyclic, so `seen` is bookkeeping rather than a
     cycle guard.
 
-    Returns: `{agent name: frozenset of scripts/references declared by every
-    agent it can reach}`. Callers use it to exempt a path a prompt merely
-    *describes* -- naming a delegate's file is description, not a missing
-    declaration.
+    Returns:
+        `{agent name: frozenset of scripts/references declared by every agent it
+        can reach}`. Callers use it to exempt a path a prompt merely *describes*
+        -- naming a delegate's file is description, not a missing declaration.
     """
     agents_by_name = {
         agent["name"]: agent
@@ -322,8 +324,9 @@ def _prompts(manifest: dict[str, Any]) -> list[_Prompt]:
     declares no `scripts` or `references` is not exempt: any file it names is
     one the build will not bundle for it.
 
-    Returns: a list of `_Prompt`, skills first, then the agents they reach, in
-    the order they were found.
+    Returns:
+        a list of `_Prompt`, skills first, then the agents they reach, in the
+        order they were found.
     """
     downstream = _delegate_declarations(manifest)
     return [
@@ -347,12 +350,13 @@ def _is_runtime_path(target: str) -> bool:
     (`workspace/...`), a path rooted at a placeholder the prompt defines itself
     (`<artifacts>/...`), and any of those written home-relative (`~/...`).
 
-    Returns: True when `target` is one of those, so path checks skip it instead
-    of reporting a file they cannot resolve.
+    Returns:
+        True when `target` is one of those, so path checks skip it instead of
+        reporting a file they cannot resolve.
     """
     # `~` is the reader's home directory, so nothing under it is a package path
-    # whatever follows -- and what follows is usually `.tpu-agent-suite/`, since the
-    # install destination is written both bare and home-relative.
+    # whatever follows -- and what follows is usually `.tpu-agent-suite/`, since
+    # the install destination is written both bare and home-relative.
     if target.startswith("~/"):
         return True
     # Resource tokens ({{runs}}, {{package}}, ...) resolve at compile time to
@@ -385,7 +389,8 @@ def _declared_owners(manifest: dict[str, Any],
     A file several units declare is one file in the build, so it is paired
     with the first unit that declares it.
 
-    Returns: (package-relative path, owning unit name), sorted by path.
+    Returns:
+        (package-relative path, owning unit name), sorted by path.
     """
     owners: dict[str, str] = {}
     for agent in _skills_and_agents(manifest):
@@ -406,9 +411,10 @@ def check_instruction_links(package_dir: Path,
     an undeclared file dangles even when it resolves in the source tree.
     External URLs, bare anchors, and run-time paths are skipped.
 
-    Returns: a list of `Finding` (check `"instruction-links"`), one per bad
-    link, whose detail distinguishes a file that exists but is undeclared from
-    one that does not resolve at all. Enforced by `verify.verify_package`.
+    Returns:
+        a list of `Finding` (check `"instruction-links"`), one per bad link,
+        whose detail distinguishes a file that exists but is undeclared from one
+        that does not resolve at all. Enforced by `verify.verify_package`.
     """
     findings: list[Finding] = []
     for prompt in _prompts(manifest):
@@ -437,9 +443,9 @@ def check_bare_paths(package_dir: Path, manifest: dict[str,
                                                        Any]) -> list[Finding]:
     """Checks that every backticked package path in a prompt is declared.
 
-    package/README.md tells authors to reference bundled files by
-    package-root-relative path rather than by markdown link, so this is the
-    reference style `check_instruction_links` cannot see. Skipped: run-time
+    A package file is named by token (package/README.md); a path typed out
+    in a code span instead is the reference style `check_instruction_links`
+    cannot see. Skipped: run-time
     paths, and paths declared by an agent this one delegates to -- naming a
     delegate's file describes its work rather than reaching for the file.
     `check_instruction_links` grants no such exemption on purpose, since a
@@ -448,9 +454,10 @@ def check_bare_paths(package_dir: Path, manifest: dict[str,
     Heuristic and therefore advisory: a backticked path may be illustrative
     rather than a real reference.
 
-    Returns: a list of `Finding` (check `"bare-paths"`), at most one per path
-    per line, with the same exists-but-undeclared / does-not-resolve split as
-    `check_instruction_links`.
+    Returns:
+        a list of `Finding` (check `"bare-paths"`), at most one per path per
+        line, with the same exists-but-undeclared / does-not-resolve split as
+        `check_instruction_links`.
     """
     findings: list[Finding] = []
     for prompt in _prompts(manifest):
@@ -490,14 +497,15 @@ def check_reference_links(package_dir: Path,
     Reference docs are copied to their package-relative path, so a link survives
     the build only if its target is itself declared by some agent. Both
     spellings are accepted -- sibling-relative (the docs sit together) and
-    package-root-relative (what the README recommends). External URLs, bare
-    anchors, and run-time paths are skipped.
+    package-root-relative. External URLs, bare anchors, and run-time paths are
+    skipped.
 
     Unlike the prose checks this one is decidable, not heuristic: a link either
     resolves to a bundled file or it dangles.
 
-    Returns: a list of `Finding` (check `"reference-links"`), reported against
-    the doc's first declaring agent. Enforced by `verify.verify_package`.
+    Returns:
+        a list of `Finding` (check `"reference-links"`), reported against the
+        doc's first declaring agent. Enforced by `verify.verify_package`.
     """
     findings: list[Finding] = []
     declared_all = {
@@ -513,7 +521,7 @@ def check_reference_links(package_dir: Path,
             for target in _file_link_targets(line):
                 # Both spellings survive a build, provided the target is itself
                 # declared: sibling-relative (the docs sit together) and
-                # package-root-relative (what the README recommends).
+                # package-root-relative.
                 candidates = {
                     os.path.normpath(Path(rel).parent / target).replace(
                         os.sep, "/"),
@@ -540,9 +548,10 @@ def check_unused_declarations(package_dir: Path,
     common (e.g. a driver script invoking a helper), so without those
     allowances the check is pure noise.
 
-    Returns: a list of `Finding` (check `"unused-declarations"`) with line 0,
-    since the finding is about the declaration rather than a place in the file.
-    Each means nothing shipped alongside the file mentions it at all.
+    Returns:
+        a list of `Finding` (check `"unused-declarations"`) with line 0, since
+        the finding is about the declaration rather than a place in the file.
+        Each means nothing shipped alongside the file mentions it at all.
     """
     findings: list[Finding] = []
     for agent in _skills_and_agents(manifest):
@@ -568,10 +577,10 @@ def check_unused_declarations(package_dir: Path,
                    for other, body in bodies.items() if other != rel):
                 continue
             # A Python dependency is named by its module, not its filename:
-            # `query_tpu_sharding.py` reaches `entry.py` as `from entry import ...`.
-            # A script naming a helper as a literal string is caught above;
-            # the import spelling needs its own match, or every correctly declared
-            # helper module is reported.
+            # `query_tpu_sharding.py` reaches `entry.py` as
+            # `from entry import ...`. A script naming a helper as a literal
+            # string is caught above; the import spelling needs its own match,
+            # or every correctly declared helper module is reported.
             if rel.endswith(".py") and any(
                     Path(rel).stem in _PY_IMPORT.findall(body)
                     for other, body in bodies.items()
@@ -602,9 +611,10 @@ def check_delegation_consistency(package_dir: Path,
     Heuristic and therefore advisory: an agent may declare a delegate it
     invokes only conditionally. Treat findings as prompts to look, not failures.
 
-    Returns: a list of `Finding` (check `"delegation-consistency"`). The
-    undeclared-token direction carries the token's line; the
-    declared-but-unreferenced direction uses line 0.
+    Returns:
+        a list of `Finding` (check `"delegation-consistency"`). The
+        undeclared-token direction carries the token's line; the
+        declared-but-unreferenced direction uses line 0.
     """
     findings: list[Finding] = []
     for prompt in _prompts(manifest):
@@ -647,10 +657,11 @@ def check_legacy_paths(package_dir: Path,
     references are also matched against `harness-tool-directive`, for the same
     reason.
 
-    Returns: a list of `Finding` (check `"legacy-paths"`), at most one per
-    (file, line, pattern), each detail pairing the matched text with the
-    remediation hint. A file several agents declare is reported once, against
-    its first owner.
+    Returns:
+        a list of `Finding` (check `"legacy-paths"`), at most one per (file,
+        line, pattern), each detail pairing the matched text with the
+        remediation hint. A file several agents declare is reported once,
+        against its first owner.
     """
     findings: list[Finding] = []
     seen: set[tuple[str, int, str]] = set()
@@ -687,9 +698,9 @@ def _python_script_trees(
 
     A file several agents reach is parsed once, for its first owner.
 
-    Returns: (owning agent, package-relative path, syntax tree) in path
-    order, with the `SyntaxError` in place of the tree for a file that does
-    not parse.
+    Returns:
+        (owning agent, package-relative path, syntax tree) in path order, with
+        the `SyntaxError` in place of the tree for a file that does not parse.
     """
     owners: dict[Path, str] = {}
     for agent in _skills_and_agents(manifest):
@@ -725,8 +736,9 @@ def check_legacy_imports(package_dir: Path,
     legitimately import tensorflow, torch_tpu, and matplotlib, none of which
     need to be installed to author the package.
 
-    Returns: a list of `Finding` (check `"legacy-imports"`), one per offending
-    import, plus one per file that cannot be parsed at all.
+    Returns:
+        a list of `Finding` (check `"legacy-imports"`), one per offending
+        import, plus one per file that cannot be parsed at all.
     """
     findings: list[Finding] = []
     for agent_name, rel, tree in _python_script_trees(package_dir, manifest):
@@ -758,7 +770,7 @@ _INSTALLED_ASSET_PATTERNS = (
      " '{{runtime}} compute inspect --package {{package_tag}} --json'"
      " instead of naming the file"),
     (re.compile(r"\S*\.tpu-agent-suite/(?:[\w.@\-]+/)*knowledgebase"),
-     "name a provenance page with"
+     "name a knowledge-base page with"
      " {{data:tpu-knowledge-base/pages/<name>.md}}; the knowledge base is not"
      " installed"),
     (re.compile(r"\S*\.tpu-agent-suite/runs"),
@@ -793,8 +805,9 @@ def check_workspace_config_paths(package_dir: Path,
     location depends on install scope, so prose points the agent at
     `{{runtime}} compute inspect --package {{package_tag}} --json` instead.
 
-    Returns: a list of `Finding` (check `"workspace-config-paths"`), one per
-    (file, line, match).
+    Returns:
+        a list of `Finding` (check `"workspace-config-paths"`), one per (file,
+        line, match).
     """
     scan_targets: list[tuple[str, str]] = []
     for prompt in _prompts(manifest):
@@ -840,8 +853,8 @@ def check_xplane_access(package_dir: Path,
     Scans the same files as `check_legacy_imports`: declared `.py` scripts and
     the `*_test.py` companions beside them.
 
-    Returns: a list of `Finding` (check `"xplane-access"`), one per offending
-    import.
+    Returns:
+        a list of `Finding` (check `"xplane-access"`), one per offending import.
     """
     findings: list[Finding] = []
     for agent_name, rel, tree in _python_script_trees(package_dir, manifest):
@@ -870,7 +883,7 @@ def check_xplane_access(package_dir: Path,
 
 def check_xprof_outside_analyst(package_dir: Path,
                                 manifest: dict[str, Any]) -> list[Finding]:
-    """Flags `xprof <subcommand>` invocations in prompts outside the xprof package.
+    """Flags `xprof <subcommand>` calls in prompts other than tpu-diagnostics.
 
     Only `tpu-diagnostics` runs the xprof CLI; every other agent that needs
     profile numbers lists it in `delegates` and asks. A prompt elsewhere that
@@ -882,8 +895,9 @@ def check_xprof_outside_analyst(package_dir: Path,
     It is known by its name, since a prompt's path says nothing about whose
     it is.
 
-    Returns: a list of `Finding` (check `"xprof-outside-analyst"`), at most
-    one per (file, line).
+    Returns:
+        a list of `Finding` (check `"xprof-outside-analyst"`), at most one per
+        (file, line).
     """
     findings: list[Finding] = []
     seen: set[tuple[str, int]] = set()
@@ -965,13 +979,14 @@ def _compute_flags() -> dict[str, set[str]]:
     """Maps each `compute` subcommand to the long options its parser accepts.
 
     Read out of the runtime's own argparse tree rather than restated here, so a
-    flag added or renamed in `runtime.py` cannot drift from what this check
-    believes exists -- the drift is the bug it is looking for. Imported lazily:
-    `lint` is otherwise stdlib-only, and nothing outside this check needs it.
+    flag added or renamed in `compute/cli_parser.py` cannot drift from what this
+    check believes exists -- the drift is the bug it is looking for. Imported
+    lazily: nothing else in `lint` needs the runtime.
 
-    Returns: `{subcommand: {"--code", "--timeout", ...}}`, empty on any import
-    or introspection failure so a runtime that cannot be loaded silences the
-    flag check rather than reporting every flag in the package as unknown.
+    Returns:
+        `{subcommand: {"--code", "--timeout", ...}}`, empty on any import or
+        introspection failure so a runtime that cannot be loaded silences the
+        flag check rather than reporting every flag in the package as unknown.
     """
     global _COMPUTE_FLAGS_CACHE, _COMPUTE_BACKENDS_CACHE
     global _COMPUTE_INTROSPECTION_ERROR
@@ -1071,8 +1086,9 @@ def check_compute_contract(package_dir: Path,
     prompt would. Both arrive together when a package is ported from a codebase
     that shipped its own transport, which is the case this check exists for.
 
-    Returns: a list of `Finding` (check `"compute-contract"`), each detail
-    pairing what was found with what to write instead.
+    Returns:
+        a list of `Finding` (check `"compute-contract"`), each detail pairing
+        what was found with what to write instead.
     """
     findings: list[Finding] = []
     known = _compute_flags()
@@ -1207,7 +1223,8 @@ def check_generic_compute_prose(package_dir: Path,
     that is a second copy that drifts. Same files as `check_compute_contract`:
     the prompts and the references they declare.
 
-    Returns: a list of `Finding` (check `"generic-compute-prose"`).
+    Returns:
+        a list of `Finding` (check `"generic-compute-prose"`).
     """
     findings: list[Finding] = []
 
@@ -1243,9 +1260,10 @@ def check_environment_contract(package_dir: Path,
     its default, which is how a misconfiguration reaches run time instead of
     setup. Scripts that never mention `environment.json` are skipped.
 
-    Returns: a list of `Finding` (check `"environment-contract"`), deduplicated
-    per (script, key), with schema mismatches at line 0. Empty when the manifest
-    declares no environment. Enforced by `verify.verify_package`.
+    Returns:
+        a list of `Finding` (check `"environment-contract"`), deduplicated per
+        (script, key), with schema mismatches at line 0. Empty when the manifest
+        declares no environment. Enforced by `verify.verify_package`.
     """
     findings: list[Finding] = []
     env = manifest.get("environment") or {}
@@ -1331,9 +1349,10 @@ def _read_contract(path: Path, rel: str, owner: str,
                    findings: list[Finding]) -> dict[str, Any] | None:
     """Reads the frontmatter contract an instruction file opens with.
 
-    Returns: the frontmatter, or None after appending to `findings` the
-    reason there is none -- no leading `---`, or frontmatter that does not
-    parse. Either way there is nothing left to check in the file.
+    Returns:
+        the frontmatter, or None after appending to `findings` the reason there
+        is none -- no leading `---`, or frontmatter that does not parse. Either
+        way there is nothing left to check in the file.
     """
     text = path.read_text(encoding="utf-8")
     if not text.lstrip().startswith("---"):
@@ -1356,8 +1375,10 @@ def _list_field_findings(
         owner: str,
         rel: str,
         allowed_tools: set[str] | None = None) -> list[Finding]:
-    """Reports a frontmatter `key` that is not a list, or grants a tool
-    outside `allowed_tools` when that is given."""
+    """Reports a frontmatter `key` that is not a list or grants a bad tool.
+
+    A tool is bad when `allowed_tools` is given and does not hold it.
+    """
     if key not in fm:
         return []
     if not isinstance(fm[key], list):
@@ -1385,7 +1406,8 @@ def check_frontmatter_contracts(package_dir: Path,
     Every skill and agent instruction file must begin with YAML
     frontmatter defining its manifest metadata (name, description, etc.).
 
-    Returns: a list of `Finding` (check `"frontmatter-contracts"`).
+    Returns:
+        a list of `Finding` (check `"frontmatter-contracts"`).
     """
     findings: list[Finding] = []
     # A skill may hold every portable tool. An agent may not hold the ones
@@ -1397,15 +1419,15 @@ def check_frontmatter_contracts(package_dir: Path,
     # 1. Skill frontmatter contracts. Skills go first: a skill that delegates
     #    shares its document with its twin agent, and is checked as a skill.
     for skill in manifest.get("skills", []):
-        # Indexed rather than fetched with a default: the manifest schema
-        # requires `instructions`, and load_package validates before any
-        # check runs, so a missing key is a bug worth raising, not skipping.
+        # Indexed rather than fetched with a default: discovery sets
+        # `instructions` on every skill it loads, before any check runs, so a
+        # missing key is a bug worth raising, not skipping.
         rel = skill["instructions"]
         doc_path = package_dir / rel
         owner = skill.get("name", doc_path.stem)
         if not doc_path.is_file():
-            # Nothing else catches this before a build: load_package verifies
-            # that agent documents exist but has no equivalent for skills.
+            # load_package rejects a missing skill document before lint runs;
+            # this reports one in a manifest that did not come through it.
             findings.append(
                 Finding("frontmatter-contracts", owner, rel, 1,
                         "skill instructions file does not exist"))
@@ -1509,8 +1531,7 @@ CHECKS = {
 
 def unreachable_files(package_dir: Path, manifest: dict[str,
                                                         Any]) -> list[str]:
-    """Files under agents/, references/ and scripts/ that no released skill
-    reaches.
+    """Files under agents/, references/ and scripts/ no released skill reaches.
 
     These files do not ship: a build holds only what its skills reach. They
     may stay in the repository, so this is a warning and not a finding. It is
@@ -1554,9 +1575,10 @@ def run_checks(package_dir: Path,
 
     `only` selects check names from `CHECKS`; every check runs by default.
 
-    Returns: a flat list of `Finding`, grouped in the order the checks ran.
-    Nothing here raises or decides severity -- callers choose what is fatal,
-    which is how `verify` gates enforced checks while `lint` reports all checks.
+    Returns:
+        a flat list of `Finding`, grouped in the order the checks ran. Nothing
+        here raises or decides severity -- callers choose what is fatal, which
+        is how `verify` gates enforced checks while `lint` reports all checks.
     """
     names = list(only) if only else list(CHECKS)
     findings: list[Finding] = []

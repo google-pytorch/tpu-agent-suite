@@ -518,7 +518,7 @@ def fail(checks: list[PreflightCheck],
          name: str,
          detail: str,
          fix: str = "") -> bool:
-    """Record a failed check; returns False, for `return fail(...)`."""
+    """Record a failed check and return False, so callers can `return` it."""
     checks.append(PreflightCheck(name, "fail", detail, fix))
     return False
 
@@ -620,9 +620,9 @@ def _metadata_get(path: str) -> str:
 
 
 def vm_account_scopes(account: str) -> list[str] | None:
-    """The OAuth scopes this VM was created with, when `account` is the
-    VM's own service account; None for any other account, or off GCE.
+    """The OAuth scopes this VM was created with, if `account` is its own.
 
+    None when `account` is not the VM's own service account, or off GCE.
     Tokens for a VM's service account carry only those scopes, so without
     cloud-platform they are refused whatever IAM grants the account. A user
     account has no such limit, so it is not looked up.
@@ -640,8 +640,10 @@ def vm_account_scopes(account: str) -> list[str] | None:
 
 def _probe_active_gcloud_account(
 ) -> tuple[subprocess.CompletedProcess[str], str]:
-    """The `gcloud auth list` probe for the active account, and that
-    account; "" when there is none or the probe failed."""
+    """The `gcloud auth list` probe for the active account, and that account.
+
+    The account is "" when there is none or the probe failed.
+    """
     proc = probe_run([
         "gcloud", "auth", "list", "--filter=status:ACTIVE",
         "--format=value(account)"
@@ -657,9 +659,9 @@ def active_gcloud_account() -> str:
 
 def gcloud_account_check(
         other_credential: str | None = None) -> PreflightCheck:
-    """Whether gcloud has an active account to act as, with cloud-platform
-    scope when it is a VM's service account.
+    """Whether gcloud has an active account to act as.
 
+    A VM's service account also needs cloud-platform scope.
     `other_credential` names a credential already known to work, such as a
     cluster that answers kubectl. With one, a problem here is a warning, not
     a blocker.
@@ -739,12 +741,12 @@ def application_credentials_check(
 
 
 def gke_credential_checks(cluster: PreflightCheck) -> list[PreflightCheck]:
-    """The credential checks for a backend whose kubectl authenticates
-    through gke-gcloud-auth-plugin, given its cluster check.
+    """The credential checks for a backend using gke-gcloud-auth-plugin.
 
-    A cluster that answers proves kubectl has a working credential, and a
-    usable $GOOGLE_APPLICATION_CREDENTIALS is one the plugin can use, so
-    either turns a gcloud account problem into a warning.
+    That is, a backend whose kubectl authenticates through the plugin, given
+    its cluster check. A cluster that answers proves kubectl has a working
+    credential, and a usable $GOOGLE_APPLICATION_CREDENTIALS is one the
+    plugin can use, so either turns a gcloud account problem into a warning.
     """
     gac, usable = application_credentials_check()
     other = ("kubectl reaches the cluster"

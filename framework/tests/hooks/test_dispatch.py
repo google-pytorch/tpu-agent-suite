@@ -68,9 +68,12 @@ class TestHookDispatchUsageErrors(helpers.RuntimeTestCase):
         ]
 
     def test_hook_dispatch_usage_error_is_settled_by_on_failure(self):
-        """A hook-dispatch whose arguments do not parse answers by policy,
-        in the harness's shape, exit 0, and is recorded as `startup` --
-        instead of argparse's exit 2, which Claude Code reads as a block."""
+        """A hook-dispatch whose arguments do not parse answers by policy.
+
+        It answers in the harness's shape, exit 0, and is recorded as
+        `startup` -- instead of argparse's exit 2, which Claude Code reads as
+        a block.
+        """
         base = [
             "hook-dispatch", "--harness", "claude-code", "--package",
             "test-pkg@1.0.0", "--hook", "lenient", "--event", "PreToolUse",
@@ -110,10 +113,12 @@ class TestHookDispatchUsageErrors(helpers.RuntimeTestCase):
         self.assertEqual(h_out["permissionDecision"], "deny")
 
     def test_hook_dispatch_usage_error_without_a_shape_exits_by_policy(self):
-        """An unknown event (or harness) leaves no shape to answer in, so the
-        exit code carries the policy: 0 for allow, 2 for deny. So does a
-        shape lookup that fails outright, when the store has lost the schema
-        files it reads: the startup path must not crash into a traceback."""
+        """An unknown event (or harness) leaves no shape to answer in.
+
+        So the exit code carries the policy: 0 for allow, 2 for deny. So does
+        a shape lookup that fails outright, when the store has lost the schema
+        files it reads: the startup path must not crash into a traceback.
+        """
         for extra, expected in ((["--on-failure", "allow"], 0), ([], 2)):
             with self.subTest(policy=extra or "default"):
                 code, out, err = self._main_capturing([
@@ -168,8 +173,10 @@ class TestHookDispatch(helpers.RuntimeTestCase):
     """Hook output validation and command-line args."""
 
     def test_hook_output_must_match_the_hook_output_schema(self):
-        """A reply without `decision` is a malformed verdict, and a guard
-        fails closed on it; silence (no output at all) is an allow."""
+        """A reply without `decision` is a malformed verdict.
+
+        A guard fails closed on it; silence (no output at all) is an allow.
+        """
         self._write_script(
             "invalid.py", "import json\n"
             "print(json.dumps({'status': 'allow'}))\n")
@@ -673,8 +680,10 @@ class TestNormalizeInbound(helpers.RuntimeTestCase):
     """Normalizing inbound harness payloads into hook events."""
 
     def _assert_normalized(self, cases):
-        """Each case is `(harness, native event, payload, {path: value})`;
-        a path is dotted into the canonical event."""
+        """Each case is `(harness, native event, payload, {path: value})`.
+
+        A path is dotted into the canonical event.
+        """
         for harness, native_event, payload, expected in cases:
             event = events.normalize_inbound_event(
                 raw_payload=payload,

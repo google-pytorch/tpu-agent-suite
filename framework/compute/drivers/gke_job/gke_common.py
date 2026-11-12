@@ -178,6 +178,7 @@ class StagingPlan:
     uploaded: bool = False
 
     def moves_files(self) -> bool:
+        """Whether the job has any input or output to stage."""
         return bool(self.mounted_inputs or self.in_urls or self.out_urls
                     or self.logged_outputs)
 

@@ -339,13 +339,13 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         # commands, sandbox allowlists -- because a distribution is built once
         # and installed on any machine, so the spelling has to be expanded by
         # the target's own shell. That expansion uses HOME and ignores
-        # TPU_AGENT_SUITE_HOME, which means an unpatched config sends the harness to
-        # the developer's real ~/.tpu-agent-suite: the hooks that fire are whatever
-        # stale build happens to be installed there, not the one this test just
-        # compiled. The suite would then report on code that is not in the
-        # working tree. Repoint the configs at the store the installer actually
-        # wrote to, which is the only way the isolation seam covers the hooks
-        # as well as the data.
+        # TPU_AGENT_SUITE_HOME, which means an unpatched config sends the
+        # harness to the developer's real ~/.tpu-agent-suite: the hooks that
+        # fire are whatever stale build happens to be installed there, not the
+        # one this test just compiled. The suite would then report on code
+        # that is not in the working tree. Repoint the configs at the store the
+        # installer actually wrote to, which is the only way the isolation seam
+        # covers the hooks as well as the data.
         installed_runtimes = sorted(
             (self.central_home / "packages").glob("*/framework/runtime.py"))
         self.assertTrue(
@@ -530,9 +530,12 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         ]
 
     def _run_harness_cli_schema_verifier_e2e(self, harness: str, name: str):
-        """Delegate to a subagent; the hooks hold request and result to their
-        contracts, and the request carries the run_id SessionStart gave the
-        caller -- its only source, since no tool call is allowed."""
+        """Delegate to a subagent; the hooks enforce both contracts.
+
+        The hooks hold request and result to their contracts, and the request
+        carries the run_id SessionStart gave the caller -- its only source,
+        since no tool call is allowed.
+        """
         test_pkg = self._create_schema_verifier_test_package()
         cli_res, expected_run_id, workspace = self._setup_and_run_harness_cli(
             harness=harness,
@@ -542,7 +545,8 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
             package_dir=test_pkg,
         )
 
-        # 1. Verify the incoming delegation request conforms to the request contract
+        # 1. Verify the incoming delegation request conforms to the request
+        # contract
         pre_log_file = workspace / EVENT_RECORDER_LOG
         self.assertTrue(
             pre_log_file.is_file(),
@@ -850,9 +854,11 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         self._run_harness_cli_hung_hook_e2e("codex", "codex")
 
     def _create_missing_runtime_test_package(self, on_failure: str) -> Path:
-        """Copy the package; guard `shell` with a hook of the given policy, and
-        add a Stop hook with the default policy. Neither will ever run: the
-        test removes the dispatcher before the session starts."""
+        """Copy the package; guard `shell` with a hook of the given policy.
+
+        Also add a Stop hook with the default policy. Neither will ever run:
+        the test removes the dispatcher before the session starts.
+        """
 
         def add_hooks(_test_pkg: Path, pkg_manifest: dict) -> None:
             pkg_manifest.setdefault("hooks", []).extend([{

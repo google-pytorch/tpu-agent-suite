@@ -40,9 +40,11 @@ def resolve_workspace_root(
     if workspace:
         return Path(workspace).resolve()
 
-    # 1. Extract active workspace path directly from inbound harness payload if available
+    # 1. Extract active workspace path directly from inbound harness payload if
+    #    available
     if raw_payload and isinstance(raw_payload, dict):
-        # Dynamically aggregate declared cwd/workspace candidate fields from event-mappings.json
+        # Dynamically aggregate declared cwd/workspace candidate fields from
+        # event-mappings.json
         candidate_fields = ["workspace"]
         try:
             for h_info in utils.get_event_mappings().get(
@@ -113,7 +115,7 @@ def _normalize_subagent_stop_event(
 
     fields = harness_config.get("fields", {})
 
-    # Unwrap nested argument containers (e.g. `tool_input` on Claude Code/Codex).
+    # Unwrap nested argument containers (e.g. `tool_input` on Claude Code).
     container_dict: dict[str, Any] = {}
     for c_key in fields.get("container", []):
         val = raw_payload.get(c_key)
@@ -162,7 +164,8 @@ def _normalize_subagent_stop_event(
     if stop_reason is not None:
         normalized_args["stop_reason"] = str(stop_reason)
 
-    # Distinguishes a finished subagent from a mid-task turn boundary (e.g. Antigravity's `fullyIdle`).
+    # Distinguishes a finished subagent from a mid-task turn boundary (e.g.
+    # Antigravity's `fullyIdle`).
     fully_idle = _extract_idle_flag(raw_payload,
                                     fields,
                                     harness,
@@ -209,7 +212,6 @@ def _subagent_stop_event(
     package: str,
     workspace: Path,
 ) -> dict[str, Any]:
-    """Build the canonical SubagentStop event dict."""
     return {
         "event": "SubagentStop",
         "subagent": subagent,
@@ -453,7 +455,8 @@ def _normalize_session_start_event(
         if val is not None:
             normalized_args[canonical_key] = val
 
-    # Coerce scalar string fields and preserve the workspace fallback if `cwd` is empty.
+    # Coerce scalar string fields and preserve the workspace fallback if `cwd`
+    # is empty.
     for scalar_key in ("cwd", "session_id", "transcript_path"):
         if scalar_key not in normalized_args:
             continue

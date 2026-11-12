@@ -156,9 +156,9 @@ def render_agent_references(text: str,
         raise utils.TpuAgentSuiteError(
             "instructions contain a malformed skill reference")
 
-    # A reference or script token names a file under the package's
-    # references/ or scripts/ root; it renders to the installed path. Whether
-    # the file exists is checked against the source tree by
+    # A resource token names a file under the package's references/,
+    # scripts/, data/ or schemas/ root; it renders to the installed path.
+    # Whether the file exists is checked against the source tree by
     # `package_checks.validate_resource_tokens`, which has the package
     # directory in scope.
     _, pkg_path, _ = package_runtime_paths(manifest)
@@ -172,7 +172,8 @@ def render_agent_references(text: str,
             "instructions contain a malformed reference, script, data or"
             " schema token")
 
-    # Automatically inject `--package {{package_tag}}` into `{{runtime}} compute` calls
+    # Automatically inject `--package {{package_tag}}` into
+    # `{{runtime}} compute` calls.
     rendered = _RUNTIME_COMPUTE_PATTERN.sub(
         "{{runtime}} compute --package {{package_tag}}", rendered)
 
@@ -200,9 +201,11 @@ _RUNTIME_COMPUTE_PATTERN = re.compile(
 
 
 def resource_token_targets(text: str) -> list[tuple[str, str]]:
-    """Every `{{reference:...}}`, `{{script:...}}`, `{{data:...}}` and
-    `{{schema:...}}` token in `text`, as (kind, package-relative path)
-    pairs."""
+    """Every resource token in `text`, as (kind, package-relative path) pairs.
+
+    The resource tokens are `{{reference:...}}`, `{{script:...}}`,
+    `{{data:...}}` and `{{schema:...}}`.
+    """
     return [(kind, f"{RESOURCE_ROOTS[kind]}/{rel}")
             for kind, rel in re.findall(RESOURCE_REFERENCE_PATTERN, text)]
 
@@ -221,8 +224,12 @@ _ANY_TOKEN = re.compile(r"\{\{[^{}\n]*}}")
 
 
 def token_for(path: str) -> str:
-    """The token that names the package path `path`, or what to do when no
-    token can: the path is under a directory no build ships by that name."""
+    """The token that names the package path `path`, or what to do instead.
+
+    No token can name a path under a directory no build ships by that name,
+    or a bare resource root; for those, the result says where package files
+    live.
+    """
     root, _, rest = path.partition("/")
     kind = next((k for k, v in RESOURCE_ROOTS.items() if v == root), None)
     if kind is None or not rest:
@@ -256,8 +263,10 @@ def plain_package_paths(text: str) -> list[tuple[int, str]]:
 
 
 def body_first_line(document: str, body: str) -> int:
-    """The line of `document` that `body`, its text after frontmatter, starts
-    on."""
+    """The line of `document` that `body` starts on.
+
+    `body` is the document's text after its frontmatter.
+    """
     return document.count("\n", 0, len(document) - len(body)) + 1
 
 
@@ -271,9 +280,10 @@ def reject_plain_package_paths(text: str,
     if retired:
         raise utils.TpuAgentSuiteError(
             f"{label} uses the retired {{{{knowledgebase}}}} token; name a"
-            " provenance page with {{data:tpu-knowledge-base/pages/<name>.md}}:\n"
-            + "\n".join(f"  line {first_line + number - 1}: {found}"
-                        for number, found in retired))
+            " knowledge-base page with"
+            " {{data:tpu-knowledge-base/pages/<name>.md}}:\n" +
+            "\n".join(f"  line {first_line + number - 1}: {found}"
+                      for number, found in retired))
     found = plain_package_paths(text)
     if found:
         raise utils.TpuAgentSuiteError(

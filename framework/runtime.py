@@ -368,10 +368,11 @@ def build_runtime_parser() -> argparse.ArgumentParser:
 
     # trajectory
     p_trajectory = sub.add_parser(
-        "trajectory", help="Export a session's trajectory to a bucket you own")
+        "trajectory",
+        help="Export a session's trajectory to a bucket you own or to Harbor")
     trajectory_sub = p_trajectory.add_subparsers(dest="trajectory_action",
                                                  required=True,
-                                                 help="Feedback operation")
+                                                 help="Trajectory operation")
 
     # trajectory export
     p_export = trajectory_sub.add_parser(

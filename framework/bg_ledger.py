@@ -100,9 +100,12 @@ def background_launch_without_shell(
     harness: str,
     agent_tools: dict[str, list[str]],
 ) -> str:
-    """The agent type asking `tool` for a background launch it cannot wait
-    for (no shell to run `sleep` in, per `agent_tools`), or "" when the
-    request is foreground, or from the root or an agent not in the table."""
+    """The agent type asking `tool` for a background launch it can't wait for.
+
+    An agent can't wait when it has no shell to run `sleep` in, per
+    `agent_tools`. Returns "" when the request is foreground, or from the root
+    or an agent not in the table.
+    """
     idle_mapping = subagent_idle_mapping(harness) or {}
     requested = (idle_mapping.get("launches", {}).get(tool)
                  or {}).get("requested")

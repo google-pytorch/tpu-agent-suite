@@ -106,8 +106,10 @@ class TestUtils(unittest.TestCase):
                     [])
 
     def test_event_mappings_cover_every_event_and_harness(self):
-        """Every supported event maps, on every harness, to a named event
-        with a session_id source (else its run namespace cannot resolve)."""
+        """Every supported event maps, on every harness, to a named event.
+
+        Each has a session_id source (else its run namespace cannot resolve).
+        """
         events = utils.get_event_mappings()
         required = {
             "SubagentStop": ("subagent", "output"),
@@ -161,8 +163,11 @@ class TestHookEventSources(unittest.TestCase):
     """The runtime and the schema must name the same lifecycle events."""
 
     def test_lookup_survives_a_missing_schema(self):
-        """An installed package has no manifest schema beside its runtime, so
-        the fallback constant must name the events the schema declares."""
+        """The fallback constant names the events the manifest schema declares.
+
+        An installed package has no manifest schema beside its runtime, so
+        the fallback is all it has.
+        """
         self.assertEqual(utils.get_supported_hook_events(),
                          list(utils.SUPPORTED_HOOK_EVENTS))
         with mock.patch.object(
@@ -177,8 +182,11 @@ class TestExtractJsonObjects(unittest.TestCase):
     """Tests for extracting JSON dictionaries from raw text, code fences, and prose."""
 
     def test_extract_all_json_objects_from_text(self):
-        """Extracts JSON dictionaries from code fences (3 and 4 backticks) and
-        unfenced text; prose, empty and non-string inputs yield none."""
+        """Extracts JSON dictionaries from code fences and unfenced text.
+
+        Both 3- and 4-backtick fences count; prose, empty and non-string
+        inputs yield none.
+        """
         raw = ("Context config: {\"lr\": 0.01}\n\n"
                "Step 1 output:\n"
                "```json\n"
@@ -209,8 +217,11 @@ class TestJsonSchemaDefinitionErrors(unittest.TestCase):
     """Malformed schema definitions are reported, not silently accepted."""
 
     def test_malformed_definitions_are_reported(self):
-        """A malformed `type`, `oneOf` or `dependentRequired` is a definition
-        error, not a schema that silently validates nothing."""
+        """A malformed `type`, `oneOf` or `dependentRequired` is an error.
+
+        It is a definition error, not a schema that silently validates
+        nothing.
+        """
         validate = utils.JsonSchemaValidator.validate_schema_definition
         for schema, expected in (
             ({

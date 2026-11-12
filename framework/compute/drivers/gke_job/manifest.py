@@ -686,20 +686,21 @@ def job_manifest(
 
 def job_hosts(config: GkeJobConfig,
               placement: dict[str, Any] | None = None) -> int:
-    """Pods in a Job: one per node of the slice, or one for a colocated or
-    CPU Job, which spans no slice."""
+    """Pods in a Job: one per node of the slice, or one if it spans none.
+
+    A colocated or CPU Job spans no slice, so it has one pod.
+    """
     return 1 if placement or config.cpu_requests else config.tpu_hosts
 
 
 def _multi_host_env(config: GkeJobConfig, name: str,
                     hosts: int) -> list[dict[str, Any]]:
-    """Env telling each pod of a multi-host Job which host it is and where
-    the leader is.
+    """Env telling each pod of a multi-host Job which host it is.
 
-    `TPU_WORKER_ID` (and `TPU_NODE_ID`, read by vllm_torchtpu) is the pod's
-    index; 0 is the leader, which runs the server or coordinator the others
-    join. libtpu needs `TPU_WORKER_HOSTNAMES`, which GKE doesn't set for a
-    Job.
+    It also says where the leader is. `TPU_WORKER_ID` (and `TPU_NODE_ID`,
+    read by vllm_torchtpu) is the pod's index; 0 is the leader, which runs
+    the server or coordinator the others join. libtpu needs
+    `TPU_WORKER_HOSTNAMES`, which GKE doesn't set for a Job.
     """
     index = {
         "fieldRef": {

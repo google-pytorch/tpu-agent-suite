@@ -92,8 +92,11 @@ class HarnessConformance(unittest.TestCase):
                 unknown.assert_called_once()
 
     def test_canonical_event_resolves_canonical_and_native_names(self):
-        """Every canonical event resolves to itself, and every native event to
-        one of the canonical events mapped onto it."""
+        """Canonical events resolve to themselves; native ones to a mapping.
+
+        Every native event resolves to one of the canonical events mapped onto
+        it.
+        """
         mappings = utils.get_event_mappings()
         by_native: dict[str, set[str]] = {}
         for canonical, entry in mappings.items():

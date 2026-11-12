@@ -134,8 +134,10 @@ class TestManifestComposition(helpers.CompilerTestCase):
             package_loader.load_package(pkg_dir, manifest="package.third.json")
 
     def test_removed_manifest_fields_are_rejected_by_name(self):
-        """A field package.release.json once carried fails with where it lives now,
-        not as an anonymous unknown property."""
+        """A field package.release.json once carried says where it lives now.
+
+        It fails with that location, not as an anonymous unknown property.
+        """
         pkg_dir = self._create_valid_package()
         original = self._read_manifest(pkg_dir)
         values = {
@@ -162,8 +164,11 @@ class TestDocumentDrivenLoading(helpers.CompilerTestCase):
     """Agents and skills loaded from their markdown documents."""
 
     def test_skill_name_cannot_escape_package(self):
-        """A skill is named, not located: a path in `skills` is rejected even
-        when a skill document really exists where that path points."""
+        """A skill is named, not located: a path in `skills` is rejected.
+
+        This holds even when a skill document really exists where that path
+        points.
+        """
         pkg_dir = self._create_valid_package()
         entry = (pkg_dir / "skills" / "entry" / "SKILL.md").read_text()
         (pkg_dir / "outside").mkdir()
@@ -265,8 +270,7 @@ class TestPackageRequirements(helpers.CompilerTestCase):
                       str(ctx.exception))
 
     def test_a_catalog_entry_nothing_declares_is_warned_about(self):
-        """It never ships: a package nothing uses, or a declaration somebody
-        forgot."""
+        """It never ships: an unused package or a forgotten declaration."""
         pkg_dir = self._create_valid_package()
         (pkg_dir / "requirements-client.txt").write_text(
             "pydantic>=2.0.0\nextra-host>=1.0.0\n", encoding="utf-8")
@@ -346,8 +350,10 @@ class TestWorkspaceMemory(helpers.CompilerTestCase):
         self.assertIn("central resources only", str(ctx.exception))
 
     def test_memory_scope_preamble_names_skills_not_package(self):
-        """The preamble scopes by skill names, read as an English list, and
-        never by the package name, which no harness recognizes."""
+        """The preamble scopes by skill names, read as an English list.
+
+        It never scopes by the package name, which no harness recognizes.
+        """
 
         def preamble(*names):
             return dist_assets.memory_scope_preamble({
@@ -474,8 +480,11 @@ class TestFrontmatterSchema(helpers.CompilerTestCase):
             "'worker'", str(ctx.exception))
 
     def test_each_kind_takes_only_its_own_frontmatter_fields(self):
-        """A skill can't declare `accepts`, a reference can't declare
-        `tools`, and an agent needs a `description`."""
+        """Each kind of entry accepts only its own frontmatter fields.
+
+        A skill can't declare `accepts`, a reference can't declare `tools`,
+        and an agent needs a `description`.
+        """
         skill = Path("skills") / "entry" / "SKILL.md"
         worker = Path("agents") / "worker.md"
         cases = (

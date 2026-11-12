@@ -45,8 +45,10 @@ def setUpModule():  # pylint: disable=invalid-name
 
 def env_behind(prologue: list[str], image_env: dict[str, str],
                names: Any) -> dict[str, str]:
-    """Which of `names` a workload behind the cache `prologue` sees set,
-    and to what, in a container whose image sets `image_env`."""
+    """Which of `names` a workload behind the cache `prologue` sees set.
+
+    Returns each one's value, in a container whose image sets `image_env`.
+    """
     printer = ("import json, os, sys; print(json.dumps({n: os.environ[n] "
                "for n in sys.argv[1:] if n in os.environ}))")
     proc = subprocess.run(prologue + [sys.executable, "-c", printer, *names],
@@ -362,10 +364,12 @@ class TestGkeJobSubmit(unittest.TestCase):
             make_driver(colocate_with="srv")
 
     def test_cpu_requests_book_no_tpu_node(self):
-        """No chips, and nothing that sends the pod to a TPU node: only the
-        Workload Identity selector, no TPU toleration. Not with colocation.
-        The profile's TPU generation is passed on, as probe names it, for a
-        check that plans for that TPU without a chip."""
+        """No chips, and nothing that sends the pod to a TPU node.
+
+        Only the Workload Identity selector, no TPU toleration. Not with
+        colocation. The profile's TPU generation is passed on, as probe names
+        it, for a check that plans for that TPU without a chip.
+        """
         fake = FakeKubectl()
         self.submit(fake,
                     cpu_requests="cpu=2,memory=8Gi",
@@ -390,8 +394,11 @@ class TestGkeJobSubmit(unittest.TestCase):
                         colocate_requests="cpu=1")
 
     def test_a_cpu_run_that_needs_a_chip_runs_again_on_a_tpu_node(self):
-        """Once, and only when no CPU node took it or it exited
-        NEEDS_TPU_EXIT_CODE; any other result is the run's own."""
+        """It runs again only once, and only when it needs a chip.
+
+        That is when no CPU node took it or it exited NEEDS_TPU_EXIT_CODE; any
+        other result is the run's own.
+        """
 
         def ran(code, **details):
             return base.SynchronousExecutionResult(exit_code=code,

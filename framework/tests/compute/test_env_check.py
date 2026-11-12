@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The software check the installer runs on the target and on this machine."""
+"""The software check: of the target at setup, and of this host at install."""
 
 import contextlib
 import importlib.util
@@ -70,8 +70,11 @@ class TestEnvCheck(unittest.TestCase):
         self.assertIn("'jax>=0.11.0'", checks["jax"])
 
     def test_a_system_python_is_told_to_use_a_venv_not_pip(self):
-        """Review on #679: with the deps in a venv the user didn't activate,
-        the hooks run on the system Python, which pip refuses (PEP 668)."""
+        """Review on #679: the hooks may run on a system Python pip refuses.
+
+        With the deps in a venv the user didn't activate, the hooks run on the
+        system Python, which pip refuses (PEP 668).
+        """
         with tempfile.TemporaryDirectory() as stdlib:
             marker = Path(stdlib) / "EXTERNALLY-MANAGED"
             for in_venv, marked, managed in ((False, True, True), (True, True,
@@ -118,8 +121,10 @@ class TestEnvCheck(unittest.TestCase):
                 env_check.ask_to_install(["x"], python="/v/bin/python"))
 
     def test_the_script_runs_standalone_and_exits_1_on_failure(self):
-        """A Job carries the script but, without a bucket, no files -- so
-        `--require` works alongside or instead of `--requirements`."""
+        """A Job carries the script but, without a bucket, no files.
+
+        So `--require` works alongside or instead of `--requirements`.
+        """
         with tempfile.NamedTemporaryFile("w", suffix=".txt",
                                          delete=False) as handle:
             handle.write("# comment\nno-such-package-xyz>=1.0\n")
@@ -153,7 +158,7 @@ class TestEnvCheck(unittest.TestCase):
              for name in env_check.TRACKED}, json.loads(out.getvalue()))
 
     def test_a_target_check_ends_with_the_releases_it_found(self):
-        """The installer records them from this line."""
+        """`compute setup verify` records them from this line."""
         out = io.StringIO()
         with mock.patch.object(env_check, "version_of",
                                return_value=None), \

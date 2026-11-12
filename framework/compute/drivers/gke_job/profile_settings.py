@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""`gke_job` driver settings: `GkeJobConfig`, `config_from_params` and the
-CLI flags from `add_cli_flags`.
+"""`gke_job` driver settings.
+
+`GkeJobConfig`, `config_from_params` and the CLI flags from `add_cli_flags`.
 """
 
 from __future__ import annotations
@@ -340,7 +341,9 @@ def add_cli_flags(parser: Any, add_cli_arg: Callable[..., None]) -> None:
     add_cli_arg(
         parser,
         "--staging-bucket",
-        help="GCS bucket URI for file staging via signed URLs",
+        help="GCS bucket URI (gs://bucket[/folder]) for staging files too "
+        "large to send inline; the pod reaches it via signed URLs, or with "
+        "its own token when --pod-service-account is set",
     )
     add_cli_arg(
         parser,

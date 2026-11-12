@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for `compute setup`: its fields, `apply`, `config`, and the
-Harbor org check."""
+"""Unit tests for `compute setup`.
+
+Covers its fields, `apply`, `config`, and the Harbor org check.
+"""
 
 from __future__ import annotations
 
@@ -562,8 +564,10 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
             ["/py", None])
 
     def test_tpu_vm_choices(self):
-        """$USER's VMs come first, the list is capped, and a zone is
-        suggested only when every VM, listed or not, shares it."""
+        """$USER's VMs come first, and the list is capped.
+
+        A zone is suggested only when every VM, listed or not, shares it.
+        """
         many = "\n".join(f"vm{i} z{i % 2}" for i in range(20))
         with patch.dict(os.environ, {"USER": "ann"}):
             found = compute.probes._tpu_vm(f"{many}\nann-a z9\nann-b z9")
@@ -598,8 +602,7 @@ SETUP = sys.modules[compute.config_show.__module__]
 
 
 class ShareOrgCheckTest(unittest.TestCase):
-    """A Harbor org the hub does not have is refused when saved, not at
-    upload."""
+    """A Harbor org the hub lacks is refused when saved, not at upload."""
 
     def test_an_org_that_cannot_be_checked_is_kept_with_a_warning(
             self) -> None:

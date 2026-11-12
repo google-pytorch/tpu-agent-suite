@@ -119,8 +119,11 @@ def first_failures(pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def pod_end(pods: list[dict[str, Any]]) -> PodEnd:
-    """How the Job's pod ended, from the first pod that says (the first to
-    fail before any other); else all None."""
+    """How the Job's pod ended, from the first pod that says; else all None.
+
+    Pods are tried in `first_failures` order: the first to fail before any
+    other.
+    """
     for pod in first_failures(pods):
         terminated = _terminated(pod)
         pod_reason, pod_message = _pod_status_reason(pod)

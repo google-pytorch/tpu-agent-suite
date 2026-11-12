@@ -110,8 +110,11 @@ def check_hook_matchers(hook_name: str, event: str,
 
 
 def covers(declared: Iterable[str], target: str, package_dir: Path) -> bool:
-    """Whether `target` is among `declared`, under a declared directory, or a
-    directory whose every file is declared."""
+    """Whether `declared` covers `target`.
+
+    It does if `target` is among `declared`, under a declared directory, or a
+    directory whose every file is declared.
+    """
     entries = {entry.rstrip("/") for entry in declared}
     if target in entries:
         return True
@@ -249,6 +252,7 @@ def delegation_warnings(manifest: dict[str, Any]) -> list[str]:
 
 
 def print_delegation_warnings(manifest: dict[str, Any]) -> None:
+    """Print each of `delegation_warnings` to stderr as a WARNING line."""
     for warning in delegation_warnings(manifest):
         print(f"WARNING: {warning}", file=sys.stderr)
 
@@ -259,8 +263,10 @@ def validate_agent_tool(
     agent_name: str,
     kind: str = "agent",
 ) -> dict[str, Any]:
-    """Validate that a tool a skill or agent lists is declared and has
-    action_level metadata, suggesting canonical names for legacy aliases.
+    """Validate a tool that a skill or agent lists, returning its declaration.
+
+    The tool must be declared and have action_level metadata; an undeclared
+    legacy alias gets a suggestion of its canonical name.
 
     `kind` is what `agent_name` names, "agent" or "skill", for the message.
     """
@@ -281,8 +287,8 @@ def validate_agent_tool(
     return tool
 
 
-# Fields package.release.json once carried. Each is rejected by name, with where its
-# content lives now, rather than as an anonymous unknown property.
+# Fields package.release.json once carried. Each is rejected by name, with where
+# its content lives now, rather than as an anonymous unknown property.
 REMOVED_MANIFEST_FIELDS = {
     "entrypoint":
     "name the skill in `skills`",

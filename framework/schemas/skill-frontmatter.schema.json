@@ -22,7 +22,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Canonical tools the skill and its twin agent may use. On harnesses that support skill tool limits (e.g. Claude Code), unlisted tools are removed while the skill is active. Omit to leave tools unrestricted."
+      "description": "Canonical tools the skill and its twin agent may use. On harnesses that support skill tool limits (e.g. Claude Code), unlisted tools are blocked while the skill is active. Omit to leave tools unrestricted."
     },
     "scripts": {
       "type": "array",

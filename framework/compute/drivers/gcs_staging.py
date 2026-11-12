@@ -15,7 +15,8 @@
 
 Workload pods running on GKE (e.g. `gke_job`) lack embedded GCP
 credentials in user container images. This module enables file staging by:
-1. Uploading input files to GCS via the controller's ambient credentials.
+1. Uploading input files to GCS with this host's credentials (ADC, or the
+   staging credential from `staging_credentials`).
 2. Generating V4 signed GET and PUT URLs with bounded expiration.
 3. Constructing bootstrap commands that use `curl` inside the pod to download
    inputs before running the script and upload outputs after execution.
@@ -308,9 +309,9 @@ def _cel_string(value: str) -> str:
 
 
 def prefix_condition(bucket: str, prefix: str) -> str:
-    """A CEL condition true only for objects under `prefix` in `bucket`, and
-    for listings whose prefix is under it.
+    """A CEL condition true only for what is under `prefix` in `bucket`.
 
+    That is, objects under `prefix`, and listings whose prefix is under it.
     A listing is checked against the bucket, not an object, so
     `resource.name` alone would refuse it; its prefix is in the
     `objectListPrefix` attribute instead (empty for other requests).
@@ -508,9 +509,11 @@ def preflight_checks(
                     "staging:credentials", "warn",
                     f"no Application Default Credentials, so only files small "
                     f"enough to skip the bucket can move: {exc}",
-                    f"gcloud auth application-default login, and set "
-                    f"'{SERVICE_ACCOUNT_PARAM}' to a service account (plain "
-                    "`application-default login` cannot sign URLs)")
+                    "gcloud auth application-default login" +
+                    ("" if pod_service_account else
+                     f", and set '{SERVICE_ACCOUNT_PARAM}' to a service "
+                     "account (plain `application-default login` cannot "
+                     "sign URLs)"))
             ]
     who = _impersonated(credentials) or getattr(credentials,
                                                 "service_account_email", None)
@@ -930,14 +933,15 @@ def _live_outputs(logged_outputs: Sequence[str],
                   output_urls: Sequence[tuple[str, str]], job: str,
                   curl: Callable[[str, str],
                                  str], auth: str, sink: str) -> str:
-    """The bash function `live_outputs`, which sends each output again as
-    its file changes while the workload runs; "" if there are none.
+    """The bash function `live_outputs`; "" if there are no outputs.
 
-    A copy is taken first, so a file the workload is rewriting is sent whole
-    or not at all. A staged output is uploaded over its GCS copy; one carried
-    in the log is framed there, each line written alone and set apart by
-    newlines, so output the workload prints meanwhile, even half a line, lands
-    between the frame's lines rather than inside one.
+    The function sends each output again as its file changes while the
+    workload runs. A copy is taken first, so a file the workload is
+    rewriting is sent whole or not at all. A staged output is uploaded over
+    its GCS copy; one carried in the log is framed there, each line written
+    alone and set apart by newlines, so output the workload prints
+    meanwhile, even half a line, lands between the frame's lines rather than
+    inside one.
     """
     if not logged_outputs and not output_urls:
         return ""
@@ -1076,8 +1080,9 @@ def split_logged_outputs(log: str,
 
 
 def _unless_whole(found: dict[int, bytes | str], index: int, why: str) -> None:
-    """Record why output `index` did not arrive, unless an earlier copy of it
-    did: a copy sent while the workload ran is its last state, and beats
-    none."""
+    """Record why output `index` did not arrive, unless an earlier copy did.
+
+    A copy sent while the workload ran is its last state, and beats none.
+    """
     if not isinstance(found.get(index), bytes):
         found[index] = why

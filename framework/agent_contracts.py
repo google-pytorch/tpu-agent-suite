@@ -38,9 +38,9 @@ TpuAgentSuiteError = utils.TpuAgentSuiteError
 # staged dist). Editing this constant in the source tree applies to future
 # package builds; to disable verification in an already-built or installed
 # environment via the constant, edit the built agent_contracts.py directly.
-# Alternatively, set the TPU_AGENT_SUITE_DISABLE_SCHEMA_VERIFIERS environment variable
-# to disable verification for any existing install without editing files or
-# rebuilding.
+# Alternatively, set the TPU_AGENT_SUITE_DISABLE_SCHEMA_VERIFIERS environment
+# variable to disable verification for any existing install without editing
+# files or rebuilding.
 DISABLE_SCHEMA_VERIFIERS = False
 DISABLE_SCHEMA_VERIFIERS_ENV_VAR = "TPU_AGENT_SUITE_DISABLE_SCHEMA_VERIFIERS"
 
@@ -228,7 +228,8 @@ def builtin_validate_schema(
         ctx_run_id = event_payload.get("context", {}).get("run_id")
 
         if candidates:
-            # Check candidates in reverse order: the last JSON that satisfies the schema wins.
+            # Check candidates in reverse order: the last JSON that satisfies
+            # the schema wins.
             val_errors: list[str] = []
             matched = False
             for cand in reversed(candidates):
@@ -289,7 +290,8 @@ def builtin_validate_schema(
                 "followup_message": err_msg
             }
 
-        # Check candidates in reverse order: the last JSON that satisfies the schema wins.
+        # Check candidates in reverse order: the last JSON that satisfies the
+        # schema wins.
         all_errors: list[str] = []
         for cand in reversed(candidates):
             val_errors = utils.validate_instance(cand, produces_schema)
@@ -302,7 +304,8 @@ def builtin_validate_schema(
             if not cand_errors:
                 return {"decision": "allow"}
             if not all_errors:
-                # Save the errors of the last candidate for reporting if none pass
+                # Save the errors of the last candidate for reporting if none
+                # pass
                 all_errors = cand_errors
 
         err_msg = (

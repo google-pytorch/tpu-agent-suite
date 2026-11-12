@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for loading compute drivers from outside the package
-(`framework/compute/drivers/external.py`)."""
+"""Unit tests for loading compute drivers from outside the package.
+
+The loader is `framework/compute/drivers/external.py`.
+"""
 
 from __future__ import annotations
 

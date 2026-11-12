@@ -164,9 +164,10 @@ class TestContractHooks(unittest.TestCase):
 
     def _request(self, agent: str, payload: dict | str) -> str:
         # A dict is encoded as the JSON payload a precise caller would send; a
-        # str is passed through as the prose the kernel-worker actually dispatches.
-        # Encoding the prose would wrap it in a JSON string literal, which the
-        # hook reads as "no JSON object here" -- the opposite of the test.
+        # str is passed through as the prose the kernel-worker actually
+        # dispatches. Encoding the prose would wrap it in a JSON string
+        # literal, which the hook reads as "no JSON object here" -- the
+        # opposite of the test.
         prompt = payload if isinstance(payload, str) else json.dumps(payload)
         decision = self.runtime.agent_contracts.builtin_validate_schema(
             "tpu-agent-suite", self.workspace, {
@@ -191,7 +192,7 @@ class TestContractHooks(unittest.TestCase):
             })
         return decision.get("decision", "allow")
 
-    # -- requests -------------------------------------------------------------
+    # Requests.
 
     def test_requests_reject_bad_payloads(self):
         """Each row is a valid dispatch with exactly one defect."""
@@ -285,7 +286,7 @@ class TestContractHooks(unittest.TestCase):
             with self.subTest(agent=agent, fields=sorted(payload)):
                 self.assertEqual(self._request(agent, payload), "allow")
 
-    # -- every handoff in the tpu-kernel-development workflow -----------------------------
+    # Every handoff in the tpu-kernel-development workflow.
 
     # What each caller says. Every dispatch goes out as a JSON object carrying
     # `prompt` and `run_id` -- prose alone is denied, because a subagent never
@@ -339,7 +340,7 @@ class TestContractHooks(unittest.TestCase):
     def test_a_dispatch_without_run_id_is_denied(self):
         """The regression this pass fixes.
 
-        Six result schemas require `run_id`. A subagent never sees
+        Several result schemas require `run_id`. A subagent never sees
         SessionStart, so the delegation is its only source for the value:
         dispatched without one it cannot write an artifact under the right run
         and cannot return a valid result. The denial has to land on the caller,
@@ -370,7 +371,7 @@ class TestContractHooks(unittest.TestCase):
                       encoding="utf-8"))
         return build["contracts"][agent]
 
-    # -- results ----------------------------------------------------------------
+    # Results.
 
     def test_claimed_outcome_without_its_payload_is_denied_at_the_hook(self):
         """The regression this file exists for: `status_requires` at the hook.
@@ -455,8 +456,10 @@ class TestContractHooks(unittest.TestCase):
             }), "allow")
 
     def test_honest_results_are_allowed(self):
-        """An honest failure must stay representable for every agent, and
-        XProf's own strings and shapes are not the framework's to constrain."""
+        """An honest failure must stay representable for every agent.
+
+        XProf's own strings and shapes are not the framework's to constrain.
+        """
 
         def report(status, **fields):
             return dict(status=status, run_id=RUN_ID, **fields)

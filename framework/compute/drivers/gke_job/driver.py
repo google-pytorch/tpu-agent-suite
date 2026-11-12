@@ -141,7 +141,7 @@ class GkeJobDriver(base.ComputeDriver):
         """Whether the cluster refused the gcloud account but let ADC in."""
         return self.kube.using_adc
 
-    # -- construction ------------------------------------------------------
+    # Construction.
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> GkeJobDriver:
@@ -150,12 +150,14 @@ class GkeJobDriver(base.ComputeDriver):
 
     @classmethod
     def register_cli_args(cls, parser: Any) -> None:
+        """Add the `GkeJobConfig` flags; see `add_cli_flags`."""
         add_cli_flags(parser, cls.add_cli_arg)
 
     def needed_tools(self) -> tuple[str, ...]:
+        """The GKE tools, without the auth plugin if the kubeconfig skips it."""
         return base.gke_tools(self.kube.cmd([]))
 
-    # -- inspect -----------------------------------------------------------
+    # Inspect.
 
     def inspect(self) -> base.HardwareProfile:
         """Report the TPU node pool this driver would dispatch onto.
@@ -230,6 +232,7 @@ class GkeJobDriver(base.ComputeDriver):
         )
 
     def describe_target(self) -> str:
+        """The kubeconfig and context, namespace and any Kueue queue."""
         where = (f"kubeconfig {self.config.kubeconfig}"
                  if self.config.kubeconfig else "the current kubectl context")
         if self.config.kube_context:
@@ -244,7 +247,7 @@ class GkeJobDriver(base.ComputeDriver):
         """See `preflight.target_checks`."""
         return target_checks(self.kube, self.config, checks)
 
-    # -- dispatch ----------------------------------------------------------
+    # Dispatch.
 
     def _clean_bucket(self, needed: bool) -> str:
         """Return the staging bucket. Raise only if `needed` and unset."""
@@ -549,7 +552,8 @@ class GkeJobDriver(base.ComputeDriver):
                          run_id: str | None) -> str:
         """`name`, or `name` with a random suffix if another run holds it.
 
-        Raises NAME_TAKEN if this run's live job holds it."""
+        Raises NAME_TAKEN if this run's live job holds it.
+        """
         if self._name_unused(name):
             return name
         # Cleanup and trimming can map two --name values to one Job name.
@@ -585,7 +589,8 @@ class GkeJobDriver(base.ComputeDriver):
     def _name_unused(self, name: str) -> bool:
         """Whether no Job or ConfigMap called `name` exists.
 
-        A failed lookup returns True; the ConfigMap create catches clashes."""
+        A failed lookup returns True; the ConfigMap create catches clashes.
+        """
         try:
             proc = self.kube.run(["get", "configmap,job", name] +
                                  self.kube.ns() +
@@ -686,7 +691,7 @@ class GkeJobDriver(base.ComputeDriver):
             name = f"{prefix}-{name}"
         return name[:MAX_JOB_NAME_LEN - len(suffix)].rstrip("-") + suffix
 
-    # -- job lifecycle -----------------------------------------------------
+    # Job lifecycle.
 
     def get_status(self, job_id: str) -> base.AsynchronousExecutionResult:
         """See `records.read_and_record_status`."""

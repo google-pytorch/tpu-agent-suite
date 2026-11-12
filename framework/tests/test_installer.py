@@ -62,8 +62,10 @@ class _InstallerTestCase(unittest.TestCase):
         self.pkg_dir = self._create_test_package()
 
     def _install(self, workspace: Path | None, **kwargs) -> None:
-        """Install headlessly into `workspace`, from `self.dist_dir` unless
-        `distribution` is given."""
+        """Install headlessly into `workspace`.
+
+        The distribution is `self.dist_dir` unless `distribution` is given.
+        """
         kwargs.setdefault("distribution", self.dist_dir)
         installer.install(destination=workspace,
                           non_interactive=True,
@@ -165,8 +167,8 @@ class _TranslatedInstallerTestCase(_InstallerTestCase):
 
     def setUp(self):
         super().setUp()
-        # The host check shells out to python3; its own test is in
-        # TestHostCheck.
+        # The host check shells out to python3; its own test is
+        # TestHostCheck in test_installer_hooks.py.
         host_check = mock.patch.object(installer, "check_host")
         self.check_host = host_check.start()
         self.addCleanup(host_check.stop)
@@ -178,9 +180,11 @@ class TestInstaller(_TranslatedInstallerTestCase):
     """Unit tests for installer functions, pre-validations, collisions, and rollback."""
 
     def test_install_without_a_terminal_fails_fast_naming_headless_flags(self):
-        """Without a TTY an interactive install would hang on (or die
-        mid-prompt reading) stdin; it must refuse before doing anything.
-        --force never asks, so it installs."""
+        """Without a TTY, an interactive install refuses before doing anything.
+
+        Otherwise it would hang on (or die mid-prompt reading) stdin. --force
+        never asks, so it installs.
+        """
         argv = [
             "install",
             str(self.temp_dir), "--destination",
@@ -198,9 +202,11 @@ class TestInstaller(_TranslatedInstallerTestCase):
             install.assert_called_once()
 
     def test_install_refuses_a_relocated_store(self):
-        """Hooks always run ~/.tpu-agent-suite/.../runtime.py,
-        so a store TPU_AGENT_SUITE_HOME moved elsewhere breaks every hook.
-        Refuse before writing anything."""
+        """Hooks always run ~/.tpu-agent-suite/.../runtime.py.
+
+        So a store TPU_AGENT_SUITE_HOME moved elsewhere breaks every hook.
+        Refuse before writing anything.
+        """
         workspace = self._workspace("workspace_relocated")
         argv = [
             "install",
@@ -260,8 +266,10 @@ class TestInstaller(_TranslatedInstallerTestCase):
                       out.getvalue())
 
     def test_a_conflicting_user_setting_stops_the_install_untouched(self):
-        """A conflicting setting stops the install before anything is written,
-        even with --force."""
+        """A conflicting setting stops the install before anything is written.
+
+        This holds even with --force.
+        """
         workspace = self._workspace("workspace_setting_conflict")
         settings = workspace / ".claude" / "settings.json"
         settings.parent.mkdir()
@@ -289,8 +297,10 @@ class TestInstaller(_TranslatedInstallerTestCase):
                 self.assertFalse((self.central_home / "packages").exists())
 
     def test_install_refuses_a_harness_version_outside_the_target(self):
-        """A version outside the target's range is refused; one inside
-        installs."""
+        """A harness version outside the target's range is refused.
+
+        A version inside the range installs.
+        """
         workspace = self._workspace("workspace_harness_version")
         plan = jsonio.load_json(self.dist_dir / "tpu-agent-suite-install.json")
 
@@ -375,7 +385,7 @@ class TestInstaller(_TranslatedInstallerTestCase):
             env, source = paths.resolve_environment("pkg@1.0.0", home)
             # A bare name, as typed by hand in $HOME, finds the same file
             # rather than making a new copy beside it.
-            self.assertEqual(compute_setup._environment("pkg", home),
+            self.assertEqual(compute_setup._require_environment("pkg", home),
                              (env, source))
         self.assertEqual((env, source.resolve()), (saved, central.resolve()))
         self.assertEqual(

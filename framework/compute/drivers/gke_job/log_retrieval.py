@@ -329,8 +329,11 @@ def pod_logs(
     job_id: str,
     pods: list[dict[str, Any]] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """`kubectl logs` of the Job, unchecked. For a multi-host Job, of the
-    first pod to fail if one did, else the leader's."""
+    """`kubectl logs` of the Job, unchecked.
+
+    For a multi-host Job, the logs of the first pod to fail if one did, else
+    the leader's.
+    """
     target = f"job/{job_id}"
     record = jobs.JobRecord.load(job_id)
     if (record.extra if record else {}).get("hosts", 1) > 1:

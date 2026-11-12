@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Locating the enclosing git repository, the ~/.tpu-agent-suite store, and the
+"""Locating the git repository, the central store, and its packages.
+
+Covers the enclosing git repository, the ~/.tpu-agent-suite store, and the
 packages installed in it.
 """
 
@@ -26,8 +28,8 @@ from framework import jsonio, utils
 
 Path = pathlib.Path
 
-# Plan-relative prefix for central-store payloads (~/.tpu-agent-suite/packages/).
-# Shared by the compiler's install plan and the installer's target routing.
+# Plan-relative prefix for central-store payloads
+# (~/.tpu-agent-suite/packages/), as spelled by central_prefix_for.
 TPU_AGENT_SUITE_DIRNAME = ".tpu-agent-suite"
 PACKAGES_DIRNAME = "packages"
 RUNS_DIRNAME = "runs"
@@ -42,7 +44,8 @@ OWNERSHIP_FILE = "ownership.json"
 VERIFICATION_FILE = "verification.json"
 
 # Home-anchored paths for compiled prompts ("~/" expands on the target machine).
-# Runtime code uses get_tpu_agent_suite_home() instead so $TPU_AGENT_SUITE_HOME works.
+# Runtime code uses get_tpu_agent_suite_home() instead so $TPU_AGENT_SUITE_HOME
+# works.
 TPU_AGENT_SUITE_HOME_SPELLING = f"~/{TPU_AGENT_SUITE_DIRNAME}"
 RUNS_HOME_SPELLING = f"{TPU_AGENT_SUITE_HOME_SPELLING}/{RUNS_DIRNAME}"
 

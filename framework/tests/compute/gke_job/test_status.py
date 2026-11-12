@@ -74,8 +74,11 @@ class TestGkeJobImagePull(GkeJobLifecycleBase):
 
     @classmethod
     def _pull_events(cls, span: float) -> str:
-        """The kubelet's events for pulls failing from FIRST_FAILURE for
-        `span` seconds, and for back-offs that went on for an hour."""
+        """The kubelet's events for pulls failing since FIRST_FAILURE.
+
+        They cover `span` seconds of failures, and back-offs that went on for
+        an hour.
+        """
         first = gke_job.gke_common.parse_time(cls.FIRST_FAILURE)
 
         def stamp(offset: float) -> str:
@@ -116,9 +119,11 @@ class TestGkeJobImagePull(GkeJobLifecycleBase):
         })
 
     def test_a_pull_failure_is_final_only_once_it_lasts(self):
-        """The waiting reason outlasts the failure while a retry pulls; a
-        multi-gigabyte retry after one blip must be left to finish. Without
-        readable events (forbidden, or aged out) it is never final."""
+        """The waiting reason outlasts the failure while a retry pulls.
+
+        A multi-gigabyte retry after one blip must be left to finish. Without
+        readable events (forbidden, or aged out) it is never final.
+        """
         cases = [
             ("ErrImagePull", dict(span=0)),
             ("ImagePullBackOff", dict(span=0)),
@@ -143,9 +148,10 @@ class TestGkeJobImagePull(GkeJobLifecycleBase):
         self.assertIsNone(fake.find("get events"))
 
     def test_a_pull_failure_on_a_submitted_job_is_deleted_and_recorded(self):
-        """`job status` settles the record, and the reaper skips a settled
-        record: without the delete, the Job would pull forever on a TPU
-        node with nothing left to clean it up.
+        """`job status` settles the record and deletes the Job.
+
+        The reaper skips a settled record: without the delete, the Job would
+        pull forever on a TPU node with nothing left to clean it up.
 
         The status read is the one recorded: reading the Job again to
         delete it could find it vanishing and record a bare CANCELLED.
@@ -250,7 +256,7 @@ class TestGkeJobMissingJob(GkeJobLifecycleBase):
 class TestGkeJobKueue(GkeJobLifecycleBase):
     """Kueue holding, refusing or stopping a Job."""
 
-    # -- Kueue refusing a suspended Job ------------------------------------
+    # Kueue refusing a suspended Job.
 
     CREATED = "2026-01-01T00:00:00Z"
 
@@ -446,9 +452,11 @@ class TestGkeJobKueue(GkeJobLifecycleBase):
                 stopped("finished-gc", "GC")))
 
     def test_kueue_waits_that_end_on_their_own_stay_pending(self):
-        """No free quota, a queue someone has put on hold, and a preemption
-        Kueue requeued are all waits, not refusals. Kueue's message says
-        which, and is passed on."""
+        """No free quota, a held queue and a requeued preemption are all waits.
+
+        None of them is a refusal: each ends on its own. Kueue's message says
+        which, and is passed on.
+        """
         held = self._unreserved("Inadmissible", "ClusterQueue cq is inactive")
         stopped = self._queue("Stopped")
         # (case, the Workload, its queue's answer, kueue_reason, in the error)
@@ -496,8 +504,10 @@ class TestGkeJobKueue(GkeJobLifecycleBase):
                 self.assertIsNone(fake.find("delete job"))
 
     def test_no_workload_after_the_grace_period_fails_the_job(self):
-        """Kueue makes no Workload for a Job naming a priority class the
-        cluster lacks; that Job stays suspended forever."""
+        """Kueue makes no Workload for a Job naming an unknown priority class.
+
+        The cluster lacks the class, so that Job stays suspended forever.
+        """
         late = gke_job.kueue_admission.KUEUE_WORKLOAD_GRACE_SEC + 1
         none = {self.LABELLED: self._items(), self.UNLABELLED: self._items()}
         fake = self._kueue(
@@ -555,8 +565,11 @@ class TestGkeJobKueue(GkeJobLifecycleBase):
         self.assertIsNone(fake.find(gke_job.kueue_admission.WORKLOAD_RESOURCE))
 
     def test_an_unreadable_workload_list_stays_pending(self):
-        """Only an answer the cluster gave may fail a Job: no Kueue CRD, no
-        right to list Workloads, or no answer at all says nothing."""
+        """Only an answer the cluster gave may fail a Job.
+
+        No Kueue CRD, no right to list Workloads, or no answer at all says
+        nothing.
+        """
         unreadable = {
             "no CRD": (1, "", 'error: the server doesn\'t have a resource '
                        'type "workloads"'),
@@ -575,7 +588,7 @@ class TestGkeJobKueue(GkeJobLifecycleBase):
             self.UNLABELLED: (1, "", "Forbidden")
         })
         self.assertEqual(self.kueue_status(fake).status, "PENDING")
-        # A read that times out raises in `_kubectl`; it must not escape.
+        # A read that times out raises in `Kubectl.run`; it must not escape.
         answering = self._kueue()
 
         def hang_on_workloads(cmd: list[str], **kwargs: Any):
@@ -596,8 +609,11 @@ class TestGkeJobFailedPod(GkeJobLifecycleBase):
     SHUTDOWN = "Pod was terminated in response to imminent node shutdown."
 
     def test_failed_job_says_why_the_pod_ended(self):
-        """Exit 137 and no traceback reads as a crash; the pod's own reason
-        (an eviction for a full disk, a node shutdown) is the diagnosis."""
+        """Exit 137 and no traceback reads as a crash.
+
+        The pod's own reason (an eviction for a full disk, a node shutdown) is
+        the diagnosis.
+        """
         killed = dict(exit_code=137, container_reason="Error")
         evicted = dict(reason="Evicted", message=self.LOW_DISK)
         disrupted = dict(type="DisruptionTarget",
@@ -641,8 +657,10 @@ class TestGkeJobFailedPod(GkeJobLifecycleBase):
                     jobs.JobRecord.load("run-1").extra["error"], error)
 
     def test_a_vanished_job_says_where_it_was_last_seen(self):
-        """A `--serve` Job deleted out from under the run used to give only
-        kubectl's NotFound."""
+        """A `--serve` Job deleted out from under the run.
+
+        It used to give only kubectl's NotFound.
+        """
         jobs.JobRecord.create(job_id="run-1", backend="gke_job", serve=True)
         record = jobs.JobRecord.load("run-1")
         record.start_time = "2026-01-01T00:00:00+00:00"

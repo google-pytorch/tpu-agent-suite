@@ -40,8 +40,11 @@ class Cut:
     """Where the bundle starts, and how that point was established."""
 
     detected: bool
-    basis: str  # skill-tool-use | slash-command | skill-file-read | user-consented-all | none
-    key: Any = None  # record index (claude-code) or step_index (Google harnesses)
+    # skill-tool-use | slash-command | skill-file-read | user-consented-all |
+    # none
+    basis: str
+    # Record index (claude-code) or step_index (Google harnesses).
+    key: Any = None
     # How `key` selects records. "index" slices by position; any other value
     # names a record field compared with >=. Keeping this on the cut lets
     # slicing stay generic, so harness knowledge lives only in the resolver.
@@ -78,7 +81,7 @@ class SessionBundle:
     missing: list[str] = dataclasses.field(default_factory=list)
 
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
+def read_transcript(path: Path) -> list[dict[str, Any]]:
     """Parse a JSONL transcript, skipping lines that do not parse.
 
     A session killed mid-write leaves a truncated final line, so a bad line is
@@ -111,9 +114,7 @@ def file_size(path: Path) -> int:
         return 0
 
 
-# --------------------------------------------------------------------------
-# claude-code resolver
-# --------------------------------------------------------------------------
+# Claude Code resolver.
 
 
 def _claude_root_transcript(session_id: str) -> Path | None:
@@ -232,7 +233,7 @@ def _claude_included_agents(
     # Index which transcript contains each tool_use id, so a nested agent can
     # be attributed to the agent that launched it rather than to the root.
     agent_tool_uses = {
-        agent_id: _claude_owned_tool_uses(read_jsonl(entry["path"]))
+        agent_id: _claude_owned_tool_uses(read_transcript(entry["path"]))
         for agent_id, entry in agents.items()
     }
 
@@ -271,7 +272,7 @@ def resolve_claude_code(session_id: str, entrypoint: str) -> SessionBundle:
         raise TpuAgentSuiteError(
             f"no Claude Code transcript found for session {session_id}")
 
-    records = read_jsonl(root_path)
+    records = read_transcript(root_path)
     cut = _claude_cut(records, entrypoint)
     cut_index = int(cut.key) if cut.detected else 0
 
@@ -331,9 +332,7 @@ def resolve_claude_code(session_id: str, entrypoint: str) -> SessionBundle:
                          missing=missing)
 
 
-# --------------------------------------------------------------------------
-# Google harness resolver
-# --------------------------------------------------------------------------
+# Google harness resolver.
 #
 # Every harness in harnesses.GOOGLE_HARNESSES stores conversations the same way,
 # so one resolver serves the family. The harness name selects which brain
@@ -359,8 +358,7 @@ def _google_transcript(brain_dir: Path) -> tuple[Path, str]:
     """A conversation's transcript, and which variant it turned out to be.
 
     `transcript_full.jsonl` is preferred, but it is not always written: agy's
-    `--print` mode produces none at all (see the note in
-    `eval/agents/antigravity_wrapper.py`), and a live session may not have
+    `--print` mode produces none at all, and a live session may not have
     flushed it yet. The compact `transcript.jsonl` carries the same records
     and step indices, so it is a usable substitute.
 
@@ -490,7 +488,7 @@ def resolve_google_harness(harness: str, session_id: str,
             f" {session_id}")
 
     root_path, root_source = _google_transcript(brain_dir)
-    records = read_jsonl(root_path) if root_path.is_file() else []
+    records = read_transcript(root_path) if root_path.is_file() else []
     if not root_path.is_file():
         missing.append(f"root transcript not found: {root_path}")
     elif root_source != "transcript_full":
@@ -535,7 +533,7 @@ def resolve_google_harness(harness: str, session_id: str,
                           source=child_source))
 
     # Google harnesses record neither the model nor their own version anywhere
-    # in the transcript, and ship no version_command, so both stay unknown.
+    # in the transcript, so both stay unknown.
     return SessionBundle(harness=harness,
                          session_id=session_id,
                          cut=cut,

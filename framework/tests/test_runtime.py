@@ -59,8 +59,10 @@ class TestRuntimeCli(helpers.RuntimeTestCase):
     """The runtime command line."""
 
     def test_validate_cli_exit_code_and_completed_artifact_rule(self):
-        """`validate` exits 0 on a valid instance and non-zero otherwise, and
-        applies the runtime's completed-artifact rule, not only the schema."""
+        """`validate` exits 0 on a valid instance and non-zero otherwise.
+
+        It applies the runtime's completed-artifact rule, not only the schema.
+        """
         schema = self.temp_dir / "result.json"
         schema.write_text(json.dumps({
             "type": "object",
@@ -151,8 +153,10 @@ class TestAgentContracts(helpers.RuntimeTestCase):
                         }))
 
     def test_schema_examples_satisfy_their_own_schema(self):
-        """Denials quote an example back to the agent as the expected output;
-        one that does not validate is a retry loop."""
+        """Denials quote an example back to the agent as the expected output.
+
+        One that does not validate is a retry loop.
+        """
         checked = 0
         for name, schema in self._package_schemas().items():
             for index, example in enumerate(schema.get("examples", [])):
@@ -348,8 +352,8 @@ class TestWorkspaceRootResolution(unittest.TestCase):
     def test_a_repository_is_not_a_workspace(self):
         """With no active run above the cwd, the cwd answers, not a git root.
 
-        A bare `.tpu-agent-suite` (the installer and logging hooks create one
-        where no session started) is not a marker; only the active-run file is.
+        A bare `.tpu-agent-suite` (the installer creates one where no session
+        started) is not a marker; only the active-run file is.
         """
         repo = self.tmp / "bare-repo"
         (repo / ".git").mkdir(parents=True)
@@ -443,9 +447,12 @@ class TestMissingPackageDegradesGracefully(unittest.TestCase):
             self, "empty_home")
 
     def test_validate_schema_builtin_still_returns_a_decision(self):
-        """Validation degrades to "no contract", the way its other failures
-        do (absent or unparseable build file, unknown agent) -- but says so,
-        since enforcing nothing silently is its own failure."""
+        """Validation degrades to "no contract", but says so.
+
+        It degrades the way its other failures do (absent or unparseable build
+        file, unknown agent), and says so since enforcing nothing silently is
+        its own failure.
+        """
         with contextlib.redirect_stderr(io.StringIO()) as stderr:
             res = agent_contracts.builtin_validate_schema(
                 package="ghost-pkg@9.9.9",
@@ -460,8 +467,10 @@ class TestMissingPackageDegradesGracefully(unittest.TestCase):
         self.assertIn("ghost-pkg@9.9.9", stderr.getvalue())
 
     def test_script_hook_denies_with_the_reason(self):
-        """A script hook denies instead of skipping, as it does for any
-        script it cannot locate -- but the harness still gets a decision.
+        """A script hook denies instead of skipping.
+
+        As it does for any script it cannot locate -- but the harness still
+        gets a decision.
         """
         with contextlib.redirect_stderr(io.StringIO()):
             response, code = dispatch.dispatch_hook(

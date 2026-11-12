@@ -82,8 +82,10 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
     def _fetch_gone_pod_logs(self,
                              answer: tuple[int, str, str],
                              on_path: bool = True) -> tuple[Any, Any]:
-        """fetch_logs for a Job whose pod and copies are gone, with gcloud
-        answering `answer`. Returns (logs or the raised error, the fake)."""
+        """fetch_logs for a Job whose pod and copies are gone.
+
+        gcloud answers `answer`. Returns (logs or the raised error, the fake).
+        """
         record = jobs.JobRecord.create(job_id="run-1", backend="gke_job")
         record.start_time = "2026-01-01T00:20:00+00:00"
         record.extra["uid"] = "uid-1"
@@ -102,8 +104,10 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
                 return exc, fake
 
     def test_logs_of_a_gone_pod_come_from_cloud_logging(self):
-        """No pod, no saved copy, no GCS copy: Cloud Logging's lines, oldest
-        first, under a line saying where they came from."""
+        """No pod, no saved copy, no GCS copy: Cloud Logging's lines.
+
+        They come oldest first, under a line saying where they came from.
+        """
         newest_first = json.dumps([
             self._entry("", message="Killed"),
             self._entry("Downloading shards: 40%"),
@@ -140,8 +144,10 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
                 self.assertIn('labels."k8s-pod/job-name"="run-1"', exc.message)
 
     def test_cloud_logging_query_keeps_to_one_job(self):
-        """Review on #680: cancel and resubmit with the same --name, and a
-        window widened around one Job's times takes in the other's output.
+        """Review on #680: a wide window could take in another Job's output.
+
+        Cancel and resubmit with the same --name, and a window widened around
+        one Job's times takes in the other's output.
 
         With the UID, only this Job's pods match, so the window can be wide.
         Without it (an older record), the window is exactly the record's.
@@ -168,8 +174,10 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
     def _lost_node_fake(self,
                         cloud: list[str],
                         node_log: str = "c1 385\nc2 729\n") -> FakeKubectl:
-        """A Job whose node was reset: the pod is left `Unknown`/255, its log
-        on the node is `node_log`, and Cloud Logging has `cloud`."""
+        """A Job whose node was reset: the pod is left `Unknown`/255.
+
+        Its log on the node is `node_log`, and Cloud Logging has `cloud`.
+        """
         pods = json.dumps(
             {"items": [failed_pod(exit_code=255, container_reason="Unknown")]})
         return FakeKubectl({
@@ -182,11 +190,14 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
         })
 
     def test_a_lost_nodes_log_gets_cloud_loggings_tail(self):
-        """Hard-resetting the node mid-benchmark left `job logs` with c1 and
+        """A log cut short by a node reset is completed from Cloud Logging.
+
+        Hard-resetting the node mid-benchmark left `job logs` with c1 and
         c2, while Cloud Logging also had c4 and c8. The node's copy can end
         mid-line; that line is read from Cloud Logging whole. Status reads
         never ask Cloud Logging; the first log read waits until it has had
-        time to ingest the tail, asks once, and keeps the answer."""
+        time to ingest the tail, asks once, and keeps the answer.
+        """
         jobs.JobRecord.create(job_id="run-1", backend="gke_job")
         driver = make_driver()
         cloud = ["c1 385", "c2 729", "c4 1393", "c8 2613"]
@@ -214,9 +225,11 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
         self.assertIsNone(settled.find("logging read"))
 
     def test_a_lost_nodes_log_read_before_the_job_settles(self):
-        """`job logs` on a pod left Unknown, before any status read, keeps
-        and settles the copy the same way; a copy with no complete line
-        takes all of Cloud Logging's."""
+        """`job logs` on a pod left Unknown, before any status read.
+
+        It keeps and settles the copy the same way; a copy with no complete
+        line takes all of Cloud Logging's.
+        """
         jobs.JobRecord.create(job_id="run-1", backend="gke_job")
         driver = make_driver()
         with patch.object(subprocess, "run",
@@ -370,8 +383,11 @@ class TestGkeJobRun(unittest.TestCase):
                      "google.com/tpu. No preemption victims found.")
 
     def _pending_fake(self) -> FakeKubectl:
-        """A cluster with no free chips: the Job stays active, its pod
-        Pending with the scheduler's reason, for as long as anyone asks."""
+        """A cluster with no free chips: the Job stays active.
+
+        Its pod stays Pending with the scheduler's reason, for as long as
+        anyone asks.
+        """
         unschedulable = dict(type="PodScheduled",
                              status="False",
                              reason="Unschedulable",
@@ -434,8 +450,10 @@ class TestGkeJobRun(unittest.TestCase):
         self.assertIs(signal.getsignal(signal.SIGTERM), before)
 
     def _wait_through(self, timeout: int, *phases: tuple[float, str]):
-        """Run `_wait` on a fake clock against a Job that moves through
-        `phases`, each (seconds, status); the last one never ends."""
+        """Run `_wait` on a fake clock against a Job moving through `phases`.
+
+        Each phase is (seconds, status); the last one never ends.
+        """
         clock = [0.0]
 
         def status(job_id: str) -> base.AsynchronousExecutionResult:

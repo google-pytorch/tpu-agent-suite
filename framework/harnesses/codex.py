@@ -27,7 +27,7 @@ class Codex(base.Harness):
     display_name = "Codex"
     config_dir = ".codex"
 
-    # --- runtime: outbound -------------------------------------------------
+    # Runtime: outbound.
     #
     # Replies are `decision` verdicts. SessionStart, SubagentStop and Stop
     # refuse with `block` and forward `context` as `additional_context`.
@@ -65,22 +65,29 @@ class Codex(base.Harness):
         return response
 
     def reply_session_start(self, reply: base.HookReply) -> dict[str, Any]:
+        """Block on deny; otherwise allow with `additional_context`."""
         return self._block_or_allow(reply, reply.is_deny)
 
     def reply_subagent_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """Block on deny; otherwise allow with `additional_context`."""
         return self._block_or_allow(reply, reply.is_deny)
 
     def reply_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """Block on retry or deny; otherwise allow with `additional_context`."""
         return self._block_or_allow(reply, reply.decision in ("retry", "deny"))
 
     def reply_pre_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """Deny, or allow with rewritten arguments as `tool_input`."""
         return self._tool_reply(reply, with_context=False)
 
     def reply_post_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """Deny, or allow with `additional_context` and `tool_input`."""
         return self._tool_reply(reply, with_context=True)
 
     def reply_session_end(self, reply: base.HookReply) -> dict[str, Any]:
+        """The PreToolUse shape: deny, or allow with any `tool_input`."""
         return self._tool_reply(reply, with_context=False)
 
     def reply_unknown_event(self, reply: base.HookReply) -> dict[str, Any]:
+        """The PreToolUse shape: deny, or allow with any `tool_input`."""
         return self._tool_reply(reply, with_context=False)

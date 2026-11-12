@@ -309,7 +309,7 @@ def iter_skill_documents(
     target: dict[str, Any],
     agent_prefix: str = "",
 ) -> list[tuple[str, str]]:
-    """Yield (skill name, SKILL.md body) for every released skill."""
+    """List (skill name, SKILL.md text) for every released skill."""
     return [(skill["name"],
              skill_document(package_dir, manifest, target, skill,
                             agent_prefix)) for skill in manifest["skills"]]
@@ -355,8 +355,9 @@ def result_contract_lines(schema: dict[str, Any] | None) -> list[str]:
     the `status` enum plus any status `status_requires` keys a rule on; a
     schema naming none gets no lines.
 
-    Returns: the status line first, then one line per payload rule. Empty when
-    the schema names no statuses.
+    Returns:
+        the status line first, then one line per payload rule. Empty when the
+        schema names no statuses.
     """
     statuses: list[str] = []
     payload_rules: dict[str, Any] = {}

@@ -11,8 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for installer hook registration, the harness destinations
-matrix, workspace memory, and the host check."""
+"""Unit tests for installer hook registration.
+
+Also covers the harness destinations matrix, workspace memory, and the host
+check.
+"""
 
 import contextlib
 import io
@@ -260,9 +263,11 @@ class TestWorkspaceMemory(_InstallerTestCase):
         translators.translate(self.pkg_dir, "claude-code", self.dist_dir)
 
     def test_user_scope_writes_where_each_harness_reads_user_memory(self):
-        """~/.claude/CLAUDE.md, ~/.codex/AGENTS.md and ~/.gemini/AGENTS.md,
-        not the bare file in ~, which only a session started in $HOME itself
-        would read."""
+        """~/.claude/CLAUDE.md, ~/.codex/AGENTS.md and ~/.gemini/AGENTS.md.
+
+        Not the bare file in ~, which only a session started in $HOME itself
+        would read.
+        """
         for harness, memory, bare in (
             ("claude-code", ".claude/CLAUDE.md", "CLAUDE.md"),
             ("codex", ".codex/AGENTS.md", "AGENTS.md"),
@@ -280,8 +285,10 @@ class TestWorkspaceMemory(_InstallerTestCase):
 
     def test_reinstall_is_idempotent_and_uninstall_removes_the_created_file(
             self):
-        """Re-installing replaces the block instead of appending a second one;
-        a memory file the install created goes when nothing else remains."""
+        """Re-installing replaces the block instead of appending a second one.
+
+        A memory file the install created goes when nothing else remains.
+        """
         workspace = self._workspace("ws_mem_idem")
         self._install(workspace)
         first = (workspace / "CLAUDE.md").read_text(encoding="utf-8")
@@ -307,8 +314,10 @@ class TestWorkspaceMemory(_InstallerTestCase):
         self.assertIn("unmanaged block", str(ctx.exception))
 
     def test_local_block_edit_is_refused_unless_forced(self):
-        """A hand-edited block is modified managed content; --force replaces
-        it. Uninstall never discards the user's own text or edits."""
+        """A hand-edited block is modified managed content; --force replaces it.
+
+        Uninstall never discards the user's own text or edits.
+        """
         workspace = self._workspace("ws_mem_edited")
         memory = workspace / "CLAUDE.md"
         memory.write_text("# Project\n\nMy notes.\n", encoding="utf-8")
@@ -374,8 +383,10 @@ class TestWorkspaceMemory(_InstallerTestCase):
         self.assertFalse((home / "AGENTS.md").exists())
 
     def test_user_scope_codex_home_outside_home_is_refused(self):
-        """A CODEX_HOME the ledger cannot root fails the install, rather than
-        succeeding into ~/.codex, which that Codex never reads."""
+        """A CODEX_HOME the ledger cannot root fails the install.
+
+        It does not succeed into ~/.codex, which that Codex never reads.
+        """
         home = self._workspace("home_codex_outside")
         outside = self._workspace("codex_home_outside")
         with self.assertRaises(utils.TpuAgentSuiteError) as ctx:
@@ -412,8 +423,10 @@ class TestWorkspaceMemory(_InstallerTestCase):
         self._assert_one_block(home / ".codex" / "AGENTS.md")
 
     def test_upgrade_moves_block_from_home_agents_md(self):
-        """An install made before the fix recorded its block at ~/AGENTS.md;
-        the upgrade strips it there and writes it once where it is read."""
+        """An install made before the fix recorded its block at ~/AGENTS.md.
+
+        The upgrade strips it there and writes it once where it is read.
+        """
         for harness, memory in (
             ("codex", Path(".codex/AGENTS.md")),
             ("antigravity", Path(".gemini/AGENTS.md")),

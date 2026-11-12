@@ -11,10 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the compute drivers: plugin registration, driver CLI
-flags and auto-discovery, host probing, the local job lifecycle, and the
-lifecycle GceTpuVmDriver and GkePodDriver share, exercised once against
-both transports, plus each transport's own commands."""
+"""Unit tests for the compute drivers.
+
+Covers plugin registration, driver CLI flags and auto-discovery, host probing,
+the local job lifecycle, and the lifecycle GceTpuVmDriver and GkePodDriver
+share, exercised once against both transports, plus each transport's own
+commands.
+"""
 
 from __future__ import annotations
 
@@ -700,8 +703,10 @@ class TestRemoteShellDrivers(ScriptMixin, unittest.TestCase):
     @patch("subprocess.run")
     def test_runs_serialise_on_the_target_lock_and_busy_never_started(
             self, mock_run):
-        """Concurrent runs against one accelerator must not interleave, and
-        losing the lock race is not a failed run, nor may it read as one."""
+        """Concurrent runs against one accelerator must not interleave.
+
+        Losing the lock race is not a failed run, nor may it read as one.
+        """
         for name, make_driver in _shell_drivers().items():
             with self.subTest(name):
                 mock_run.side_effect = [

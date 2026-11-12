@@ -124,9 +124,11 @@ class RoundRecordTestCase(StudyStoreTestCase):
         return base
 
     def start_based(self, study_id: str, **overrides):
-        """Open a study that already has a baseline, so arms may report a
-        delta. Most round tests need one; a delta without a baseline is a
-        comparison with nothing on the other side."""
+        """Open a study that already has a baseline, so arms may report a delta.
+
+        Most round tests need one; a delta without a baseline is a
+        comparison with nothing on the other side.
+        """
         doc = self.start(study_id, **overrides)
         # The baseline must itself meet the pre-registered replicate count,
         # so derive it rather than hardcoding one that a stricter protocol

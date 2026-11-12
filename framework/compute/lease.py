@@ -123,6 +123,7 @@ def _doc(run_id: str, name: str) -> dict[str, Any]:
 
 
 def read_owner(run_id: str) -> dict[str, Any]:
+    """The run's lease owner record; {} if the run is not leased."""
     return _doc(run_id, OWNER_FILE)
 
 
@@ -200,8 +201,10 @@ def _failed_sweeps(run_id: str) -> int:
 
 
 def is_orphaned(run_id: str) -> bool:
-    """Whether a run has ended with no watcher left to reap it, and the
-    sweep has not given up on it."""
+    """Whether a run has ended with no watcher left to reap it.
+
+    A run the sweep has given up on is not orphaned.
+    """
     return (has_ended(run_id) and not _watcher_alive(run_id)
             and _failed_sweeps(run_id) < SWEEP_ATTEMPTS)
 

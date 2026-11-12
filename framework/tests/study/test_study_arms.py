@@ -392,7 +392,8 @@ class StudyArmClaimAndReleaseTestCase(RoundRecordTestCase):
                      claimed_at="2020-01-01T00:00:00-08:00"),
         ])
 
-        # Claiming with claim_ttl_seconds=60.0 automatically recovers the expired in_flight lease
+        # Claiming with claim_ttl_seconds=60.0 automatically recovers the
+        # expired in_flight lease
         reclaimed = study.claim_arm("claim-ttl",
                                     worker_id="new-worker",
                                     claim_ttl_seconds=60.0,

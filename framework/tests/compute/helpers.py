@@ -17,8 +17,8 @@ Test Coverage Overview:
 - test_drivers: plugin registration, driver CLI flags, driver auto-discovery,
   host probing, the local job lifecycle, and the lifecycle GceTpuVmDriver
   and GkePodDriver share, plus each transport's own commands.
-- test_config / test_setup: 3-tier configuration resolution, environment.json
-  schemas, CLI override precedence, and `compute setup`.
+- test_config / test_setup: driver resolution from the environment file,
+  environment.json schemas, CLI override precedence, and `compute setup`.
 - test_cli / test_preflight: `runtime.py compute` behaviour, output
   envelopes, preflight checks, and the generated agent contract.
 """

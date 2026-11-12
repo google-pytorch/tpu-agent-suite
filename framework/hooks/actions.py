@@ -90,7 +90,8 @@ def hook_failure(
             log_file = paths.get_tpu_agent_suite_home(
             ) / utils.HOOK_FAILURE_LOG
             log_file.parent.mkdir(parents=True, exist_ok=True)
-            # Use a single atomic O_APPEND write to avoid interleaving across processes.
+            # Use a single atomic O_APPEND write to avoid interleaving across
+            # processes.
             line = (json.dumps(record) + "\n").encode("utf-8")
             fd = os.open(log_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT,
                          0o644)
@@ -367,7 +368,8 @@ def _builtin_start_run(
     if event_payload:
         session_id = events.event_session_id(event_payload)
 
-    # 1. Idempotency check: reuse existing run_id if this session already initialized one
+    # 1. Idempotency check: reuse existing run_id if this session already
+    #    initialized one
     if session_id:
         existing_run_id = run_state.resolve_session_run_id(session_id)
         if existing_run_id:
@@ -403,7 +405,8 @@ def _allow_run(package: str, workspace: Path, run_id: str, message: str,
     if note:
         run_context = run_state.format_run_context(run_id)
         result["context"] = f"{run_context}\n\n{note}"
-        # Later turns replay only the run context, since the check result can go stale.
+        # Later turns replay only the run context, since the check result can
+        # go stale.
         result["replay_context"] = run_context
     return result
 
@@ -550,7 +553,8 @@ def _builtin_skill_tools(
     """Keep the main thread limited to its skill's tools for the rest of the session."""
     payload = event_payload or {}
     raw_input = payload.get("raw_input") or {}
-    # Claude Code sets agent_id on events from subagents; only the main thread is limited.
+    # Claude Code sets agent_id on events from subagents; only the main thread
+    # is limited.
     if isinstance(raw_input, dict) and raw_input.get("agent_id"):
         return {"decision": "allow"}
     session_id = events.event_session_id(payload)
@@ -560,7 +564,8 @@ def _builtin_skill_tools(
     tool = payload.get("tool", "")
 
     if payload.get("event") == "PostToolUse":
-        # Skill isn't in tool-mappings, so it keeps Claude Code's native name and input.
+        # Skill isn't in tool-mappings, so it keeps Claude Code's native name
+        # and input.
         if tool != "Skill" or payload.get("success") is False:
             return {"decision": "allow"}
         args = payload.get("args") or {}
@@ -572,7 +577,8 @@ def _builtin_skill_tools(
             # Skills from other packages don't change anything.
             return {"decision": "allow"}
         if table[name] is None:
-            # A package skill with no tool limit (e.g. trajectory export) lifts it.
+            # A package skill with no tool limit (e.g. trajectory export) lifts
+            # it.
             active_file.unlink(missing_ok=True)
         else:
             jsonio.write_json(

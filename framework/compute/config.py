@@ -271,9 +271,10 @@ def resolve_driver(
         name, source = resolve_profile_name(env_data, profile_override, run_id)
     env_backend, env_params = parse_compute_section(env_data, name, source)
 
-    # Merge parameter dictionaries with CLI overrides taking precedence over environment.json.
-    # Unset CLI arguments default to None in argparse; filtering out None values ensures that
-    # an unspecified CLI flag does not unintentionally erase a configured value from environment.json.
+    # Merge parameter dictionaries with CLI overrides taking precedence over
+    # environment.json. Unset CLI arguments default to None in argparse;
+    # filtering out None values ensures that an unspecified CLI flag does not
+    # unintentionally erase a configured value from environment.json.
     params = {
         **env_params,
         **{
@@ -313,7 +314,8 @@ def resolve_driver(
         from . import setup  # setup imports this module
 
         # Validate with setup-field CLI overrides applied (e.g. `--image`).
-        # Run-only flags like `--cpu-requests` are ignored so they aren't rejected.
+        # Run-only flags like `--cpu-requests` are ignored so they aren't
+        # rejected.
         fields = driver_cls.SETUP_FIELDS.all_fields()
         checked = setup.validate_profile(
             name, profiles[name], {

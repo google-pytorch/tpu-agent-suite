@@ -28,7 +28,8 @@ Path = pathlib.Path
 
 def register_compute_parser(sub: Any) -> None:
     """Attach `compute` and its subcommands to the runtime's subparsers."""
-    # Common compute flags shared between the top-level 'compute' parser and its subcommands
+    # Common compute flags shared between the top-level 'compute' parser and
+    # its subcommands
     compute_common = argparse.ArgumentParser(add_help=False)
     compute_common.add_argument(
         "--workspace",
@@ -36,8 +37,6 @@ def register_compute_parser(sub: Any) -> None:
         default=argparse.SUPPRESS,
         help="Optional workspace root directory override",
     )
-    # Backends are validated in `resolve_driver` rather than via `choices` so
-    # unknown or broken drivers produce a structured INVALID_BACKEND error.
     compute_common.add_argument(
         "--package",
         default=argparse.SUPPRESS,
@@ -50,6 +49,8 @@ def register_compute_parser(sub: Any) -> None:
         help=
         "Named compute profile from environment.json to use for this command",
     )
+    # Backends are validated in `resolve_driver` rather than via `choices` so
+    # unknown or broken drivers produce a structured INVALID_BACKEND error.
     compute_common.add_argument(
         "--backend",
         default=argparse.SUPPRESS,
@@ -64,7 +65,8 @@ def register_compute_parser(sub: Any) -> None:
         help="Run ID associated with this compute operation",
     )
 
-    # Dynamically register backend-specific CLI flags from all registered drivers
+    # Dynamically register backend-specific CLI flags from all registered
+    # drivers
     for driver_cls in get_registered_drivers().values():
         driver_cls.register_cli_args(compute_common)
 
@@ -212,8 +214,7 @@ def register_compute_parser(sub: Any) -> None:
     p_port_forward.add_argument(
         "--job-id",
         default=None,
-        help=
-        "Target job ID (required for gke_job unless pod is directly specified)",
+        help="Target job ID (required for gke_job)",
     )
     p_port_forward.add_argument(
         "--background",

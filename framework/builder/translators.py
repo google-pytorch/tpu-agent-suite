@@ -364,9 +364,9 @@ GOOGLE_HARNESS_TOOL_MAPS: dict[str, dict[str, list[str]]] = {
 }
 
 # Which function compiles a package for each harness. Registering a Google
-# harness means adding it to `GOOGLE_HARNESS_TOOL_MAPS` above and to
-# `GOOGLE_HARNESSES`; the translator, hook shape, and mappings all follow from
-# the family.
+# harness means adding its adaptor to `harnesses.HARNESSES`; its entry in
+# `GOOGLE_HARNESS_TOOL_MAPS`, the translator, hook shape, and mappings all
+# follow from the family.
 HARNESS_TRANSLATORS: dict[str, Translator] = {
     "claude-code": translate_claude,
     "codex": translate_codex,

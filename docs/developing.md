@@ -38,7 +38,10 @@ pre-commit install
 and `commit-msg` hook types, so a plain `pre-commit install` sets up everything.
 Among other things the hooks add a `Signed-off-by:` trailer to each commit, run
 `ruff`/`yapf`/`isort`, fix markdown, validate the knowledge base, and run
-`scripts/check_denylist.py` on both `git commit` and `git push`. In checkouts
+`scripts/check_denylist.py` on both `git commit` and `git push`. Under
+`framework/`, `ruff` also enforces the docstring convention (its `D` rules,
+Google style): public functions, methods and classes carry a docstring whose
+first line is a one-sentence summary ending in a period. In checkouts
 where the repository denylist is not present on disk, place your local copy at
 `~/.cache/tpu-agent-suite/denylist.yaml` before committing:
 

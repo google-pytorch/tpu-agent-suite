@@ -291,7 +291,8 @@ def load_package(package_dir: Path,
 
         _require_unit_files(package_dir, agent, f"agent {agent['name']}")
 
-    # 6. Delegation graph traversal: cycle detection, max depth <= 3, reachability
+    # 6. Delegation graph traversal: cycle detection, max depth <= 3,
+    #    reachability
     package_checks.validate_delegation_graph(skills, agents_by_name, name_set)
 
     # 6b. `ask` belongs to skills alone. A skill is what the user talks to; an

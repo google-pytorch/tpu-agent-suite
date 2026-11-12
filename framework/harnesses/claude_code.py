@@ -142,7 +142,7 @@ class ClaudeCode(base.Harness):
     display_name = "Claude Code"
     config_dir = ".claude"
 
-    # --- runtime: inbound --------------------------------------------------
+    # Runtime: inbound.
 
     def handback_skip_reason(self, event_payload: dict[str,
                                                        Any]) -> str | None:
@@ -177,7 +177,7 @@ class ClaudeCode(base.Harness):
             return HANDBACK_SKIP
         return None
 
-    # --- runtime: outbound -------------------------------------------------
+    # Runtime: outbound.
     #
     # Every reply opens with the hook's `message` as `systemMessage`. A
     # refusal is `decision: block` with a reason on the stop, session and
@@ -206,21 +206,26 @@ class ClaudeCode(base.Harness):
         return response
 
     def reply_session_end(self, reply: base.HookReply) -> dict[str, Any]:
+        """Only the `systemMessage` banner; nothing can be blocked."""
         # The session is over; there is no loop left to block or resume,
         # so the only thing worth returning is the message.
         return self._reply(reply)
 
     def reply_session_start(self, reply: base.HookReply) -> dict[str, Any]:
+        """Block with the reason on deny, plus `additionalContext`."""
         return self._blocking_reply(reply, "SessionStart", reply.is_deny)
 
     def reply_subagent_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """Block on deny to send the subagent back; with `additionalContext`."""
         return self._blocking_reply(reply, "SubagentStop", reply.is_deny)
 
     def reply_stop(self, reply: base.HookReply) -> dict[str, Any]:
+        """Block on retry or deny, to resume; with `additionalContext`."""
         blocks = reply.decision in ("retry", "deny")
         return self._blocking_reply(reply, "Stop", blocks)
 
     def reply_pre_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """A `permissionDecision`, with `updatedInput` for rewritten args."""
         h_out: dict[str, Any] = {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow" if not reply.is_deny else "deny",
@@ -234,6 +239,7 @@ class ClaudeCode(base.Harness):
         return response
 
     def reply_post_tool_use(self, reply: base.HookReply) -> dict[str, Any]:
+        """Block on deny, with the hook's own reason if any, plus context."""
         # Not `_blocking_reply`: the reason here is the raw one, and only
         # when the hook gave one.
         response = self._reply(reply)
@@ -246,4 +252,5 @@ class ClaudeCode(base.Harness):
         return response
 
     def reply_unknown_event(self, reply: base.HookReply) -> dict[str, Any]:
+        """Only the `systemMessage` banner."""
         return self._reply(reply)

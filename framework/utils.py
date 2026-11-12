@@ -28,9 +28,7 @@ from framework import errors, jsonio
 
 Path = pathlib.Path
 
-# =====================================================================
-# Constants & Configuration
-# =====================================================================
+# Constants & Configuration.
 
 TpuAgentSuiteError = errors.TpuAgentSuiteError
 
@@ -66,8 +64,9 @@ DEFAULT_HOOK_TIMEOUT = 10
 HOOK_FAILURE_POLICIES: tuple[str, ...] = ("deny", "allow")
 DEFAULT_HOOK_ON_FAILURE = "deny"
 # Every such failure is recorded here, under the central store
-# (paths.get_tpu_agent_suite_home()), whichever way the policy decided it: a hook that fails open is otherwise
-# silent, since harnesses keep a hook's stderr out of sight when it exits 0.
+# (paths.get_tpu_agent_suite_home()), whichever way the policy decided it: a
+# hook that fails open is otherwise silent, since harnesses keep a hook's
+# stderr out of sight when it exits 0.
 HOOK_FAILURE_LOG = "logs/hook_failures.jsonl"
 
 RUN_ID_PATTERN = r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$"
@@ -151,9 +150,7 @@ SCHEMA_TYPES: frozenset[str] = frozenset({
     "null",
 })
 
-# =====================================================================
-# Exceptions & Version Management
-# =====================================================================
+# Version Management.
 
 
 @dataclasses.dataclass(frozen=True, order=True)
@@ -230,9 +227,7 @@ def version_satisfies(version: SemVer | tuple[int, int, int] | str,
         c.is_satisfied_by(version) for c in parse_version_range(expression))
 
 
-# =====================================================================
-# Path & JSON / File Utilities
-# =====================================================================
+# Path & JSON / File Utilities.
 
 
 def safe_relative(value: str | Path, label: str) -> Path:
@@ -358,9 +353,7 @@ def extract_all_json_objects(raw: Any) -> list[dict[str, Any]]:
     return candidates
 
 
-# =====================================================================
-# Framework Schemas & Definitions
-# =====================================================================
+# Framework Schemas & Definitions.
 
 
 def get_framework_dir() -> Path:
@@ -578,9 +571,7 @@ TARGET_REQUIREMENTS = "requirements-tpu.txt"
 # every session start, so the compiler ships it with the runtime too.
 HOST_REQUIREMENTS = "requirements-client.txt"
 
-# =====================================================================
-# JSON Schema Validator (Deterministic Subset)
-# =====================================================================
+# JSON Schema Validator (Deterministic Subset).
 
 
 class JsonSchemaValidator:
@@ -802,7 +793,8 @@ class JsonSchemaValidator:
 
             additional_props = schema.get("additionalProperties")
 
-            # Validate typed additionalProperties if specified as a schema object (e.g. env vars)
+            # Validate typed additionalProperties if specified as a schema
+            # object (e.g. env vars)
             if isinstance(additional_props, dict):
                 for key in instance.keys() - properties.keys():
                     errors.extend(
@@ -814,7 +806,8 @@ class JsonSchemaValidator:
                             allow_additional_properties,
                         ))
             else:
-                # Extra properties are only allowed if the schema marked additionalProperties: true AND CLI flag is passed
+                # Extra properties are only allowed if the schema marked
+                # additionalProperties: true AND CLI flag is passed
                 allow_extra = allow_additional_properties and (additional_props
                                                                is True)
                 if not allow_extra and properties:
@@ -904,9 +897,7 @@ def load_schema_example(
     return None
 
 
-# =====================================================================
-# Configuration Managers: JSON & TOML
-# =====================================================================
+# Configuration Managers: JSON & TOML.
 
 
 class JsonConfigManager:
@@ -963,9 +954,9 @@ class JsonConfigManager:
     ) -> None:
         """Deep merge desired dictionary into current, recording added paths.
 
-    Raises:
-      TpuAgentSuiteError: If an existing setting conflicts with the new value.
-    """
+        Raises:
+            TpuAgentSuiteError: If an existing setting conflicts with the new value.
+        """
         for key, value in desired.items():
             path = key_path + [key]
             if key not in current:
@@ -1021,11 +1012,11 @@ class TomlConfigManager:
                   value: Any) -> dict[str, Any] | None:
         """Apply a setting under [section] key = value.
 
-    Returns ownership action record if modified.
+        Returns ownership action record if modified.
 
-    Raises:
-      TpuAgentSuiteError: If an existing setting conflicts with the new value.
-    """
+        Raises:
+            TpuAgentSuiteError: If an existing setting conflicts with the new value.
+        """
         lines = (path.read_text(
             encoding="utf-8").splitlines() if path.exists() else [])
         rendered = cls.render_value(value)
@@ -1066,10 +1057,10 @@ class TomlConfigManager:
 class MarkdownBlockManager:
     """Manages marker-delimited managed blocks inside workspace memory files.
 
-  A managed block is package-owned content bounded by HTML comment markers, so
-  it stays invisible when rendered, is unambiguous to locate, and can be
-  replaced or removed without disturbing the user's own content in the file.
-  """
+    A managed block is package-owned content bounded by HTML comment markers, so
+    it stays invisible when rendered, is unambiguous to locate, and can be
+    replaced or removed without disturbing the user's own content in the file.
+    """
 
     @staticmethod
     def markers(marker: str) -> tuple[str, str]:
@@ -1080,9 +1071,9 @@ class MarkdownBlockManager:
     def locate(cls, text: str, marker: str) -> tuple[int, int] | None:
         """Locate a managed block, returning (start, end) line indices or None.
 
-    Raises:
-      TpuAgentSuiteError: If the markers are unbalanced, inverted, or duplicated.
-    """
+        Raises:
+            TpuAgentSuiteError: If the markers are unbalanced, inverted, or duplicated.
+        """
         begin, end = cls.markers(marker)
         lines = text.splitlines()
         starts = [i for i, line in enumerate(lines) if line.strip() == begin]
@@ -1140,9 +1131,9 @@ class MarkdownBlockManager:
               file_created: bool = False) -> None:
         """Remove a managed block, deleting the file if the install created it.
 
-    A block whose body no longer matches expected_digest was edited by hand and
-    is left in place, so local edits are never silently discarded.
-    """
+        A block whose body no longer matches expected_digest was edited by hand and
+        is left in place, so local edits are never silently discarded.
+        """
         if not path.is_file():
             return
         text = path.read_text(encoding="utf-8")

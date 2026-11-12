@@ -31,8 +31,10 @@ class AntigravityTest(conformance.HarnessConformance):
     harness = harnesses.require("antigravity")
 
     def test_stop_reply(self):
-        """'retry' becomes `continue`, which re-enters the loop and keeps the
-        conversation, so a resumed run picks up instead of repeating."""
+        """'retry' becomes `continue`, which keeps the conversation.
+
+        It re-enters the loop, so a resumed run picks up instead of repeating.
+        """
         resumed = self._reply(
             {
                 "decision": "retry",

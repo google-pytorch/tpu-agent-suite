@@ -191,10 +191,13 @@ class GkeJobLifecycleBase(unittest.TestCase):
 
 @contextlib.contextmanager
 def fake_google_auth(creds: Any):
-    """Stand in for `google.auth` so the ambient-credential path is testable
-    with or without the SDK installed. The code under test imports it lazily;
-    `import google.auth` consults `sys.modules` for the submodule but then
-    reads it as an attribute of the `google` package, so both are patched."""
+    """Stand in for `google.auth` so the ambient-credential path is testable.
+
+    It works with or without the SDK installed. The code under test
+    imports it lazily; `import google.auth` consults `sys.modules` for the
+    submodule but then reads it as an attribute of the `google` package,
+    so both are patched.
+    """
     auth = types.ModuleType("google.auth")
     auth.default = MagicMock(return_value=(creds, "proj"))
     transport = types.ModuleType("google.auth.transport")

@@ -96,9 +96,9 @@ def write_text_atomic(path: Path, text: str, *, mkdir: bool = True) -> None:
     """Replace a file's contents with `text` so no reader sees a partial write."""
     if mkdir:
         path.parent.mkdir(parents=True, exist_ok=True)
-    # Write-then-rename: readers see either the old document or the new one, never
-    # the truncated middle of a write. PID and UUID keep concurrent writers
-    # (across processes and threads) off each other's scratch file.
+    # Write-then-rename: readers see either the old document or the new one,
+    # never the truncated middle of a write. PID and UUID keep concurrent
+    # writers (across processes and threads) off each other's scratch file.
     tmp_path = path.with_name(
         f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:

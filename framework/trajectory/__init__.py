@@ -12,11 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""On-demand export of a session's trajectory to a user-owned GCS bucket.
+"""On-demand export of a session's trajectory to a bucket or Harbor hub.
 
 Collects the entrypoint agent's transcript plus every subagent transcript
 beneath it, scoped to the most recent entrypoint activation, and uploads them
-as one gzipped tar alongside an uncompressed manifest.
+as one gzipped tar alongside an uncompressed manifest, to a user-owned GCS
+bucket or a Harbor hub.
 """
 
 from __future__ import annotations

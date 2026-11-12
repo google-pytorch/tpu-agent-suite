@@ -44,7 +44,7 @@ REQUIREMENTS_CATALOGS: tuple[tuple[str, str, str], ...] = (
 
 
 def dist_ignore(source: Path) -> Callable[[str, list[str]], set[str]]:
-    """copytree ignore callable: excluded names anywhere, excluded paths under source."""
+    """A `shutil.copytree` ignore: excluded names anywhere, excluded paths under source."""
     by_name = shutil.ignore_patterns(*package_discovery.DIST_EXCLUDED_NAMES)
     excluded = {Path(p) for p in package_discovery.DIST_EXCLUDED_PATHS}
 
@@ -482,8 +482,8 @@ _PREAMBLE_FORMS = {
 def memory_scope_preamble(manifest: dict[str, Any]) -> str:
     """Render MEMORY_SCOPE_PREAMBLE for the package's released skills.
 
-  The names read as an English list: `a`; `a` or `b`; `a`, `b`, or `c`.
-  """
+    The names read as an English list: `a`; `a` or `b`; `a`, `b`, or `c`.
+    """
     names = [f"`{s['name']}`" for s in manifest["skills"]]
     if len(names) <= 2:
         skills = " or ".join(names)
@@ -500,13 +500,13 @@ def workspace_memory_merges(
 ) -> list[dict[str, str]]:
     """Build managed workspace memory blocks declared by the package manifest.
 
-  The block text is package content rather than framework text, so it is
-  reviewed and versioned alongside the material it points at, and is inlined
-  here so the installer never needs the package sources. Resource references
-  render through the same token registry as every instruction file, at
-  compile time; the installer applies blocks verbatim. Each block opens with
-  MEMORY_SCOPE_PREAMBLE, so no block has to state its own scope.
-  """
+    The block text is package content rather than framework text, so it is
+    reviewed and versioned alongside the material it points at, and is inlined
+    here so the installer never needs the package sources. Resource references
+    render through the same token registry as every instruction file, at
+    compile time; the installer applies blocks verbatim. Each block opens with
+    MEMORY_SCOPE_PREAMBLE, so no block has to state its own scope.
+    """
     preamble = memory_scope_preamble(manifest)
     merges: list[dict[str, str]] = []
     for entry in manifest.get("workspace_memory", []):
@@ -632,7 +632,8 @@ def build_install_plan(
                             claude_settings_hooks[evt] = []
                         claude_settings_hooks[evt].extend(evt_list)
 
-                # Merge hooks into .claude/settings.local.json alongside env settings
+                # Merge hooks into .claude/settings.local.json alongside env
+                # settings
                 merged_into_existing = False
                 for m in json_merges:
                     if m.get("path"

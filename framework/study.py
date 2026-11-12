@@ -75,9 +75,9 @@ STUDY_STATUS_CLOSED = "closed"
 STUDY_PROTOCOL_SCHEMA = "study-protocol.json"
 STUDY_ROUND_SCHEMA = "study-round.json"
 
-# Canonical bottleneck taxonomy shared across study-round.json and arm-request.json.
-# Asserted to agree with JSON schemas by the test suite so changing the taxonomy
-# has a single source of truth.
+# Canonical bottleneck taxonomy shared across study-round.json and
+# arm-request.json. Asserted to agree with JSON schemas by the test suite so
+# changing the taxonomy has a single source of truth.
 BOTTLENECK_KINDS: tuple[str, ...] = (
     "kernel-block",
     "exposed-collective",
@@ -284,9 +284,7 @@ def study_round(document: dict[str, Any]) -> int:
     return len(document.get("runs", []))
 
 
-# ---------------------------------------------------------------------
-# The two streams beside the study state
-# ---------------------------------------------------------------------
+# The two streams beside the study state.
 #
 # `events.jsonl` is machine-authored. Hooks append to it, so it records what
 # actually happened rather than what an agent remembered to report -- an agent
@@ -297,8 +295,8 @@ def study_round(document: dict[str, Any]) -> int:
 # overflow to, in the same round that overflows them, so a dropped row is
 # archived rather than lost.
 #
-# Both are COLD. A round reads the study state and nothing else; per-round cost has
-# to stay flat whether it is round 2 or round 60, and a stream that grows
+# Both are COLD. A round reads the study state and nothing else; per-round cost
+# has to stay flat whether it is round 2 or round 60, and a stream that grows
 # without bound cannot be in that path. External readers -- a monitoring
 # daemon, a dashboard -- have no context window to spend and may read freely.
 #
@@ -546,7 +544,8 @@ def compute_arm_verdict(
     else:
         return "invalid", None
 
-    # Failed admissibility gate: configuration is inadmissible, cannot count at all
+    # Failed admissibility gate: configuration is inadmissible, cannot count at
+    # all
     if not gates_passed:
         return "invalid", delta_pct
 
@@ -835,7 +834,7 @@ def arm_expected_gain(arm: Mapping[str, Any]) -> float:
     Uses Amdahl `share * headroom` by default, with a fallback to `headroom`
     when `share == 0.0` on step-function kinds (`memory-capacity`,
     `recompilation-padding`) where baseline profile share under-represents the
-    unlock (`tpu-performance-optimization.md:147`).
+    unlock (see the ceiling-formula note in `tpu-performance-optimization.md`).
     """
     share = float(arm.get("share") or 0.0)
     headroom = float(arm.get("headroom") or 0.0)
@@ -1051,11 +1050,11 @@ def attach_run_to_study(study_id: str, run_id: str) -> dict[str, Any]:
             document["runs"].append(run_id)
             saved = save_study(document)
 
-            # The attach is also the study's "a session joined" marker. SessionStart
-            # fires before any agent turn, so at that moment the run exists and
-            # belongs to nothing, and a strictly-routed SessionStart event could
-            # never reach a study. This event carries the same information at the
-            # first moment it can be attributed.
+            # The attach is also the study's "a session joined" marker.
+            # SessionStart fires before any agent turn, so at that moment the
+            # run exists and belongs to nothing, and a strictly-routed
+            # SessionStart event could never reach a study. This event carries
+            # the same information at the first moment it can be attributed.
             append_study_event(study_id,
                                "attach",
                                run_id=run_id,
@@ -1084,9 +1083,10 @@ def list_studies() -> list[dict[str, Any]]:
         try:
             out.append(jsonio.load_json(doc_path))
         except (TpuAgentSuiteError, ValueError, OSError) as exc:
-            # jsonio.load_json wraps a decode failure in TpuAgentSuiteError, so catching
-            # only the stdlib errors would let one corrupt study state take the
-            # whole board down -- the opposite of what this listing is for.
+            # jsonio.load_json wraps a decode failure in TpuAgentSuiteError, so
+            # catching only the stdlib errors would let one corrupt study state
+            # take the whole board down -- the opposite of what this listing is
+            # for.
             out.append({"study_id": child.name, "error": str(exc)})
     out.sort(key=lambda d: str(d.get("updated_at", "")), reverse=True)
     return out
@@ -1343,9 +1343,7 @@ def release_arm(
         return dict(target_arm)
 
 
-# =====================================================================
-# Command-line surface
-# =====================================================================
+# Command-line surface.
 
 
 def register_study_parser(sub: Any) -> None:

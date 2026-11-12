@@ -188,6 +188,7 @@ class JobRecord:
 
     @property
     def directory(self) -> Path:
+        """This job's directory under `jobs_dir()`."""
         return jobs_dir() / self.job_id
 
     @classmethod

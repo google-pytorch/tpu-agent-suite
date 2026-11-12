@@ -11,8 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for `runtime.py compute`: CLI behaviour, output envelopes,
-the job subcommands (wait, reap), and the generated agent contract."""
+"""Unit tests for `runtime.py compute`.
+
+Covers CLI behaviour, output envelopes, the job subcommands (wait, reap), and
+the generated agent contract.
+"""
 
 from __future__ import annotations
 
@@ -372,9 +375,11 @@ class TestComputeCliContracts(ScriptMixin, unittest.TestCase):
             driver.cancel.assert_called_once_with("job-101")
 
     def test_job_list_refreshes_the_active_runs_unfinished_jobs(self):
-        """A record says PENDING from submit until the job ends unless a
-        status read updates it, so `job list` first asks the backend of each
-        unfinished job in the run -- once per backend if it cannot answer."""
+        """`job list` first asks the backend of each unfinished job in the run.
+
+        A record says PENDING from submit until the job ends unless a status
+        read updates it. A backend that cannot answer is asked only once.
+        """
         replies: dict[str, Any] = {}
 
         def status(jid: str) -> AsynchronousExecutionResult:
@@ -444,8 +449,10 @@ class TestComputeCliContracts(ScriptMixin, unittest.TestCase):
             self.assertEqual(rows["b"]["status"], "RUNNING")
 
     def test_job_reap_by_lease(self):
-        """`--orphaned` needs no run, `--watch` one; both are tested in
-        test_lease."""
+        """`--orphaned` needs no run, `--watch` one.
+
+        Both are tested in test_lease.
+        """
         resolve = MagicMock()
 
         def reap(**flags):
@@ -468,8 +475,11 @@ class TestComputeCliContracts(ScriptMixin, unittest.TestCase):
         watch.assert_called_once_with("run-b", resolve)
 
     def test_submit_after_the_session_ended(self):
-        """A batch job starts its run's watcher; an ended session's active
-        run is no fallback, as a job tagged with it would be reaped."""
+        """A batch job starts its run's watcher.
+
+        An ended session's active run is no fallback, as a job tagged with it
+        would be reaped.
+        """
         driver = MagicMock()
         driver.submit.return_value = "job-1"
         driver.get_status.return_value = AsynchronousExecutionResult(
@@ -513,8 +523,10 @@ class TestComputeCliContracts(ScriptMixin, unittest.TestCase):
         self.assertIn("12345", out)
 
     def test_port_forward_rejects_a_port_that_is_not_one(self):
-        """Rejected here, not deep inside kubectl, where the message names
-        neither the flag nor the number."""
+        """Rejected here, not deep inside kubectl.
+
+        There, the message names neither the flag nor the number.
+        """
         driver = MagicMock()
         for spec in ("0", "-1", "99999", "8080:70000", "not_a_port", "8080:x"):
             with self.assertRaises(compute.ComputeConfigError) as ctx:
@@ -604,9 +616,12 @@ class TestComputeCliContracts(ScriptMixin, unittest.TestCase):
             self.assertEqual(jobs.list_jobs(), [])
 
     def test_two_sessions_in_one_workspace_each_keep_their_own_run(self):
-        """A second session's start overwrites the workspace's active-run
-        marker; the lease is per harness process, so this session's `job
-        list` still refreshes its own jobs, not the other session's."""
+        """A second session's start overwrites the active-run marker.
+
+        The marker is the workspace's; the lease is per harness process, so
+        this session's `job list` still refreshes its own jobs, not the other
+        session's.
+        """
         mine, theirs = _RUN, "20260101T000000Z-bbbbbbbbbbbb"
         driver = MagicMock()
         driver.get_status.side_effect = (
@@ -673,8 +688,11 @@ class _ScriptedJob:
 
 
 class TestJobWait(unittest.TestCase):
-    """`compute job wait`: one exit code per outcome, so agents stop writing
-    sleep loops that outlive the shell or miss a crash."""
+    """`compute job wait`: one exit code per outcome.
+
+    That way agents stop writing sleep loops that outlive the shell or miss
+    a crash.
+    """
 
     def wait(self, job: _ScriptedJob, **flags: Any) -> tuple[int, dict]:
         args = cli_args(
@@ -809,8 +827,10 @@ class TestReapJobs(unittest.TestCase):
         return rec.mark("RUNNING")
 
     def test_serving_jobs_are_exempt_from_reap_unless_included(self):
-        """Session end leaves a serve=True job running, and reports it;
-        `job reap --include-serving` is a decision to clear the run."""
+        """Session end leaves a serve=True job running, and reports it.
+
+        `job reap --include-serving` is a decision to clear the run.
+        """
         self._live("job-serve-1", "local", serve=True)
         self._live("job-old-1", "local", serve=True).mark("COMPLETED")
         reaped, failed = jobs.reap_jobs(self.RUN, lambda _: LocalDriver())
@@ -829,10 +849,12 @@ class TestContractGeneration(unittest.TestCase):
     """The generated agent contract must reflect the real registry."""
 
     def test_contract_matches_the_job_cli(self):
-        """`job wait` shipped in the CLI but not in this section, so agents
-        wrote their own sleep loops. Every action the `job`
-        parser accepts must be listed, and every flag the section names for
-        `job` must exist on it."""
+        """Every `job` action is in the section, and its flags are on `job`.
+
+        `job wait` shipped in the CLI but not in this section, so agents wrote
+        their own sleep loops. Every action the `job` parser accepts must be
+        listed, and every flag the section names for `job` must exist on it.
+        """
         parser = runtime.build_runtime_parser()
         for name in ("compute", "job"):
             parser = next(

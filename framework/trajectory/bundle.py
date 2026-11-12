@@ -40,7 +40,7 @@ from typing import Any, Callable
 from framework import harnesses, journal, jsonio, utils
 
 from .resolvers import (Cut, SessionBundle, TranscriptRef, file_size,
-                        read_jsonl, resolve_session)
+                        read_transcript, resolve_session)
 
 Path = pathlib.Path
 TpuAgentSuiteError = utils.TpuAgentSuiteError
@@ -56,9 +56,7 @@ PREFIX_ROOT = "tpu-agent-trajectories"
 # Session ids are UUIDs; eight hex characters keep the leaf readable.
 SESSION_ID_LEAF_CHARS = 8
 
-# --------------------------------------------------------------------------
-# Bundling
-# --------------------------------------------------------------------------
+# Bundling.
 
 
 def _safe_component(value: str) -> str:
@@ -97,7 +95,7 @@ def slice_root_records(cut: Cut,
 
 def _sliced_root_jsonl(cut: Cut, ref: TranscriptRef) -> str:
     """The root transcript cut at `cut`, re-serialized as JSONL text."""
-    records = slice_root_records(cut, read_jsonl(ref.path))
+    records = slice_root_records(cut, read_transcript(ref.path))
     return "".join(json.dumps(record) + "\n" for record in records)
 
 
@@ -243,7 +241,8 @@ def write_bundle(bundle: SessionBundle, run_root: Path | None,
                 continue
             tar.add(ref.path, arcname=f"transcripts/{_subagent_filename(ref)}")
 
-        # Artifacts under the byte cap are bundled; oversized ones are dropped and reported.
+        # Artifacts under the byte cap are bundled; oversized ones are dropped
+        # and reported.
         if run_root is not None:
             for name in (journal.JOURNAL_FILE, journal.RENDERED_FILE):
                 path = run_root / name
@@ -406,9 +405,7 @@ def export_trajectory(
     return summary
 
 
-# --------------------------------------------------------------------------
-# The Harbor hub
-# --------------------------------------------------------------------------
+# The Harbor hub.
 #
 # A hand-driven session has no job directory, so wrap its transcript in one:
 # harbor's agent converts to ATIF and a single synthetic trial carries it.
@@ -710,6 +707,4 @@ def export_to_harbor(
     return summary
 
 
-# --------------------------------------------------------------------------
-# End Harbor hub
-# --------------------------------------------------------------------------
+# End Harbor hub.

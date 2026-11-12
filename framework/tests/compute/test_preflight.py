@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for compute preflight checks, the per-session compute check,
-and ADC retry."""
+"""Unit tests for compute preflight checks.
+
+Also covers the per-session compute check and ADC retry.
+"""
 
 from __future__ import annotations
 
@@ -147,7 +149,7 @@ class TestPreflight(unittest.TestCase):
                                  kubeconfig)
 
     def test_a_missing_kubeconfig_is_named(self):
-        """kubectl calls a missing file "no context"; the path is the fault."""
+        """A missing kubeconfig reads as "no context" to kubectl; the path is the fault."""
         with tempfile.TemporaryDirectory() as home:
             gone = os.path.join(home, "missing-kubeconfig")
             there = os.path.join(home, "config")
@@ -182,8 +184,10 @@ class TestPreflight(unittest.TestCase):
             self.assertIn("get-credentials c9", check.fix)
 
     def test_kube_context_check(self):
-        """A pinned context: ok if current, a warning if another is, and a
-        failure if the kubeconfig does not have it or cannot be read."""
+        """A pinned context: ok if current, a warning if another is.
+
+        It is a failure if the kubeconfig does not have it or cannot be read.
+        """
         with tempfile.TemporaryDirectory() as home:
             config = os.path.join(home, "config")
             Path(config).write_text("{}", encoding="utf-8")
@@ -232,8 +236,11 @@ class TestPreflight(unittest.TestCase):
             return base.gcloud_account_check(other)
 
     def test_a_vm_account_without_cloud_platform_scope(self):
-        """A VM's service account is limited to the VM's scopes, whatever
-        IAM grants it: say so, rather than let every call be refused."""
+        """A VM's service account is limited to the VM's scopes.
+
+        That holds whatever IAM grants it: say so, rather than let every call
+        be refused.
+        """
         storage = "https://www.googleapis.com/auth/devstorage.read_only"
         with self._metadata(self.SA, [storage]):
             check = self._account_check(self.SA)
@@ -267,8 +274,10 @@ class TestPreflight(unittest.TestCase):
         self.assertEqual(self._account_check("", "$X works").status, "warn")
 
     def test_application_credentials_are_reported_with_a_warning(self):
-        """$GOOGLE_APPLICATION_CREDENTIALS is a credential kubectl will use:
-        list it, but warn rather than recommend."""
+        """$GOOGLE_APPLICATION_CREDENTIALS is a credential kubectl will use.
+
+        List it, but warn rather than recommend.
+        """
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(base.application_credentials_check(),
                              (None, None))
@@ -304,10 +313,12 @@ class TestPreflight(unittest.TestCase):
             self.assertIsNone(usable)
 
     def test_the_credentials_repro(self):
-        """KUBECONFIG names a missing file, the gcloud
-        account is a VM's without cloud-platform scope, and an
-        authorized_user $GOOGLE_APPLICATION_CREDENTIALS is set. The missing
-        file is the blocker; the scope is not."""
+        """The missing KUBECONFIG file is the blocker; the scope is not.
+
+        KUBECONFIG names a missing file, the gcloud account is a VM's without
+        cloud-platform scope, and an authorized_user
+        $GOOGLE_APPLICATION_CREDENTIALS is set.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             gone = os.path.join(tmp, "config")
             gac = os.path.join(tmp, "adc.json")
@@ -355,8 +366,10 @@ class TestPreflight(unittest.TestCase):
 
 
 class _CountingDriver(MockTestDriver):
-    """Mock driver with settable preflight and inspect results and a call
-    counter for preflight."""
+    """Mock driver with settable preflight and inspect results.
+
+    It also keeps a call counter for preflight.
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

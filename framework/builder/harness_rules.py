@@ -236,8 +236,8 @@ def delegation_tool_for(harness: str, delegates: list[str]) -> str:
     if not tool:
         raise utils.TpuAgentSuiteError(
             f"harness {harness} has no delegation mechanism declared, but"
-            f" delegation to {sorted(delegates)} was requested; add it to"
-            " HARNESS_DELEGATION_TOOLS or drop the routing")
+            f" delegation to {sorted(delegates)} was requested; add its"
+            " `delegate` entry to tool-mappings.json or drop the routing")
     if tool == DELEGATION_UNVERIFIED:
         print(
             f"WARNING: harness {harness} delegates to {sorted(delegates)} but"
@@ -423,14 +423,14 @@ def toml_basic_string(value: str) -> str:
 
 
 def toml_multiline_string(value: str) -> str:
-    """Escape a value for a TOML multi-line basic string.
+    r"""Escape a value for a TOML multi-line basic string.
 
     Prompts are authored as markdown and routinely contain backslashes -- an
-    escaped paren such as `1\\)` carried over from the source package is
-    enough. TOML reads `\\` as the start of an escape sequence, so an
+    escaped paren such as `1\)` carried over from the source package is
+    enough. TOML reads `\` as the start of an escape sequence, so an
     unescaped prompt produces an agent config that does not parse at all.
-    Backslashes are doubled first, then any `\"\"\"` that would otherwise
-    terminate the literal early.
+    Backslashes are doubled first, then any run of three double quotes that
+    would otherwise terminate the literal early.
     """
     return value.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
 

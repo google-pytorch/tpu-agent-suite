@@ -85,6 +85,7 @@ CONFLICTS = {"xprof": ("xprof-nightly", )}
 
 
 def version_of(name: str) -> str | None:
+    """The installed release of distribution `name`; None if absent."""
     try:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
@@ -108,8 +109,11 @@ def satisfies(version: str, specifier: str) -> bool | None:
 
 
 def parse_requirement(requirement: str) -> tuple[str, str] | None:
-    """(name, specifier) for a requirements-file line; None for a pip option,
-    URL or path. Environment markers are dropped, not evaluated."""
+    """(name, specifier) for a requirements-file line.
+
+    None for a pip option, URL or path. Environment markers are dropped, not
+    evaluated.
+    """
     match = re.fullmatch(
         r"([A-Za-z0-9][\w.-]*)\s*(?:\[[^\]]*\])?\s*([<>=!~][^@]*)?",
         requirement.split(";", 1)[0].strip())
@@ -122,11 +126,13 @@ def installed_conflicts(name: str) -> list[str]:
 
 
 def fix_command(requirements: list[str], python: str | None = None) -> str:
-    """The pip command that makes `requirements` pass: it uninstalls a
-    conflicting distribution together with the requirement it shares files
-    with, then installs the requirements. It runs `python` (default: this
-    interpreter) as `-m pip`, so it changes the environment that was
-    checked rather than whichever `pip` is first on PATH."""
+    """The pip command that makes `requirements` pass.
+
+    It uninstalls a conflicting distribution together with the requirement
+    it shares files with, then installs the requirements. It runs `python`
+    (default: this interpreter) as `-m pip`, so it changes the environment
+    that was checked rather than whichever `pip` is first on PATH.
+    """
     pip = f"{python or sys.executable} -m pip"
     remove = []
     for line in requirements:
@@ -195,6 +201,14 @@ def check_requirement(requirement: str,
 def run_checks(requirements: list[str],
                host: bool = False,
                image: bool = False) -> list[tuple[str, str, str, str]]:
+    """(name, status, detail, fix) for each check of this machine.
+
+    The checks are Python, torch_tpu, each of `requirements`, a warning if
+    the deprecated torch_xla is installed, and the TPU devices. With `host`,
+    only Python and `requirements` are checked, for the machine the agents
+    run on. With `image` the target is a container image, so fixes name the
+    image instead of a pip install.
+    """
     current = ".".join(map(str, sys.version_info[:3]))
     need = ".".join(map(str, MIN_PYTHON))
     checks = [("python", "ok", f"{current} ({sys.executable})",
@@ -238,9 +252,11 @@ def read_requirements(path: str) -> list[str]:
 
 
 def failing_requirements(requirements: list[str]) -> list[str]:
-    """The lines of `requirements` this interpreter doesn't meet: not
-    installed, installed at a version outside the bound, or installed next
-    to a distribution that `CONFLICTS` lists for it."""
+    """The lines of `requirements` this interpreter doesn't meet.
+
+    That is, not installed, installed at a version outside the bound, or
+    installed next to a distribution that `CONFLICTS` lists for it.
+    """
     failing = []
     for line in requirements:
         check = check_requirement(line)
@@ -250,9 +266,11 @@ def failing_requirements(requirements: list[str]) -> list[str]:
 
 
 def externally_managed() -> bool:
-    """Whether pip refuses to install into this interpreter (PEP 668): a
-    Debian, Ubuntu, gLinux or Homebrew Python outside a virtual
-    environment, which marks its stdlib with EXTERNALLY-MANAGED."""
+    """Whether pip refuses to install into this interpreter (PEP 668).
+
+    That is a Debian, Ubuntu, gLinux or Homebrew Python outside a virtual
+    environment, which marks its stdlib with EXTERNALLY-MANAGED.
+    """
     if sys.prefix != sys.base_prefix:
         return False
     return os.path.isfile(
@@ -304,6 +322,11 @@ def ask_to_install(requirements: list[str], python: str | None = None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Print the checks and return 1 if any failed, else 0.
+
+    With `--versions`, print the tracked package releases as JSON instead
+    and check nothing.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--requirements",
                         help="the package's requirements-tpu.txt, or "

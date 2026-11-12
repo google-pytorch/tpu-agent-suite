@@ -75,10 +75,12 @@ class GkePodDriver(shell.RemoteShellDriver):
 
     @property
     def namespace(self) -> str:
+        """The Kubernetes namespace of the pod."""
         return self.kube.namespace
 
     @property
     def kube_context(self) -> str | None:
+        """The pinned kubectl context; None for the current one."""
         return self.kube.kube_context
 
     @property
@@ -88,6 +90,7 @@ class GkePodDriver(shell.RemoteShellDriver):
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> GkePodDriver:
+        """Build the driver; `pod` is required."""
         pod = params.get("pod")
         if not pod:
             raise base.ComputeConfigError(
@@ -105,6 +108,7 @@ class GkePodDriver(shell.RemoteShellDriver):
 
     @classmethod
     def register_cli_args(cls, parser: Any) -> None:
+        """Add `--pod`, `--namespace`, `--container` and `--kube-context`."""
         cls.add_cli_arg(parser,
                         "--pod",
                         help="GKE TPU workload pod name (gke_pod)")
@@ -118,11 +122,11 @@ class GkePodDriver(shell.RemoteShellDriver):
         cls.add_cli_arg(parser, "--kube-context", help=base.KUBE_CONTEXT_HELP)
 
     def needed_tools(self) -> tuple[str, ...]:
+        """The GKE tools, without the auth plugin if the kubeconfig skips it."""
         return base.gke_tools(self._kubectl_base())
 
     def _kubectl_base(self) -> list[str]:
-        """Build a kubectl command scoped to this driver's context and
-        namespace."""
+        """A kubectl command scoped to this driver's context and namespace."""
         return self.kube.cmd(self.kube.ns())
 
     def _exec_prefix(self) -> list[str]:
@@ -185,6 +189,7 @@ class GkePodDriver(shell.RemoteShellDriver):
         return {"pod": self.pod, "namespace": self.namespace}
 
     def describe_target(self) -> str:
+        """The pod, its namespace and the kubectl context."""
         where = (f"context '{self.kube_context}'"
                  if self.kube_context else "the current kubectl context")
         return (f"running pod '{self.pod}' in namespace '{self.namespace}' "

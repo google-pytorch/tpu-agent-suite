@@ -30,8 +30,10 @@ Path = pathlib.Path
 
 
 def shipped_by(unit: dict[str, Any]) -> list[str]:
-    """Everything a skill or agent ships: its own files and what the
-    references it reads brought."""
+    """Everything a skill or agent ships.
+
+    That is its own files and what the references it reads brought.
+    """
     return [
         *unit.get("references", []), *unit.get("scripts", []),
         *unit.get("declared_references", []),
@@ -40,8 +42,10 @@ def shipped_by(unit: dict[str, Any]) -> list[str]:
 
 
 def shipped_by_reference(package_dir: Path, rel: str) -> list[str]:
-    """Everything a markdown reference ships with it: itself and what its
-    frontmatter declares, transitively."""
+    """Everything a markdown reference ships with it.
+
+    That is itself and what its frontmatter declares, transitively.
+    """
     shipped: list[str] = [rel]
     pending, seen = [rel], set()
     while pending:
@@ -126,6 +130,7 @@ def load_agent_document(doc_path: Path, package_dir: Path) -> dict[str, Any]:
 
 
 def relative_to_package(doc_path: Path, package_dir: Path) -> str:
+    """`doc_path` as a POSIX path relative to `package_dir`, else unchanged."""
     try:
         return doc_path.resolve().relative_to(package_dir.resolve()).as_posix()
     except ValueError:
@@ -173,8 +178,11 @@ def load_reference_frontmatter(doc_path: Path) -> dict[str, Any]:
 
 
 def reference_files(package_dir: Path, rel: str, label: str) -> list[str]:
-    """The files a `references:` entry brings: itself, or every file under it
-    when it names a directory."""
+    """The files a `references:` entry brings.
+
+    That is the entry itself, or every shipped file under it when it names a
+    directory.
+    """
     source = utils.rooted(package_dir, rel, label)
     if source.is_dir():
         return sorted(
@@ -327,17 +335,22 @@ DIST_EXCLUDED_NAMES: tuple[str, ...] = (
     ".claude",
 )
 
-# Paths relative to a copied asset root that never ship, whatever they hold. The knowledge
-# base pins source checkouts (some private) under raw/code and cites them by URL at the
-# pinned commit, so the dist needs the wiki pages, never the code. Matched by path, not by
-# name: a "code" directory anywhere else (wiki/code, ...) still ships.
+# Paths relative to a copied asset root that never ship, whatever they hold. The
+# knowledge base pins source checkouts (some private) under raw/code and cites
+# them by URL at the pinned commit, so the dist needs the wiki pages, never the
+# code. Matched by path, not by name: a "code" directory anywhere else
+# (wiki/code, ...) still ships.
 DIST_EXCLUDED_PATHS: tuple[str, ...] = ("raw/code", )
 
 
 def dist_excluded(rel_path: Path) -> bool:
-    """True when a package-relative path never ships: an excluded name anywhere in it, or an
-    excluded path pair (`raw/code`) under any asset root. Used by verify so files inside a
-    pinned source checkout (their own requirements files, for one) are not the package's."""
+    """True when a package-relative path never ships.
+
+    It never ships if it has an excluded name anywhere in it, or an excluded
+    path pair (`raw/code`) under any asset root. Used by verify so files inside
+    a pinned source checkout (their own requirements files, for one) are not
+    the package's.
+    """
     parts = rel_path.parts
     if any(
             fnmatch.fnmatch(part, pat) for part in parts

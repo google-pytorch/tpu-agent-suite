@@ -59,8 +59,10 @@ class TestDelegationContract(helpers.CompilerTestCase):
     """How each harness is told to delegate, or that it cannot."""
 
     def test_unknown_harness_delegation_is_a_build_error(self):
-        """A harness with no declared mechanism must fail the build rather than
-        ship routing instructions its runtime cannot honor."""
+        """A harness with no declared mechanism must fail the build.
+
+        Otherwise it would ship routing instructions its runtime cannot honor.
+        """
         with self.assertRaises(utils.TpuAgentSuiteError) as ctx:
             harness_rules.delegation_tool_for("no-such-harness", ["worker"])
         self.assertIn("no delegation mechanism", str(ctx.exception))
@@ -110,10 +112,12 @@ class TestHookTranslation(helpers.CompilerTestCase):
     """Translating declared hooks into each harness's config."""
 
     def test_matchers_on_an_event_with_nothing_to_match_are_rejected(self):
-        """Only a tool or a subagent can be matched. Matchers on any other
-        event used to leave the compiler reusing the previous hook's matcher,
-        and the runtime then skipped every fire of the hook: it never ran,
-        and nothing said so."""
+        """Only a tool or a subagent can be matched.
+
+        Matchers on any other event used to leave the compiler reusing the
+        previous hook's matcher, and the runtime then skipped every fire of
+        the hook: it never ran, and nothing said so.
+        """
         pkg_dir = self._create_valid_package()
         manifest = self._read_manifest(pkg_dir)
         hook = {"matchers": ["worker"], "command": "true"}
@@ -244,14 +248,16 @@ class TestHookTranslation(helpers.CompilerTestCase):
                 **pre, "event": "InvalidEvent",
                 "command": "true"
             }]),
-                # Per-session hook state lives at sessions/<id>.contexts/<name>.json,
-                # so "a:b" and "a_b" would share one file.
+                # Per-session hook state lives at
+                # sessions/<id>.contexts/<name>.json, so "a:b" and "a_b"
+                # would share one file.
             ("does not match", [{
                 **pre, "name": "bad:name",
                 "command": "true"
             }]),
-                # start-run rebinds the session to a fresh run namespace; per tool
-                # call it would orphan the artifacts of the run it replaced.
+                # start-run rebinds the session to a fresh run namespace; per
+                # tool call it would orphan the artifacts of the run it
+                # replaced.
             ("cannot be attached to event 'PreToolUse'", [{
                 **pre, "action":
                 "builtin:start-run"
@@ -284,8 +290,11 @@ class TestHookFailurePolicy(helpers.CompilerTestCase):
     """`on_failure` and the compiled command's fail-safe."""
 
     def _run_hook_command(self, command: str, home: Path):
-        """Run a compiled hook command as a harness would: in a shell, with
-        an empty payload on stdin, `~` pointing at `home`."""
+        """Run a compiled hook command as a harness would.
+
+        It runs in a shell, with an empty payload on stdin, `~` pointing at
+        `home`.
+        """
         env = {"HOME": str(home), "PATH": os.environ.get("PATH", "")}
         return subprocess.run(["/bin/sh", "-c", command],
                               input="{}",

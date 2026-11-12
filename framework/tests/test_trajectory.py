@@ -50,7 +50,6 @@ def _assistant(blocks: list[dict]) -> dict:
 
 
 def _tool_use(tool_id: str, name: str, payload: dict) -> dict:
-    """One tool_use content block."""
     return {"type": "tool_use", "id": tool_id, "name": name, "input": payload}
 
 
@@ -265,8 +264,11 @@ class ClaudeCodeResolverTest(HomeIsolatedTestCase):
                          root.agent_id)
 
     def test_missing_transcript_is_an_error(self) -> None:
-        """A session with no transcript cannot be exported. An eval trial
-        files transcripts under CLAUDE_CONFIG_DIR, not under ~/.claude."""
+        """A session with no transcript cannot be exported.
+
+        An eval trial files transcripts under CLAUDE_CONFIG_DIR, not under
+        ~/.claude.
+        """
         with self.assertRaises(TpuAgentSuiteError):
             trajectory.resolve_claude_code("absent", "tpu-agent")
         elsewhere = self.home / "logs" / "agent" / "sessions"
@@ -549,8 +551,10 @@ class GoogleHarnessTranscriptFallbackTest(GoogleHarnessTestCase):
         return logs
 
     def test_compact_transcript_is_used_only_when_full_is_absent(self) -> None:
-        """When both exist the untruncated one wins; otherwise the compact one
-        is used rather than naming a file that does not exist.
+        """When both exist the untruncated one wins.
+
+        Otherwise the compact one is used rather than naming a file that does
+        not exist.
 
         The fallback is recorded, not silent: a cut missed because of
         truncation must be explicable afterwards.
@@ -585,8 +589,10 @@ class GoogleHarnessCycleGuardTest(GoogleHarnessTestCase):
 
     def test_cycles_terminate_and_shared_children_are_collected_once(
             self) -> None:
-        """A cycle would otherwise recurse until the stack limit, and two
-        parents reaching one conversation must not duplicate it."""
+        """A cycle would otherwise recurse until the stack limit.
+
+        Two parents reaching one conversation must not duplicate it.
+        """
         for cid in ("top", "left", "right", "shared"):
             self._conversation(cid)
         self._spawn("top", "left")
@@ -656,8 +662,10 @@ class HarborAvailabilityTest(unittest.TestCase):
         trajectory.harbor_missing.cache_clear()
 
     def test_each_missing_half_is_reported(self) -> None:
-        """A library-only install would fail the upload with FileNotFoundError;
-        a pipx install (binary but not importable) would fail the converter."""
+        """A library-only install would fail the upload with FileNotFoundError.
+
+        A pipx install (binary but not importable) would fail the converter.
+        """
         for importable, on_path, expected in ((True, True, None), (True, False,
                                                                    "PATH"),
                                               (False, True, "importable")):
@@ -722,8 +730,10 @@ class DestinationSelectionTest(HomeIsolatedTestCase):
         self.assertIn("no destination is configured", str(caught.exception))
 
     def test_choosing_harbor_skips_the_bucket(self) -> None:
-        """The two destinations are exclusive, not a try-then-fallback, and
-        availability is not consent: the default destination is the bucket."""
+        """The two destinations are exclusive, not a try-then-fallback.
+
+        Availability is not consent: the default destination is the bucket.
+        """
         self._session()
         with unittest.mock.patch.object(trajectory, "harbor_missing",
                                         return_value=""), \
@@ -758,8 +768,10 @@ class DestinationSelectionTest(HomeIsolatedTestCase):
         }
 
     def test_harbor_job_is_staged_outside_runs_and_removed(self) -> None:
-        """The job should be staged outside to avoid being read by later
-        agents. A failed upload keeps it, since the error names it."""
+        """The job should be staged outside to avoid being read by later agents.
+
+        A failed upload keeps it, since the error names it.
+        """
         self._session()
         with unittest.mock.patch.object(trajectory, "harbor_missing",
                                         return_value=""), \

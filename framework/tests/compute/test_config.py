@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for compute configuration: 3-tier resolution,
-environment.json schemas and profiles, CLI override precedence, and the
-target software checks."""
+"""Unit tests for compute configuration.
+
+Covers driver resolution (CLI flags over the resolved environment file),
+environment.json schemas and profiles, CLI override precedence, and the target
+software checks.
+"""
 
 from __future__ import annotations
 
@@ -82,9 +85,11 @@ class TestComputeConfig(ScriptMixin, unittest.TestCase):
             self.assertEqual(ctx.exception.error_code, "INVALID_BACKEND")
 
     def test_cli_passes_the_job_and_fills_in_a_fields_fix(self):
-        """The job's id reaches the resolver; a driver's `<GROUP>_NOT_CONFIGURED`
-        gets the `setup plan --fields` command for this package and the
-        driver's profile as its fix."""
+        """The job's id reaches the resolver.
+
+        A driver's `<GROUP>_NOT_CONFIGURED` gets the `setup plan --fields`
+        command for this package and the driver's profile as its fix.
+        """
         driver, seen = MockTestDriver(), {}
         driver.compute_profile = "c"
         args = cli_args(job_id="job-1")
@@ -105,8 +110,10 @@ class TestComputeConfig(ScriptMixin, unittest.TestCase):
             "staging_bucket"))
 
     def test_run_turns_setup_fields_into_a_fix(self):
-        """An output lost in a gke_job pod's log comes back as `setup_fields`;
-        `run` adds the command that asks for them, as for NotConfigured."""
+        """An output lost in a gke_job pod's log comes back as `setup_fields`.
+
+        `run` adds the command that asks for them, as for NotConfigured.
+        """
         driver = MockTestDriver()
         driver.compute_profile = "c"
         lost = SynchronousExecutionResult(
@@ -137,8 +144,11 @@ class TestEnvironmentResolution(unittest.TestCase):
          ).write_text(json.dumps({"package": package}) if package else "{")
 
     def test_environment_resolution_precedence_and_fallback(self):
-        """Ownership-keyed resolution: workspace is authoritative, central
-        serves the not-installed-here case, and nothing else is consulted."""
+        """Ownership-keyed resolution: workspace is authoritative.
+
+        Central serves the not-installed-here case, and nothing else is
+        consulted.
+        """
         home = patch_home(self)
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
@@ -288,8 +298,9 @@ class TestMultiProfileResolution(unittest.TestCase):
                          and any(paths.get_runs_root().iterdir()))
 
     def test_driver_flags_complete_the_profile_they_are_checked_with(self):
-        # CLI flags can supply missing setup fields (e.g. `--image` for gke_job).
-        # We test with tpu_topology here because it has no default value.
+        # CLI flags can supply missing setup fields (e.g. `--image` for
+        # gke_job). We test with tpu_topology here because it has no default
+        # value.
         self.env_file.write_text(
             json.dumps(
                 profile_env("gke_job",
@@ -458,8 +469,10 @@ class TestTargetVersions(unittest.TestCase):
     def _smoke_test(self,
                     report: str,
                     smoke_test: bool = True) -> dict[str, Any]:
-        """`compute setup verify --smoke-test` on the gke_job profile, with
-        the Job's output `report`; without the flag if not `smoke_test`."""
+        """`compute setup verify --smoke-test` on the gke_job profile.
+
+        The Job's output is `report`; the flag is left out if not `smoke_test`.
+        """
         driver = MagicMock(quick_run=False,
                            scheduled_run=True,
                            backend_name="gke_job",
