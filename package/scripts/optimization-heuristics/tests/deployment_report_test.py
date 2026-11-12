@@ -13,8 +13,12 @@
 # limitations under the License.
 """deployment.py (manifest and recipe in, candidate manifest out) and report.py."""
 
+import contextlib
+import io
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -161,6 +165,24 @@ class ReportTest(unittest.TestCase):
         self.assertTrue(short["output_tokens_per_s"]["noise_measured"])
         # Nothing is adopted here: the report decides nothing.
         self.assertNotIn("adopted", self._report({"m-tp2xdp4": _TP2}))
+
+    def test_without_candidates_each_measured_arm_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = {}
+            for name, summary in (("base", _BASE), ("stack", _TP2)):
+                paths[name] = os.path.join(tmp, f"{name}.json")
+                with open(paths[name], "w", encoding="utf-8") as f:
+                    json.dump(summary, f)
+            out = os.path.join(tmp, "report.json")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    report.main([
+                        "--baseline", paths["base"], "--measured",
+                        f"stack={paths['stack']}", "--out", out
+                    ]), 0)
+            with open(out, encoding="utf-8") as f:
+                (arm, ) = json.load(f)["candidates"]
+        self.assertEqual((arm["cand_id"], arm["measured"]), ("stack", True))
 
     def test_one_replicate_assumes_the_noise(self):
         one = _summary({_LONG: [(3100.0, 1300.0, 38.0)]})

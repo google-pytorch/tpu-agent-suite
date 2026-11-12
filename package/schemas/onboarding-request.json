@@ -84,6 +84,74 @@
         }
       }
     },
+    "handback": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Wakes an onboarding that returned serve_pending, sent with that onboarding's run_id so its prepared deployment is already under its work directory. It carries what the serving that ran elsewhere produced, as onboarding's own files: the verification report, the server left running, the benchmark. A failure is a launch onboarding fixes the recipe for and prepares again; run_here is for a deployment nothing else could serve, which onboarding then deploys itself.",
+      "properties": {
+        "run_here": {
+          "type": "boolean",
+          "description": "true: no specialist could serve it; deploy, verify and benchmark here (Steps 3 to 5c)."
+        },
+        "verification": {
+          "type": "string",
+          "description": "Path to the endpoint check's report (verify_inference.py) for the verified server."
+        },
+        "server": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "job_id",
+            "profile"
+          ],
+          "description": "The server left running, in serving mode.",
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "profile": {
+              "type": "string",
+              "description": "The compute profile it runs under."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The port it serves on, for Step 6's endpoint."
+            }
+          }
+        },
+        "bench_request": {
+          "type": "string",
+          "description": "Path to the bench_request.json the benchmark ran from (schemas/bench-request.json)."
+        },
+        "results_json": {
+          "type": "string",
+          "description": "Path to the benchmark's summary.json (a sweep's merged one)."
+        },
+        "benchmark_report": {
+          "type": "string",
+          "description": "Path to the benchmark's report markdown, when it wrote one."
+        },
+        "failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reason"
+          ],
+          "description": "The launch failed: why, and its logs.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "logs": {
+              "type": "string",
+              "description": "Path to the failed server's saved logs."
+            }
+          }
+        }
+      }
+    },
     "checkpoint_bucket": {
       "type": "string",
       "pattern": "^gs://",
@@ -110,6 +178,18 @@
       },
       "accelerator_type": "tpu7x",
       "mode": "candidate"
+    },
+    {
+      "prompt": "Onboard Qwen/Qwen3.8-27B to vLLM on TPU and benchmark it.",
+      "run_id": "20260921T120000Z-abcdef012345",
+      "accelerator_type": "tpu7x",
+      "mode": "inference",
+      "handback": {
+        "verification": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/onboard/baseline/verification.json",
+        "bench_request": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/onboard/baseline/bench_request.json",
+        "results_json": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/onboard/baseline/sweep/serving_bench/summary.json",
+        "benchmark_report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/onboard/REPORT.md"
+      }
     }
   ]
 }

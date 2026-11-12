@@ -204,7 +204,9 @@ on why it was chosen. Decide the mode before you start, from the request:
     The model is deployed, verified, and then cancelled, so a request that
     never asked for a server does not leave one holding the chips.
 
-When in doubt, it is verification mode.
+When in doubt, it is verification mode. A vLLM deployment you prepare but do
+not launch (see Reporting): the mode still says what it leaves behind, and
+whoever serves it for tpu-agent honours that.
 
 ### Routing examples
 
@@ -217,7 +219,7 @@ mode).
 | "Deploy model Llama 3 8B on TPU" | Inference — serving mode | An endpoint was asked for, so it is left running |
 | "Do tpu-model-onboarding on the model gpt-oss-20b" | Inference — verification mode | Generic request; falls back to inference, and no endpoint was asked for |
 | A full onboarding request — preflight, CUDA unwiring, parity against CPU, "report the measured numbers" | Inference — verification mode | The fallback holds even though numbers were asked for, because the benchmark workflow was not named |
-| "Run benchmarking of google/gemma-4-31B-it on TPU" | Inference — verification mode, then benchmark it yourself | Naming the *activity* is not naming the workflow |
+| "Run benchmarking of google/gemma-4-31B-it on TPU" | Inference — verification mode, then benchmark it (a vLLM deployment goes back as `serve_pending`) | Naming the *activity* is not naming the workflow |
 | "...using the benchmarking workflow" or "...using torch-tpu-benchmark" | Benchmark | The workflow is named, by either its description or its name |
 | `mode: "candidate"`: serve a candidate's `deployments_json` and compare it with the baseline | Candidate | Set only by tpu-agent's optimization round; the mode decides it, not the wording |
 
@@ -278,6 +280,26 @@ Return an `onboarding-result`. Whenever a server was launched, set
 are the serving configuration: tpu-agent hands both files to tpu-kernel-development,
 whose harness is built from them, and a configuration that reaches it only as
 a sentence in your `summary` is one it has to reconstruct.
+
+A vLLM deployment on `gke_job`, with its image pinned by digest, is not
+yours to launch. Prepare it -- preflight, unwiring, `deployments.json`, the
+launch recipe, and parity, your one TPU job -- and return `serve_pending`
+with the two files above and the serving requests you lined up (the
+reference's Step 2b). tpu-agent routes its serving, verification, benchmark
+and teardown to whoever can take them. vLLM on any other backend, or on an
+image named by tag only, and every other engine, you deploy, verify and
+benchmark yourself, as on main, and report `success`.
+
+A request with `handback` wakes an onboarding that returned `serve_pending`.
+It comes with the same `run_id`, so your prepared deployment is already under
+`<work>`; do not prepare it again. Record what it carries as your own: the
+verification report as Step 5's, the benchmark's files as Step 5c says, and
+`server` as `job_id` and `compute_profile`. Then the result is `success`. A
+`failure` is a launch that did not come up: change the recipe only in answer
+to its logged exception, as torch-inference-coder Step 3e says, and return
+`serve_pending` again, or `failed` after two such fixes. With
+`run_here: true`, nothing else could serve it: take the path every other
+engine takes, Steps 3 to 5c, as if Step 2b had not applied.
 
 Set `unwiring_status` from the {{agent:tpu-unwiring}} result (`not_required`
 when preflight flagged nothing) and `parity_verdict` from `parity_report.json` (`not_run` when parity was not

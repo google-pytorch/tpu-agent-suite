@@ -24,9 +24,11 @@ reasoning_effort = "high"
 atif-trajectory = "/logs/agent/trajectory.json"
 # Read top-level files from the specialist artifact directories staged under
 # /logs/artifacts/ (falling back to top-level /logs/artifacts only when no
-# specialist artifact directory is used).
+# specialist artifact directory is used). tpu-serving-bench is where the
+# serving tpu-agent routes for a serve_pending onboarding writes its reports.
 files = [
   "/logs/artifacts/tpu-model-onboarding",
+  "/logs/artifacts/tpu-serving-bench",
   "/logs/artifacts/tpu-diagnostics",
   "/logs/artifacts/tpu-kernel-development",
   "/logs/artifacts/tpu-performance-optimization",
@@ -50,13 +52,13 @@ description = "Definition of done 2: the vLLM server for required model answered
 name = "baseline_benchmarks_reported"
 type = "binary"
 weight = 1.0
-description = "Definition of done 3: the baseline vLLM server for required model was benchmarked over HTTP with a serving benchmark using random fixed-length prompts that generate exactly their output length, on both ISL/OSL combinations (1k/1k, 8k/1k), each with a concurrency sweep (1, 2, 4, ... doubling until throughput gains fall under 10% or requests fail), and the measured numbers are reported in a markdown table with one row per (ISL/OSL, concurrency) point (TTFT, ITL, output throughput). A combination or concurrency that could not run passes if it is in the failure table rather than dropped. The table must be saved in the attached artifact files, and every number in it must match benchmark output in the trajectory; fails if numbers are estimated, invented, or have no matching benchmark run. Cite the Step IDs of the benchmark runs and quote the peak throughput for each ISL/OSL combination."
+description = "Definition of done 3: the baseline vLLM server for required model was benchmarked over HTTP with a serving benchmark using random fixed-length prompts that generate exactly their output length, on both ISL/OSL combinations (1k/1k, 8k/1k), each with a concurrency sweep (1, 2, 4, ... doubling until throughput gains fall under 10% or requests fail), and the measured numbers are reported in a markdown table with one row per (ISL/OSL, concurrency) point (TTFT, ITL, output throughput). A combination or concurrency that could not run passes if it is in the failure table rather than dropped. The table must be saved in the attached artifact files, and every number in it must match benchmark output in the trajectory; fails if numbers are estimated, invented, or have no matching benchmark run. A benchmark tpu-agent delegated to tpu-serving-bench after onboarding counts the same as one onboarding ran, with its REPORT.md as the saved table. Cite the Step IDs of the benchmark runs and quote the peak throughput for each ISL/OSL combination."
 
 [[criterion]]
 name = "baseline_reproduce_commands"
 type = "binary"
 weight = 1.0
-description = "Definition of done 4: the agent gave the exact commands to reproduce the baseline from scratch (deploying the vLLM server for required model on TPU and running the baseline benchmark suite), and they match what it actually ran in the trajectory. They must be saved in the attached artifact files. Fails if no commands were given, or they are incomplete or differ from what was run. Cite the Step IDs."
+description = "Definition of done 4: the agent gave the exact commands to reproduce the baseline from scratch (deploying the vLLM server for required model on TPU and running the baseline benchmark suite), and they match what it actually ran in the trajectory. They must be saved in the attached artifact files. When the benchmark was delegated to tpu-serving-bench, its serving_bench_request.json replay record with the sweep commands it ran counts for the benchmark part. Fails if no commands were given, or they are incomplete or differ from what was run. Cite the Step IDs."
 
 [[criterion]]
 name = "no_stale_servers"

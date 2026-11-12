@@ -20,12 +20,15 @@ recipe, so it takes about as long as the busiest server's share:
 
     serving_sweep.py run     --runtime "<runtime>" --package P --run-id R \\
         --name gemma --port 8000 --recipe launch_vllm.sh --server-input ... \\
-        [--leader JOB[@PROFILE]] [--max-model-len N] --out-dir bench_work \\
+        [--leader JOB[@PROFILE]] [--max-model-len N] [--patch P ...] \\
+        [--hardware KEY] [--keep-servers] --out-dir bench_work \\
         -- <serving_benchmark.py's flags: --isl-osl, --concurrency, --engine,
         --model, --tokenizer, --stop-below-gain-pct, --stop-on-failure, ...>
     serving_sweep.py plan    --out sweep_plan.json [--max-model-len N] \\
         -- <the same client flags>       what `run` would queue, run nothing
     serving_sweep.py merge   --out-dir bench_work
+    serving_sweep.py wait    --out-dir bench_work [--out-dir ...] \\
+        [--max-secs 540]                one line per run, once all end
     serving_sweep.py cleanup --runtime "<runtime>" --package P --run-id R \\
         --out-dir bench_work
 
@@ -75,6 +78,21 @@ the kind's), so a profile's own image never stands in for the verified one.
 `merge` refuses shapes measured on more than one kind. To compare hardware,
 run one sweep per kind and compare the summaries.
 
+`--hardware KEY` pins the kind: every server books a slot of that
+tpu_slots.py hardware key, and a leader of another kind is left out.
+
+`--patch P`, repeatable, makes the sweep one arm of a patched A/B: every
+server it starts gets each patch, apply_vllm_patch.sh and a vllm_patches.txt
+naming them in order, which serve_vllm.sh applies before vLLM starts (so the
+recipe must start vLLM through serve_vllm.sh). A patch that does not apply
+fails its server and stops the sweep: every other server would fail the same
+way. A sweep with `--patch` takes no `--leader`: it could not tell what the
+leader runs. The summary lists each patch with its sha256.
+
+`--keep-servers` leaves every server started here that served running, its
+slot held, after the sweep, so the caller can profile it; sweep_status.json
+marks each `kept`, and `cleanup` cancels them.
+
 On a cluster that stops jobs a fixed time after they start, pass
 `--server-budget-s`, the part of that limit a server may spend serving shapes:
 a server takes no new shape once its budget is spent, counted from its job's
@@ -94,6 +112,10 @@ as it goes and `<out-dir>/sweep_result.json` once it ends, each whole, into an
 out-dir no earlier run used. Exit codes: 0 every shape measured cleanly, 1 a
 shape failed or was not run, 2 no server could serve the sweep, or the
 request was invalid, refused or needs input.
+
+`wait` blocks until every run named has ended (its sweep_result.json exists)
+or died (its process is gone with no result), or `--max-secs` pass, and
+prints each run's status and shapes done: exit 0 all ended, 3 wait again.
 """
 
 from __future__ import annotations
@@ -103,6 +125,7 @@ import contextlib
 import copy
 import datetime
 import enum
+import hashlib
 import io
 import json
 import math
@@ -130,6 +153,7 @@ write_atomic = tpu_slots.write_atomic
 EXIT_OK = serving_benchmark.EXIT_OK
 EXIT_FAILED = serving_benchmark.EXIT_CELL_FAILED
 EXIT_SETUP = serving_benchmark.EXIT_SETUP
+EXIT_WAITING = 3
 
 
 class Wait(enum.IntEnum):
@@ -149,7 +173,11 @@ PARALLEL_BACKENDS = ("gke_job", )
 
 # How a server is known to serve, or to have failed to.
 SERVER_READY = "Application startup complete"
-SERVER_FAILED = r"WEIGHTS FAILED|Traceback \(most recent call last\)"
+SERVER_FAILED = (r"WEIGHTS FAILED|Traceback \(most recent call last\)|"
+                 r"serve_vllm: patch (does not apply|failed)")
+PATCH_FAILED = re.compile(r"patch (does not apply|failed)")
+PATCHES_APPLIED = "serve_vllm: applied"
+APPLIER = HERE / "vllm_patches" / "apply_vllm_patch.sh"
 
 # Each shape's client: a job beside its server running CLIENT_RECIPE, which
 # keeps serving_benchmark.py's exit code in a file so the job's files come
@@ -478,6 +506,8 @@ class Sweep:
         # Found in plan_servers, inside run's error handling.
         self.slots_path: Path | None = None
         self.image: str | None = args.server_image
+        self._patch_inputs: list[str] = []
+        self.patch_sha256: list[str] = []
 
     def submit(self,
                *args: str,
@@ -497,6 +527,8 @@ class Sweep:
                 snapshot = {
                     "updated_at":
                     utc_now(),
+                    "pid":
+                    os.getpid(),
                     "slots":
                     str(self.slots_path) if self.slots_path else None,
                     "servers": [{
@@ -509,8 +541,50 @@ class Sweep:
                     list(self.queue),
                     "shapes":
                     copy.deepcopy(self.shapes),
+                    **self.pinned(),
                 }
             write_json(self.out / "sweep_status.json", snapshot)
+
+    def pinned(self) -> dict[str, Any]:
+        """--patch (with each file's sha256) and --hardware, as given."""
+        out: dict[str, Any] = {}
+        if self.args.patch:
+            out["patches"] = list(self.args.patch)
+            out["patch_sha256"] = list(self.patch_sha256)
+        if self.args.hardware:
+            out["hardware"] = self.args.hardware
+        return out
+
+    def patch_inputs(self) -> list[str]:
+        """Each patch, the applier and the list naming them, as --input."""
+        if not self.args.patch:
+            return []
+        missing = [p for p in self.args.patch if not Path(p).is_file()]
+        if missing:
+            raise ValueError(f"--patch {', '.join(missing)}: no such file")
+        # Hashed once: what every server is sent is what the summary records.
+        self.patch_sha256 = [
+            hashlib.sha256(Path(p).read_bytes()).hexdigest()
+            for p in self.args.patch
+        ]
+        names = [Path(p).name for p in self.args.patch]
+        # As compute reads --input: LOCAL[:REMOTE], REMOTE defaulting to
+        # LOCAL's name.
+        taken = {"vllm_patches.txt"}
+        for spec in self.args.server_input:
+            local, sep, remote = spec.partition(":")
+            taken.add(remote if sep and remote else Path(local).name)
+        twice = {n for n in names if names.count(n) > 1}
+        clash = sorted(twice | (set(names) & taken))
+        if clash:
+            raise ValueError(f"--patch names {', '.join(clash)} twice, or as "
+                             "a --server-input: rename one")
+        listing = self.out / "vllm_patches.txt"
+        write_atomic(listing, "".join(n + "\n" for n in names))
+        inputs = [f"{p}:{n}" for p, n in zip(self.args.patch, names)]
+        if "apply_vllm_patch.sh" not in taken - {"vllm_patches.txt"}:
+            inputs.append(f"{APPLIER}:apply_vllm_patch.sh")
+        return inputs + [f"{listing}:vllm_patches.txt"]
 
     def note(self, server: dict[str, Any], **fields: Any) -> None:
         with self.lock:
@@ -570,6 +644,10 @@ class Sweep:
                        "client can reach")
             elif record.get("status") in ("COMPLETED", "FAILED", "CANCELLED"):
                 why = f"no longer running ({record.get('status')})"
+            elif (self.args.hardware
+                  and self.kind_of(profile) != self.args.hardware):
+                why = (f"another kind of TPU ({self.kind_of(profile)}) than "
+                       f"--hardware {self.args.hardware}")
             elif found and self.kind_of(profile) != found[0]["_kind"]:
                 why = (f"another kind of TPU ({self.kind_of(profile)}) than "
                        f"{found[0]['job_id']} ({found[0]['_kind']})")
@@ -614,7 +692,8 @@ class Sweep:
         # One kind of TPU for every server: the first leader's, else that of
         # the first slot, taken where most slots of its kind are free. A
         # leader whose kind is unknown keeps the followers on its profile.
-        kind = self.servers[0]["_kind"] if self.servers else None
+        kind = (self.servers[0]["_kind"]
+                if self.servers else self.args.hardware)
         same_profile = (self.servers[0]["profile"]
                         if self.servers and not kind else None)
         for i in range(len(self.servers), want):
@@ -733,7 +812,7 @@ class Sweep:
         submit = ["--recipe", args.recipe, "--name", name, "--serve"]
         if args.interpreter:
             submit += ["--interpreter", args.interpreter]
-        for spec in args.server_input:
+        for spec in args.server_input + self._patch_inputs:
             submit += ["--input", spec]
         if self.image:
             submit += ["--image", self.image]
@@ -756,13 +835,20 @@ class Sweep:
                                   server["holder"], job_id)
         # Serving means its weights loaded, whatever the recipe printed on
         # the way; a failed fetch or a traceback ends the wait early.
-        for until, fail_on in (("running", None), (f"log:{SERVER_READY}",
-                                                   SERVER_FAILED)):
+        stages = [("running", SERVER_FAILED if args.patch else None)]
+        if args.patch:
+            # A recipe that skips serve_vllm.sh would serve the bare image.
+            stages.append((f"log:{PATCHES_APPLIED}", SERVER_FAILED))
+        stages.append((f"log:{SERVER_READY}", SERVER_FAILED))
+        for until, fail_on in stages:
             rc, body = self.wait(job_id, until, server["profile"],
                                  args.start_timeout, fail_on)
             if rc != Wait.REACHED:
                 why = body.get("line") or body.get("outcome") or body.get(
                     "error") or f"job wait exit {rc}"
+                if PATCH_FAILED.search(str(why)):
+                    # Every server gets the same patches: none would serve.
+                    self.stop.set()
                 self.note(server,
                           state="failed",
                           error=f"did not reach {until}: {why}")
@@ -783,6 +869,11 @@ class Sweep:
         """Cancel a server started here and free its slot, once; keep its log."""
         with self.lock:
             if not server.get("owned") or server.get("released"):
+                return
+            if (self.args.keep_servers and server.get("served")
+                    and server.get("state") not in ("failed", "lost")
+                    and not self.stop_requested):
+                server["kept"] = True
                 return
             server["released"] = True
         job_id = server.get("job_id")
@@ -980,6 +1071,7 @@ class Sweep:
         self.out.mkdir(parents=True, exist_ok=True)
         write_json(self.out / "sweep_plan.json", self.plan)
         try:
+            self._patch_inputs = self.patch_inputs()
             self.plan_servers()
         except BaseException:
             for server in self.servers:
@@ -1021,7 +1113,8 @@ class Sweep:
                         not self.stop_requested else "the sweep was stopped")
                 self.queue.clear()
             self.save_status()
-        return merge(self.plan, self.out, self.shapes, self.servers)
+        return merge(self.plan, self.out, self.shapes, self.servers,
+                     self.pinned())
 
     def exit_code(self, merged: dict[str, Any]) -> int:
         """0 ok, 1 a shape failed or was not run, 2 no server ever served."""
@@ -1037,7 +1130,8 @@ class Sweep:
 def merge(plan: dict[str, Any],
           out: Path,
           shapes: dict[str, dict[str, Any]] | None = None,
-          servers: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+          servers: list[dict[str, Any]] | None = None,
+          pinned: dict[str, Any] | None = None) -> dict[str, Any]:
     """The shapes' summaries as one serving_benchmark.py summary.json.
 
     Each shape is judged as the client judges it, by `shape_ok`; the sweep is
@@ -1155,6 +1249,7 @@ def merge(plan: dict[str, Any],
             for k in ("label", "job_id", "profile", "hardware", "resource",
                       "owned", "state", "error")
         } for s in servers],
+        **(pinned or {}),
     }
     write_json(out / CLIENT_DIR / "summary.json", merged)
     write_atomic(out / CLIENT_DIR / "summary.md",
@@ -1176,6 +1271,54 @@ def _comparable(summary: dict[str, Any]) -> tuple:
 # ------------------------------------------------------------------ cleanup
 
 
+def run_state(out: Path) -> dict[str, Any]:
+    """One run's progress: shapes done of all, and whether it ended or died."""
+    result, status = out / "sweep_result.json", out / "sweep_status.json"
+    if result.is_file():
+        got = json.loads(result.read_text(encoding="utf-8"))
+        return {"ended": True, "status": got.get("status")}
+    if not status.is_file():
+        # A run that died before its first status: the pid its launcher saved.
+        pid = out / "pid"
+        if pid.is_file() and not _alive(pid.read_text().strip()):
+            return {"ended": True, "status": "died"}
+        return {"ended": False, "status": "starting"}
+    state = json.loads(status.read_text(encoding="utf-8"))
+    shapes = list((state.get("shapes") or {}).values())
+    row = {
+        "ended": False,
+        "status": "running",
+        "shapes_done": sum(1 for s in shapes if s.get("state") == "done"),
+        "shapes": len(shapes),
+    }
+    if not _alive(state.get("pid")):
+        row.update(ended=True, status="died")
+    return row
+
+
+def _alive(pid: Any) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def wait(outs: list[Path],
+         max_secs: float,
+         poll_s: float = 10.0) -> dict[str, Any]:
+    """Each run's state once every one has ended or died, or `max_secs` on."""
+    deadline = time.monotonic() + max_secs
+    while True:
+        runs = {str(o): run_state(o) for o in outs}
+        ended = all(r["ended"] for r in runs.values())
+        if ended or time.monotonic() >= deadline:
+            return {"status": "ended" if ended else "running", "runs": runs}
+        time.sleep(poll_s)
+
+
 def cleanup(out: Path, compute: Callable[..., tuple[int, dict[str, Any]]],
             slots: Path | None) -> dict[str, Any]:
     """Cancel the servers a run started and left, and free their slots.
@@ -1192,6 +1335,18 @@ def cleanup(out: Path, compute: Callable[..., tuple[int, dict[str, Any]]],
         if not server.get("owned") or server.get("released"):
             continue
         if server.get("job_id"):
+            # A kept server's log was never fetched; keep it before it goes.
+            log = out / "servers" / f"{server.get('label')}.log"
+            rc, body = (1, {}) if log.exists() else compute(
+                "job",
+                "logs",
+                "--job-id",
+                server["job_id"],
+                profile=server.get("profile"),
+                timeout=300)
+            if rc == 0 and body.get("logs"):
+                log.parent.mkdir(parents=True, exist_ok=True)
+                write_atomic(log, body["logs"])
             compute("job",
                     "cancel",
                     "--job-id",
@@ -1277,6 +1432,20 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    default=None,
                    help="profile of a --leader that names none; default: the "
                    "active one")
+    r.add_argument("--patch",
+                   action="append",
+                   default=[],
+                   metavar="PATCH",
+                   help="a vllm_torchtpu patch every started server applies "
+                   "through serve_vllm.sh; repeatable, in apply order")
+    r.add_argument("--hardware",
+                   default=None,
+                   metavar="KEY",
+                   help="the tpu_slots.py hardware key every server books")
+    r.add_argument("--keep-servers",
+                   action="store_true",
+                   help="leave the servers started here running, slots "
+                   "held, after the sweep; `cleanup` cancels them")
     r.add_argument("--max-servers",
                    type=int,
                    default=8,
@@ -1301,6 +1470,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     m = sub.add_parser("merge", help="merge a run's shapes again")
     m.add_argument("--out-dir", required=True)
 
+    w = sub.add_parser("wait",
+                       help="block until the runs end or die, or --max-secs")
+    w.add_argument("--out-dir", action="append", required=True)
+    w.add_argument("--max-secs", type=float, default=540)
+
     c = sub.add_parser("cleanup",
                        parents=[compute_args],
                        help="cancel what a dead run left serving")
@@ -1317,6 +1491,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
             p.error("--name may hold only letters, digits and '-'")
         if not args.plan and not args.client_args:
             p.error("give the client's flags after --, or --plan")
+        if args.patch and args.leader:
+            p.error(
+                "--patch takes no --leader: a leader's patches are unknown")
+        if args.hardware and args.no_slots:
+            p.error("--hardware pins the slots it books: not with --no-slots")
     return args
 
 
@@ -1348,6 +1527,11 @@ def main(argv: list[str] | None = None) -> int:
             }))
         return EXIT_OK
 
+    if args.command == "wait":
+        result = wait([Path(d) for d in args.out_dir], args.max_secs)
+        print(json.dumps(result))
+        return EXIT_OK if result["status"] == "ended" else EXIT_WAITING
+
     out = Path(args.out_dir)
     if args.command == "cleanup":
         compute = Compute(args.runtime, args.package, args.run_id,
@@ -1366,7 +1550,11 @@ def main(argv: list[str] | None = None) -> int:
         status = out / "sweep_status.json"
         state = (json.loads(status.read_text(
             encoding="utf-8")) if status.is_file() else {})
-        merged = merge(plan, out, state.get("shapes"), state.get("servers"))
+        merged = merge(
+            plan, out, state.get("shapes"), state.get("servers"), {
+                k: state[k]
+                for k in ("patches", "patch_sha256", "hardware") if k in state
+            })
         print(
             json.dumps({
                 "status": merged["status"],

@@ -13,7 +13,7 @@
 # limitations under the License.
 """Per-point results of measured candidates against the baseline.
 
-    python3 report.py --candidates <work>/candidates.json \\
+    python3 report.py [--candidates <work>/candidates.json] \\
         --baseline <baseline bench>/summary.json \\
         --measured <cand_id>=<candidate bench>/summary.json [...] \\
         --out <work>/report.json
@@ -252,9 +252,10 @@ def load_summaries(paths: list[str]) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--candidates",
-                        required=True,
+                        default=None,
                         help="The candidates.json the measured candidates"
-                        " came from (propose.py's output)")
+                        " came from (propose.py's output); without it, each"
+                        " --measured id is a candidate")
     parser.add_argument("--baseline",
                         action="append",
                         required=True,
@@ -269,8 +270,15 @@ def main(argv: list[str] | None = None) -> int:
                         required=True,
                         help="Where to write the per-point report.json")
     args = parser.parse_args(argv)
-    with open(args.candidates, encoding="utf-8") as f:
-        candidates = json.load(f)
+    if args.candidates:
+        with open(args.candidates, encoding="utf-8") as f:
+            candidates = json.load(f)
+    else:
+        candidates = {
+            "candidates": [{
+                "cand_id": m.partition("=")[0]
+            } for m in args.measured]
+        }
     baseline = load_summaries(
         [p for arg in args.baseline for p in arg.split(",") if p])
     if not baseline["cells"]:

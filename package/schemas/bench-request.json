@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Serving Benchmark Request",
-  "description": "What an onboarding serving benchmark ran (bench_request.json, returned as output_files.bench_request). Run the same client_args against a changed server and the two summaries differ only by the change.",
+  "description": "What a serving benchmark ran (bench_request.json; onboarding returns it as output_files.bench_request). Run the same client_args against a changed server and the two summaries differ only by the change. tpu-serving-bench reads it as a workload and adds the image's ordered patch list and the slot hardware key it ran on.",
   "type": "object",
   "required": [
     "route",
@@ -31,6 +31,19 @@
         "job_id"
       ],
       "description": "The server measured (a sweep's leader): job_id, and when known compute_profile, image, deployments_json, launch_recipe."
+    },
+    "patches": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "vllm_torchtpu patch paths the server applied, in apply order; absent or empty for the bare image."
+    },
+    "hardware": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The tpu_slots.py hardware key every server ran on, when one was pinned."
     },
     "sweep": {
       "type": "object",
@@ -62,6 +75,37 @@
         "launch_recipe": "/runs/r/artifacts/tpu-model-onboarding/inference/launch_vllm.sh"
       },
       "results_json": "/runs/r/artifacts/tpu-model-onboarding/inference/serving_bench/summary.json"
+    },
+    {
+      "route": "sweep",
+      "client_args": [
+        "--engine",
+        "vllm",
+        "--isl-osl",
+        "1024:1024,8192:1024",
+        "--concurrency",
+        "1,8,32",
+        "--seed",
+        "42"
+      ],
+      "server": {
+        "job_id": "hill-climb-stack-s1-3",
+        "compute_profile": "gke-v7x",
+        "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+        "launch_recipe": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/e2e/launch.sh"
+      },
+      "results_json": "~/.tpu-agent-suite/runs/r/artifacts/tpu-serving-bench/e2e/stack/sweep/serving_bench/summary.json",
+      "patches": [
+        "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/patches/01-rpa.diff"
+      ],
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "sweep": {
+        "sweep_plan": "~/.tpu-agent-suite/runs/r/artifacts/tpu-serving-bench/e2e/stack/sweep/sweep_plan.json",
+        "recipe": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/e2e/launch.sh",
+        "server_inputs": [
+          "serve_vllm.sh"
+        ]
+      }
     }
   ]
 }

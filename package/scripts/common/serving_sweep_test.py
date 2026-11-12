@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import threading
@@ -114,7 +116,9 @@ class FakeCompute:
                  setup_error=(),
                  client_submit_fails=None,
                  client_wait_rc=None,
-                 raise_on_submit=()):
+                 raise_on_submit=(),
+                 fail_line="Traceback",
+                 fail_at="log:"):
         self.lock = threading.Lock()
         self.calls, self.cancelled = [], []
         self.records, self.ready, self.submitted_at = {}, {}, {}
@@ -125,6 +129,8 @@ class FakeCompute:
         self.client_submit_fails = dict(client_submit_fails or {})
         self.client_wait_rc = dict(client_wait_rc or {})
         self.raise_on_submit = set(raise_on_submit)
+        self.fail_line = fail_line
+        self.fail_at = fail_at
         self.n = 0
         for job_id in ("lead-1", "lead-2"):
             self.add_server(job_id)
@@ -200,8 +206,12 @@ class FakeCompute:
         time.sleep(self.delay)
         if not job["client"]:
             if (job["name"] in self.fail_start
-                    and _flag(argv, "--until").startswith("log:")):
-                return 2, {"outcome": "failure_logged", "line": "Traceback"}
+                    and _flag(argv, "--until").startswith(self.fail_at)):
+                # As job wait: the line comes back only for a stage that
+                # watches for one; otherwise the job just ended.
+                if "--fail-on-log" not in argv:
+                    return 2, {"outcome": "job_ended"}
+                return 2, {"outcome": "failure_logged", "line": self.fail_line}
             with self.lock:
                 self.ready.setdefault(job_id, time.monotonic())
             return 0, {"outcome": "reached"}
@@ -796,6 +806,190 @@ class TestHardware(SweepCase):
         self.assertIn("more than one kind of TPU", merged["error"])
 
 
+class TestPatchesAndPins(SweepCase):
+    """--patch, --hardware and --keep-servers: an arm of a patched A/B."""
+
+    def patches(self, *names):
+        paths = []
+        for name in names:
+            path = self.root / "patches" / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(f"patch {name}\n")
+            paths.append(path)
+        return paths
+
+    def test_patches_ship_in_order_to_every_server(self):
+        self.make_slots(2)
+        first, second = self.patches("02-gate.py", "01-rpa.patch")
+        fake = FakeCompute(delay=0.01)
+        sweep = self.sweep(self.plan(),
+                           fake,
+                           "--server-input",
+                           "serve_vllm.sh",
+                           "--patch",
+                           str(first),
+                           "--patch",
+                           str(second),
+                           leader=())
+        merged = self.run_quietly(sweep)
+        self.assertEqual(merged["status"], "ok")
+        started = fake.servers_started()
+        self.assertEqual(len(started), 2)
+        listing = sweep.out / "vllm_patches.txt"
+        self.assertEqual(listing.read_text(), "02-gate.py\n01-rpa.patch\n")
+        for job_id in started:
+            inputs = _flags(fake.records[job_id]["argv"], "--input")
+            self.assertEqual(inputs[0], "serve_vllm.sh")
+            self.assertEqual(inputs[1:], [
+                f"{first}:02-gate.py", f"{second}:01-rpa.patch",
+                f"{serving_sweep.APPLIER}:apply_vllm_patch.sh",
+                f"{listing}:vllm_patches.txt"
+            ])
+        self.assertEqual(merged["patches"], [str(first), str(second)])
+        self.assertEqual(merged["patch_sha256"], [
+            hashlib.sha256(p.read_bytes()).hexdigest() for p in (first, second)
+        ])
+        status = json.loads((sweep.out / "sweep_status.json").read_text())
+        self.assertEqual(status["patches"], [str(first), str(second)])
+        # A summary merged again from the status keeps the patches' hashes.
+        with unittest.mock.patch("sys.stdout", new=io.StringIO()):
+            serving_sweep.main(["merge", "--out-dir", str(sweep.out)])
+        again = json.loads((sweep.out / serving_sweep.CLIENT_DIR /
+                            "summary.json").read_text())
+        self.assertEqual(again["patch_sha256"], merged["patch_sha256"])
+        # A leader's patches are unknown, so a patched arm takes none.
+        with self.assertRaises(SystemExit), \
+                unittest.mock.patch("sys.stderr", new=io.StringIO()):
+            self.sweep(self.plan(), fake, "--patch", str(first))
+
+    def test_no_patch_leaves_the_outputs_as_they_were(self):
+        self.make_slots(2)
+        sweep = self.sweep(self.plan(), FakeCompute(delay=0.01))
+        merged = self.run_quietly(sweep)
+        status = json.loads((sweep.out / "sweep_status.json").read_text())
+        for out in (merged, status):
+            self.assertNotIn("patches", out)
+            self.assertNotIn("hardware", out)
+        self.assertFalse((sweep.out / "vllm_patches.txt").exists())
+
+    def test_two_patches_of_one_name_are_refused(self):
+        self.make_slots(1)
+        a = self.patches("x.patch")[0]
+        b = self.root / "other" / "x.patch"
+        b.parent.mkdir()
+        b.write_text("other\n")
+        sweep = self.sweep(self.plan(),
+                           FakeCompute(),
+                           "--patch",
+                           str(a),
+                           "--patch",
+                           str(b),
+                           leader=())
+        with self.assertRaises(ValueError):
+            sweep.run()
+        # A --server-input with no REMOTE lands under its own name, as
+        # compute reads it, so it clashes with a patch of that name too.
+        sweep = self.sweep(self.plan(),
+                           FakeCompute(),
+                           "--server-input",
+                           str(b),
+                           "--patch",
+                           str(a),
+                           leader=())
+        with self.assertRaises(ValueError):
+            sweep.run()
+
+    def test_a_patch_that_fails_stops_the_arm(self):
+        # Not applying, or failing any other way, and even before the job
+        # is seen running: every server would fail the same.
+        for line, at in (("serve_vllm: patch does not apply: 02-gate.py",
+                          "log:"),
+                         ("serve_vllm: patch failed (exit 3): 02-gate.py",
+                          "running")):
+            with self.subTest(line=line, at=at):
+                self.setUp()
+                self.make_slots(3)
+                bad = self.patches("02-gate.py")[0]
+                fake = FakeCompute(fail_start={"gemma-s1"},
+                                   fail_line=line,
+                                   fail_at=at)
+                sweep = self.sweep(self.plan(),
+                                   fake,
+                                   "--patch",
+                                   str(bad),
+                                   leader=())
+                merged = self.run_quietly(sweep)
+                self.assertEqual(len(fake.servers_started()), 1)
+                server = merged["servers"][0]
+                self.assertEqual(server["state"], "failed")
+                self.assertIn(line.split(": ", 1)[1], server["error"])
+                self.assertEqual(sweep.exit_code(merged),
+                                 serving_sweep.EXIT_SETUP)
+                self.assertEqual({s["state"]
+                                  for s in sweep.shapes.values()}, {"not_run"})
+                self.assertTrue(self.slots_free())
+
+    def test_a_missing_patch_file_is_refused_with_every_slot_free(self):
+        self.make_slots(2)
+        sweep = self.sweep(self.plan(),
+                           FakeCompute(),
+                           "--patch",
+                           str(self.root / "nope.patch"),
+                           leader=())
+        with self.assertRaises(ValueError):
+            sweep.run()
+        self.assertTrue(self.slots_free())
+
+    def test_hardware_restricts_every_claim_and_leader(self):
+        profiles = TestHardware.PROFILES
+        self.make_slots(1, profiles)
+        fake = FakeCompute(delay=0.01)
+        # Most free slots are v7x; the pin keeps every server on v6e.
+        sweep = self.sweep(self.plan(),
+                           fake,
+                           "--hardware",
+                           V6E,
+                           leader=(),
+                           profiles=profiles,
+                           active="gke-v7x-a")
+        merged = self.run_quietly(sweep)
+        self.assertEqual(merged["status"], "ok")
+        self.assertEqual(
+            {fake.records[k]["profile"]
+             for k in fake.servers_started()}, {"gke-v6e"})
+        self.assertEqual(merged["hardware"], V6E)
+        # A leader of another kind is left out, not followed.
+        self.make_slots(1, profiles)
+        sweep = self.sweep(self.plan(),
+                           FakeCompute(delay=0.01),
+                           "--hardware",
+                           V6E,
+                           profiles=profiles,
+                           active="gke-v7x-a")
+        self.run_quietly(sweep)
+        self.assertIn("--hardware", sweep.ignored[0]["why"])
+
+    def test_kept_servers_outlive_the_sweep_until_cleanup(self):
+        self.make_slots(2)
+        fake = FakeCompute(delay=0.01)
+        sweep = self.sweep(self.plan(), fake, "--keep-servers", leader=())
+        merged = self.run_quietly(sweep)
+        self.assertEqual(merged["status"], "ok")
+        self.assertEqual(fake.cancelled, [])
+        self.assertFalse(self.slots_free())
+        status = json.loads((sweep.out / "sweep_status.json").read_text())
+        kept = [s for s in status["servers"] if s.get("kept")]
+        self.assertEqual(len(kept), 2)
+        result = serving_sweep.cleanup(sweep.out, fake, None)
+        self.assertEqual(sorted(result["cancelled"]),
+                         sorted(s["job_id"] for s in kept))
+        self.assertTrue(self.slots_free())
+        for s in kept:
+            self.assertEqual(
+                (sweep.out / "servers" / f"{s['label']}.log").read_text(),
+                f"log of {s['job_id']}\n")
+
+
 class TestMerge(SweepCase):
 
     def test_a_merge_keeps_seeds_skips_warnings_and_the_plans_settings(self):
@@ -838,6 +1032,49 @@ class TestMerge(SweepCase):
         merged = self.run_quietly(self.sweep(plan, FakeCompute()))
         self.assertEqual(merged["status"], "failed")
         self.assertIn("isl8192_osl2048", merged["error"])
+
+
+class TestWait(SweepCase):
+
+    def test_wait_reports_ended_running_and_died_runs(self):
+        ended, alive, dead = (self.root / n for n in ("a", "b", "c"))
+        for out in (ended, alive, dead):
+            out.mkdir()
+        (ended / "sweep_result.json").write_text('{"status": "ok"}')
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        for out, pid in ((alive, os.getpid()), (dead, proc.pid)):
+            (out / "sweep_status.json").write_text(
+                json.dumps({
+                    "pid": pid,
+                    "shapes": {
+                        "s1": {
+                            "state": "done"
+                        },
+                        "s2": {
+                            "state": "running"
+                        }
+                    }
+                }))
+        got = serving_sweep.wait([ended, alive, dead], max_secs=0)
+        self.assertEqual(got["status"], "running")
+        runs = {pathlib.Path(k).name: v for k, v in got["runs"].items()}
+        self.assertEqual(runs["a"], {"ended": True, "status": "ok"})
+        self.assertEqual((runs["b"]["status"], runs["b"]["shapes_done"],
+                          runs["b"]["shapes"]), ("running", 1, 2))
+        self.assertEqual((runs["c"]["ended"], runs["c"]["status"]),
+                         (True, "died"))
+        self.assertEqual(
+            serving_sweep.wait([ended, dead], max_secs=0)["status"], "ended")
+        # Dead before its first status (an argparse error, say): the pid
+        # its launcher saved says so, rather than "starting" for ever.
+        early = self.root / "d"
+        early.mkdir()
+        (early / "pid").write_text(f"{proc.pid}\n")
+        self.assertEqual(serving_sweep.run_state(early), {
+            "ended": True,
+            "status": "died"
+        })
 
 
 class TestCompute(unittest.TestCase):

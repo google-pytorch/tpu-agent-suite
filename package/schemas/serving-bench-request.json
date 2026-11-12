@@ -1,0 +1,645 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tpu-serving-bench Request",
+  "description": "Input payload for the tpu-serving-bench agent: start, measure or stop inference servers of one model on pinned images, each with an optional vllm_torchtpu change: a campaign-repo ref or registry patches. `bench` measures each arm with one serving sweep and compares it with the baseline arm; `serve` starts one server per arm, verifies it and leaves it running; `eval` scores mmlu_pro on the stack arm, against a recorded baseline or the baseline arm, under the benchmark's server command, and applies the fixed 1.5pp gate; `stop` cancels servers it started. The agent writes a bench request back as serving_bench_request.json with `hardware` and `plan` filled, so a later stage can re-send that file to rerun the identical measurement.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "action",
+    "engine",
+    "label"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "arms",
+        "bench_request"
+      ],
+      "description": "bench or serve from an earlier benchmark's record"
+    },
+    {
+      "required": [
+        "arms",
+        "deployment"
+      ],
+      "description": "bench with client_args, or serve"
+    },
+    {
+      "required": [
+        "arms",
+        "vllm_server_cmd",
+        "config",
+        "limit"
+      ],
+      "description": "eval"
+    },
+    {
+      "required": [
+        "servers"
+      ],
+      "description": "stop"
+    }
+  ],
+  "dependentRequired": {
+    "config": [
+      "vllm_server_cmd",
+      "limit"
+    ],
+    "limit": [
+      "vllm_server_cmd",
+      "config"
+    ],
+    "vllm_server_cmd": [
+      "config",
+      "limit"
+    ],
+    "baseline": [
+      "vllm_server_cmd",
+      "config",
+      "limit"
+    ]
+  },
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "The caller's run; slots are booked in it."
+    },
+    "action": {
+      "enum": [
+        "bench",
+        "serve",
+        "eval",
+        "stop"
+      ],
+      "description": "'bench': one serving sweep per arm, compared with the baseline arm. 'serve': one server per arm, verified and left running. 'eval': mmlu_pro on the stack arm under `vllm_server_cmd`, gated at 1.5pp against the baseline. 'stop': cancel `servers` and free their slots."
+    },
+    "engine": {
+      "enum": [
+        "vllm"
+      ],
+      "description": "The inference engine the servers run. Values are added as engines gain support (e.g. sglang); a FastAPI recipe is not an engine here."
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9-]+$",
+      "description": "Names this request in job names, slot holders and its output directory, e.g. `e2e`. Unique per run."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The Hugging Face id (or gs:// checkpoint folder) the servers load; also the client's --model and --tokenizer. Required by bench, serve and eval; eval serves it as --served-model-name."
+    },
+    "tpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accelerator_type",
+        "topology"
+      ],
+      "description": "The TPU each server runs on. Required by bench, serve and eval.",
+      "properties": {
+        "accelerator_type": {
+          "type": "string",
+          "pattern": "^\\S+-\\d+$",
+          "description": "Generation and chip count, e.g. tpu7x-8."
+        },
+        "topology": {
+          "type": "string",
+          "pattern": "^\\d+(x\\d+)*$"
+        }
+      }
+    },
+    "hardware": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The tpu_slots.py hardware key every server books. Absent: the first arm's sweep picks the session's one kind and later arms are pinned to it; with several keys already listed, invalid_input."
+    },
+    "arms": {
+      "type": "array",
+      "description": "bench, serve and eval: the servers to run, one image and optional plugin ref or patches each. A bench marks exactly one `baseline: true`; the others are compared with it. An eval has the baseline and the stack, or the stack alone when its config has no baseline.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "image"
+        ],
+        "oneOf": [
+          {
+            "description": "`plugin`, `patches`, or neither."
+          },
+          {
+            "required": [
+              "plugin",
+              "patches"
+            ],
+            "description": "Both: matches here too, so it is rejected."
+          }
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9-]+$"
+          },
+          "baseline": {
+            "type": "boolean",
+            "default": false
+          },
+          "image": {
+            "type": "string",
+            "pattern": "@sha256:[0-9a-f]+$",
+            "description": "The pinned image, by digest. Nothing is built."
+          },
+          "plugin": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo",
+              "base_sha",
+              "ref",
+              "sha",
+              "patch"
+            ],
+            "description": "The hill-climb's vllm_torchtpu change as a ref in its campaign repo, `base_sha` this image's plugin commit. Absent for the image as it ships, or with `patches`.",
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The campaign repo (references/common/plugin-git.md)."
+              },
+              "base_sha": {
+                "type": "string",
+                "pattern": "^(?![0-9a-f]{33}0{7}$)[0-9a-f]{40}$",
+                "description": "`base`: the image's own vllm_torchtpu commit. Copied from tpu-code-stack's result, never typed: a short sha padded with zeros is refused."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The branch or tag measured, e.g. `stack`, `hyp/2-moe-gate`."
+              },
+              "sha": {
+                "type": "string",
+                "pattern": "^(?![0-9a-f]{33}0{7}$)[0-9a-f]{40}$",
+                "description": "The commit `ref` named when it was measured. Copied from tpu-code-stack's result, never typed: a short sha padded with zeros is refused."
+              },
+              "patch": {
+                "type": "string",
+                "minLength": 1,
+                "description": "`git diff base..sha` as plugin_source.py diff wrote it: the one patch the job applies, kept so the arm replays without the repo."
+              }
+            }
+          },
+          "patches": {
+            "type": "array",
+            "description": "vllm_patches registry files (.patch or .py), in apply order, for a caller with no campaign repo, e.g. the patches a verified deployment's recipe applied. Never with `plugin`.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "server_args": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Extra `vllm serve` flags for this arm's servers only, appended to the launch recipe's serve line (e.g. `--speculative-config`, a parallelism or quantization change). Arms without it run the recipe unchanged."
+          }
+        }
+      }
+    },
+    "bench_request": {
+      "description": "An earlier benchmark's record (schemas/bench-request.json), as a path or embedded: its client_args are the workload and its server block the deployment.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "required": [
+            "route",
+            "client_args",
+            "server",
+            "results_json"
+          ]
+        }
+      ]
+    },
+    "client_args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "bench with `deployment`: serving_benchmark.py's flags as one client run takes them, without --base-url and --output-dir."
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "launch_recipe",
+        "port"
+      ],
+      "description": "How a server is started: the launch recipe and the files its submit ships. For vllm the recipe starts the server with `exec bash serve_vllm.sh <vllm serve args>`.",
+      "properties": {
+        "launch_recipe": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "deployments_json": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Every other --input of the recipe's submit, LOCAL[:REMOTE]."
+        },
+        "interpreter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "submit_args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Other submit flags, verbatim, e.g. --shm-size-gb=128."
+        },
+        "max_model_len": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "shapes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^\\d+:\\d+$"
+      },
+      "description": "bench: only these isl:osl shapes of the workload's --isl-osl. Absent: every shape."
+    },
+    "profile": {
+      "type": "boolean",
+      "default": true,
+      "description": "bench: capture each arm's server through tpu-diagnostics after its sweep."
+    },
+    "server_budget_s": {
+      "type": "number",
+      "minimum": 1,
+      "description": "bench: serving_sweep.py --server-budget-s, on a cluster that stops jobs after a fixed time."
+    },
+    "plan": {
+      "type": "string",
+      "minLength": 1,
+      "description": "bench: the sweep_plan.json every arm ran. Filled in the replay record; a caller leaves it out."
+    },
+    "vllm_server_cmd": {
+      "type": "string",
+      "minLength": 1,
+      "description": "eval: VLLM_SERVER_CMD, the server under test, as read back from the benchmark job it gates. Both arms are served under it."
+    },
+    "config": {
+      "type": "string",
+      "minLength": 1,
+      "description": "eval: config name in <model>-<quant>-<sharding> form. It selects the protocol and the recorded baseline."
+    },
+    "limit": {
+      "description": "eval: mmlu_pro --limit, per subject: 100 is the gate (n~1400); 'full' runs all 12,032 samples; anything smaller is a plumbing test.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "const": "full"
+        }
+      ]
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "score",
+        "stderr",
+        "n",
+        "eval_cmd",
+        "source"
+      ],
+      "description": "eval: an mmlu_pro baseline the caller already holds, with the protocol that produced it. With it, the baseline arm is not run.",
+      "properties": {
+        "score": {
+          "type": "number"
+        },
+        "stderr": {
+          "type": "number",
+          "minimum": 0
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "eval_cmd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Job id or record path that measured it."
+        }
+      }
+    },
+    "servers": {
+      "type": "array",
+      "description": "stop: the servers to cancel, as a `serve` or `bench` result returned them.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "job_id",
+          "profile",
+          "port"
+        ],
+        "oneOf": [
+          {
+            "description": "`plugin`, `patches`, or neither."
+          },
+          {
+            "required": [
+              "plugin",
+              "patches"
+            ],
+            "description": "Both: matches here too, so it is rejected."
+          }
+        ],
+        "description": "A server this agent started.",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The compute profile it runs under."
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "files_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Where serve_vllm.sh serves the profile directory; 8790 when absent."
+          },
+          "engine": {
+            "enum": [
+              "vllm"
+            ]
+          },
+          "image": {
+            "type": "string",
+            "pattern": "@sha256:[0-9a-f]+$"
+          },
+          "plugin": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo",
+              "base_sha",
+              "ref",
+              "sha",
+              "patch"
+            ],
+            "description": "The plugin ref it serves; absent for the image as it ships.",
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The campaign repo (references/common/plugin-git.md)."
+              },
+              "base_sha": {
+                "type": "string",
+                "pattern": "^(?![0-9a-f]{33}0{7}$)[0-9a-f]{40}$",
+                "description": "`base`: the image's own vllm_torchtpu commit. Copied from tpu-code-stack's result, never typed: a short sha padded with zeros is refused."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The branch or tag measured, e.g. `stack`, `hyp/2-moe-gate`."
+              },
+              "sha": {
+                "type": "string",
+                "pattern": "^(?![0-9a-f]{33}0{7}$)[0-9a-f]{40}$",
+                "description": "The commit `ref` named when it was measured. Copied from tpu-code-stack's result, never typed: a short sha padded with zeros is refused."
+              },
+              "patch": {
+                "type": "string",
+                "minLength": 1,
+                "description": "`git diff base..sha` as plugin_source.py diff wrote it: the one patch the job applies, kept so the arm replays without the repo."
+              }
+            }
+          },
+          "patches": {
+            "type": "array",
+            "description": "The registry patches it applied, in apply order.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "deployments_json": {
+            "type": "string",
+            "minLength": 1
+          },
+          "launch_recipe": {
+            "type": "string",
+            "minLength": 1
+          },
+          "hardware": {
+            "type": "string",
+            "minLength": 1
+          },
+          "resource": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The slot it holds."
+          },
+          "holder": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The holder that slot is claimed under."
+          },
+          "sweep_dir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The serving_sweep.py out-dir that started it; `cleanup` there cancels it."
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "run_id": "20260921T120000Z-abcdef012345",
+      "action": "bench",
+      "engine": "vllm",
+      "label": "e2e",
+      "model": "zai-org/GLM-5.2-FP8",
+      "tpu": {
+        "accelerator_type": "tpu7x-8",
+        "topology": "2x2x2"
+      },
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "arms": [
+        {
+          "label": "baseline",
+          "baseline": true,
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a"
+        },
+        {
+          "label": "stack",
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "plugin": {
+            "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+            "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+            "ref": "stack",
+            "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+            "patch": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/bench/e2e-stack.patch"
+          }
+        }
+      ],
+      "bench_request": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-model-onboarding/inference/bench_request.json",
+      "profile": true
+    },
+    {
+      "run_id": "20260921T120000Z-abcdef012345",
+      "action": "bench",
+      "engine": "vllm",
+      "label": "e2e",
+      "model": "zai-org/GLM-5.2-FP8",
+      "tpu": {
+        "accelerator_type": "tpu7x-8",
+        "topology": "2x2x2"
+      },
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "arms": [
+        {
+          "label": "baseline",
+          "baseline": true,
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a"
+        },
+        {
+          "label": "stack",
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "plugin": {
+            "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+            "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+            "ref": "stack",
+            "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+            "patch": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/bench/e2e-stack.patch"
+          }
+        }
+      ],
+      "bench_request": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-model-onboarding/inference/bench_request.json",
+      "profile": true,
+      "plan": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/baseline/sweep/sweep_plan.json"
+    },
+    {
+      "run_id": "20260921T120000Z-abcdef012345",
+      "action": "serve",
+      "engine": "vllm",
+      "label": "accuracy",
+      "model": "zai-org/GLM-5.2-FP8",
+      "tpu": {
+        "accelerator_type": "tpu7x-8",
+        "topology": "2x2x2"
+      },
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "arms": [
+        {
+          "label": "stack",
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "plugin": {
+            "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+            "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+            "ref": "stack",
+            "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+            "patch": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/bench/accuracy-stack.patch"
+          }
+        }
+      ],
+      "deployment": {
+        "launch_recipe": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/e2e/launch.sh",
+        "port": 8000,
+        "deployments_json": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/e2e/deployments.json",
+        "interpreter": "bash",
+        "submit_args": [
+          "--shm-size-gb=128"
+        ]
+      }
+    },
+    {
+      "run_id": "20260921T120000Z-abcdef012345",
+      "action": "eval",
+      "engine": "vllm",
+      "label": "accuracy",
+      "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+      "tpu": {
+        "accelerator_type": "tpu7x-8",
+        "topology": "2x2x1"
+      },
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "arms": [
+        {
+          "label": "baseline",
+          "baseline": true,
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a"
+        },
+        {
+          "label": "stack",
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "plugin": {
+            "repo": "./.work/Qwen3.5-397B-A17B-FP8/hill-climb/j-91c2/plugin",
+            "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+            "ref": "stack",
+            "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+            "patch": "./.work/Qwen3.5-397B-A17B-FP8/hill-climb/j-91c2/bench/accuracy-stack.patch"
+          }
+        }
+      ],
+      "vllm_server_cmd": "vllm serve Qwen/Qwen3.5-397B-A17B-FP8 --served-model-name=Qwen/Qwen3.5-397B-A17B-FP8 --data-parallel-size=8 --enable-expert-parallel --port 8000",
+      "config": "qwen3.5-397b-fp8-tp1-dp8-ep",
+      "limit": 100
+    },
+    {
+      "run_id": "20260921T120000Z-abcdef012345",
+      "action": "stop",
+      "engine": "vllm",
+      "label": "accuracy",
+      "servers": [
+        {
+          "job_id": "accuracy-stack-s1-4",
+          "profile": "gke-v7x",
+          "port": 8000,
+          "resource": "gke-v7x/0",
+          "holder": "serving-sweep:accuracy-stack:s1",
+          "sweep_dir": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/stack/sweep"
+        }
+      ]
+    }
+  ]
+}

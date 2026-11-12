@@ -11,12 +11,13 @@
     "status": {
       "enum": [
         "success",
+        "serve_pending",
         "onboarding_required",
         "blocked_on_cuda_kernel",
         "needs_input",
         "failed"
       ],
-      "description": "Outcome status of the onboarding pipeline."
+      "description": "Outcome status of the onboarding pipeline. 'serve_pending': a vLLM deployment is prepared (preflight, deployments.json, launch recipe, and parity when it ran) and no server was launched here; tpu-agent routes its serving, verification, benchmark and teardown, then wakes this onboarding with handback. output_files carries deployments_json, launch_recipe and serving_requests."
     },
     "summary": {
       "type": "string",
@@ -80,6 +81,10 @@
         "launch_recipe": {
           "type": "string",
           "description": "Path to the recipe the server was launched with (e.g. launch_vllm.sh): the exact serve command and environment, including flags the manifest does not hold, such as --attention-backend. Handed to tpu-kernel-development with `deployments_json`."
+        },
+        "serving_requests": {
+          "type": "string",
+          "description": "serve_pending: path to the JSON list of tpu-serving-bench requests onboarding lined up, in the order to send them: a bench when numbers were asked for, then a serve that verifies the deployment. Onboarding holds no slot; each request claims its own."
         },
         "bench_request": {
           "type": "string",

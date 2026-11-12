@@ -1,0 +1,728 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "serving-bench-result.json",
+  "title": "tpu-serving-bench Result",
+  "description": "Output payload of the tpu-serving-bench agent. bench: per arm, the servers that ran its sweep, its summary.json, per-cell throughput, TTFT and TPOT medians, and throughput, TTFT and ITL deltas against the baseline arm, its plugin ref, patch outcome and traces, with REPORT.md and the replay record. eval: per arm, its mmlu_pro score and the job that measured it, with the delta and the 1.5pp gate. serve: a handle per server left running. stop: the jobs cancelled. Every bench number is a measured served result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "run_id"
+  ],
+  "status_requires": {
+    "measured": [
+      "arms",
+      "hardware",
+      "replay",
+      "report"
+    ],
+    "evaluated": [
+      "arms",
+      "gate",
+      "gate_pp",
+      "delta_pp",
+      "report"
+    ],
+    "served": [
+      "servers"
+    ],
+    "stopped": [
+      "stopped"
+    ],
+    "invalid_input": [
+      "missing"
+    ]
+  },
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "measured",
+        "evaluated",
+        "served",
+        "stopped",
+        "invalid_input",
+        "blocked",
+        "failed"
+      ],
+      "description": "'measured' (bench): every arm's sweep ran, or the arm was settled as `base_mismatch`. 'evaluated' (eval): the stack arm was scored and compared with the baseline. 'served' (serve): every arm's server is up and verified, and left running. 'stopped' (stop): every named server is cancelled and its slot free. 'invalid_input': the request cannot be run as given, an engine with no procedure here included; every gap is in `missing`. 'blocked': a backend other than gke_job, or no slot of the hardware key. 'failed': the baseline arm or a server failed past the relaunch limit, an arm of an eval or the baseline arm of a bench hit `base_mismatch`, or a script failed. Except for 'served' (and servers a bench was asked to keep), every server and slot this request started is released before returning."
+    },
+    "summary": {
+      "type": "string",
+      "description": "bench: each arm's throughput, TTFT and ITL delta in one line; eval: score, baseline, delta and gate; serve: the job ids; stop: what was cancelled."
+    },
+    "action": {
+      "enum": [
+        "bench",
+        "serve",
+        "eval",
+        "stop"
+      ]
+    },
+    "engine": {
+      "enum": [
+        "vllm"
+      ],
+      "description": "The request's engine, echoed."
+    },
+    "hardware": {
+      "type": "string",
+      "description": "The slot hardware key every server ran on."
+    },
+    "arms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "image",
+          "patch"
+        ],
+        "oneOf": [
+          {
+            "description": "`plugin`, `patches`, or neither."
+          },
+          {
+            "required": [
+              "plugin",
+              "patches"
+            ],
+            "description": "Both: matches here too, so it is rejected."
+          }
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "baseline": {
+            "type": "boolean"
+          },
+          "image": {
+            "type": "string"
+          },
+          "plugin": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo",
+              "base_sha",
+              "ref",
+              "sha",
+              "patch"
+            ],
+            "description": "The request arm's `plugin`, echoed; absent when it had none.",
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The campaign repo (references/common/plugin-git.md)."
+              },
+              "base_sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$",
+                "description": "`base`: the image's own vllm_torchtpu commit."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The branch or tag measured, e.g. `stack`, `hyp/2-moe-gate`."
+              },
+              "sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$",
+                "description": "The commit `ref` named when it was measured."
+              },
+              "patch": {
+                "type": "string",
+                "minLength": 1,
+                "description": "`git diff base..sha` as plugin_source.py diff wrote it: the one patch the job applies, kept so the arm replays without the repo."
+              }
+            }
+          },
+          "patches": {
+            "type": "array",
+            "description": "The request arm's `patches`, echoed; absent when it had none.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "status": {
+            "type": "string",
+            "description": "The merged summary.json's `status` (`ok`, `failed`)."
+          },
+          "server_job_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every server that took a shape."
+          },
+          "sweep_dir": {
+            "type": "string",
+            "description": "The serving_sweep.py out-dir: sweep_plan.json, sweep_status.json, sweep_result.json."
+          },
+          "summary_json": {
+            "type": "string",
+            "description": "The merged serving_bench/summary.json."
+          },
+          "bench_request": {
+            "type": "string",
+            "description": "This arm's bench_request.json (schemas/bench-request.json), with its patches (`[plugin.patch]` or `patches`) and hardware."
+          },
+          "patch": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "exit",
+              "outcome"
+            ],
+            "description": "What serve_vllm.sh applied before the server started.",
+            "properties": {
+              "exit": {
+                "type": "integer",
+                "description": "0 applied (or nothing to apply); 4 `base_mismatch`. Applier exit 4 cannot be a losing arm: the patch does not fit this image (for `plugin`, the ref's base is not this image's plugin commit), an input error."
+              },
+              "outcome": {
+                "type": "string",
+                "description": "`none`, `applied`, or `base_mismatch: <patch>`."
+              }
+            }
+          },
+          "cells": {
+            "type": "array",
+            "description": "One per summary.json cell, each metric's `mean` over replicates.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cell",
+                "status"
+              ],
+              "properties": {
+                "cell": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "isl": {
+                  "type": "integer"
+                },
+                "osl": {
+                  "type": "integer"
+                },
+                "concurrency": {
+                  "type": "integer"
+                },
+                "output_tokens_per_s": {
+                  "type": "number"
+                },
+                "ttft_p50_ms": {
+                  "type": "number"
+                },
+                "tpot_p50_ms": {
+                  "type": "number"
+                },
+                "e2el_p50_ms": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "deltas": {
+            "type": "array",
+            "description": "Per cell both arms measured, from report.py against the baseline arm: each metric's percent change (arm - baseline) / baseline x 100 over replicate medians, and the throughput verdict beyond the run-to-run noise. Absent for the baseline.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cell"
+              ],
+              "properties": {
+                "cell": {
+                  "type": "string"
+                },
+                "output_tokens_per_s_pct": {
+                  "type": "number"
+                },
+                "ttft_p50_ms_pct": {
+                  "type": "number"
+                },
+                "itl_p50_ms_pct": {
+                  "type": "number"
+                },
+                "verdict": {
+                  "enum": [
+                    "win",
+                    "loss",
+                    "tie"
+                  ],
+                  "description": "Throughput: win or loss beyond the noise, else tie."
+                }
+              }
+            }
+          },
+          "traces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The .xplane.pb files tpu-diagnostics captured from this arm's server."
+          },
+          "ml_diagnostics_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "The ML Diagnostics viewer link per entry of `traces`, in the same order, copied from tpu-diagnostics' result; absent when the profile names no ML Diagnostics cluster and bucket."
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "eval: mmlu_pro exact_match, custom-extract."
+          },
+          "stderr": {
+            "type": "number",
+            "minimum": 0
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "eval: sample_len, as the job printed it."
+          },
+          "eval_cmd": {
+            "type": "string",
+            "minLength": 1,
+            "description": "eval: EVAL_CMD as the job read it back, or as the recorded baseline carries it."
+          },
+          "job_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "eval: the eval jobs this request ran for the arm; empty when the baseline was read from a record."
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "description": "eval: the job id that measured `score`, or the record it was read from."
+          }
+        }
+      }
+    },
+    "servers": {
+      "type": "array",
+      "description": "serve: one per arm, left running.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "job_id",
+          "profile",
+          "port"
+        ],
+        "oneOf": [
+          {
+            "description": "`plugin`, `patches`, or neither."
+          },
+          {
+            "required": [
+              "plugin",
+              "patches"
+            ],
+            "description": "Both: matches here too, so it is rejected."
+          }
+        ],
+        "description": "A server left running: what `stop` and tpu-diagnostics (`server: {job_id, port, files_port}`) take.",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The compute profile it runs under."
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "files_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Where serve_vllm.sh serves the profile directory; 8790 when absent."
+          },
+          "engine": {
+            "enum": [
+              "vllm"
+            ]
+          },
+          "image": {
+            "type": "string",
+            "pattern": "@sha256:[0-9a-f]+$"
+          },
+          "plugin": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo",
+              "base_sha",
+              "ref",
+              "sha",
+              "patch"
+            ],
+            "description": "The plugin ref it serves; absent for the image as it ships.",
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The campaign repo (references/common/plugin-git.md)."
+              },
+              "base_sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$",
+                "description": "`base`: the image's own vllm_torchtpu commit."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The branch or tag measured, e.g. `stack`, `hyp/2-moe-gate`."
+              },
+              "sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$",
+                "description": "The commit `ref` named when it was measured."
+              },
+              "patch": {
+                "type": "string",
+                "minLength": 1,
+                "description": "`git diff base..sha` as plugin_source.py diff wrote it: the one patch the job applies, kept so the arm replays without the repo."
+              }
+            }
+          },
+          "patches": {
+            "type": "array",
+            "description": "The registry patches it applied, in apply order.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "deployments_json": {
+            "type": "string",
+            "minLength": 1
+          },
+          "launch_recipe": {
+            "type": "string",
+            "minLength": 1
+          },
+          "hardware": {
+            "type": "string",
+            "minLength": 1
+          },
+          "resource": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The slot it holds."
+          },
+          "holder": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The holder that slot is claimed under."
+          },
+          "sweep_dir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The serving_sweep.py out-dir that started it; `cleanup` there cancels it."
+          },
+          "verification": {
+            "type": "string",
+            "minLength": 1,
+            "description": "serve: the endpoint check's report (verify_inference.py)."
+          }
+        }
+      }
+    },
+    "stopped": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "stop: the job ids cancelled."
+    },
+    "gate": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive"
+      ],
+      "description": "eval: 'fail' is a drop of more than `gate_pp` below the baseline. 'inconclusive': below --limit 100, a plumbing run, never a pass. A config with no recorded baseline runs its baseline arm live first and is gated against it."
+    },
+    "gate_pp": {
+      "const": 1.5,
+      "description": "eval: the gate, fixed for every model and config."
+    },
+    "delta_pp": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "eval: stack score minus baseline score, in percentage points."
+    },
+    "replay": {
+      "type": "string",
+      "minLength": 1,
+      "description": "serving_bench_request.json: the request with `hardware` and `plan` filled. Sent back, it reruns the identical measurement."
+    },
+    "report": {
+      "type": "string",
+      "minLength": 1,
+      "description": "bench: REPORT.md. eval: the accuracy record, the next run's baseline."
+    },
+    "missing": {
+      "type": "array",
+      "description": "What the caller must change, when status is 'invalid_input'.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "reason"
+        ],
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "What stopped the request, when status is 'blocked' or 'failed'."
+    },
+    "logs": {
+      "type": "string",
+      "description": "serve or bench that failed: the saved log of the last server that failed, for the caller to pass on."
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Identifier of the active TPU agent suite run namespace."
+    }
+  },
+  "examples": [
+    {
+      "status": "measured",
+      "action": "bench",
+      "engine": "vllm",
+      "summary": "stack vs baseline at isl1024_osl1024_c32: throughput +6.1%, TTFT p50 -3.0%, ITL p50 -5.7%.",
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "arms": [
+        {
+          "label": "baseline",
+          "baseline": true,
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "status": "ok",
+          "server_job_ids": [
+            "e2e-baseline-s1-1"
+          ],
+          "sweep_dir": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/baseline/sweep",
+          "summary_json": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/baseline/sweep/serving_bench/summary.json",
+          "bench_request": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/baseline/bench_request.json",
+          "patch": {
+            "exit": 0,
+            "outcome": "none"
+          },
+          "cells": [
+            {
+              "cell": "isl1024_osl1024_c32",
+              "status": "ok",
+              "isl": 1024,
+              "osl": 1024,
+              "concurrency": 32,
+              "output_tokens_per_s": 2104.0,
+              "ttft_p50_ms": 412.0,
+              "tpot_p50_ms": 14.1
+            }
+          ],
+          "traces": [
+            "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/baseline/profile/rank0.xplane.pb"
+          ]
+        },
+        {
+          "label": "stack",
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "plugin": {
+            "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+            "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+            "ref": "stack",
+            "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+            "patch": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/bench/e2e-stack.patch"
+          },
+          "status": "ok",
+          "server_job_ids": [
+            "e2e-stack-s1-2"
+          ],
+          "sweep_dir": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/stack/sweep",
+          "summary_json": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/stack/sweep/serving_bench/summary.json",
+          "bench_request": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/stack/bench_request.json",
+          "patch": {
+            "exit": 0,
+            "outcome": "applied"
+          },
+          "cells": [
+            {
+              "cell": "isl1024_osl1024_c32",
+              "status": "ok",
+              "isl": 1024,
+              "osl": 1024,
+              "concurrency": 32,
+              "output_tokens_per_s": 2232.0,
+              "ttft_p50_ms": 399.6,
+              "tpot_p50_ms": 13.3
+            }
+          ],
+          "deltas": [
+            {
+              "cell": "isl1024_osl1024_c32",
+              "output_tokens_per_s_pct": 6.1,
+              "ttft_p50_ms_pct": -3.0,
+              "itl_p50_ms_pct": -5.7,
+              "verdict": "win"
+            }
+          ],
+          "traces": [
+            "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/stack/profile/rank0.xplane.pb"
+          ]
+        }
+      ],
+      "replay": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/serving_bench_request.json",
+      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/REPORT.md",
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "evaluated",
+      "action": "eval",
+      "engine": "vllm",
+      "summary": "mmlu_pro 0.8221 +/- 0.0101 (n=1400) vs 0.8250 +/- 0.0100 recorded: -0.29pp, passes the 1.5pp gate.",
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "arms": [
+        {
+          "label": "baseline",
+          "baseline": true,
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "patch": {
+            "exit": 0,
+            "outcome": "none"
+          },
+          "score": 0.825,
+          "stderr": 0.01,
+          "n": 1400,
+          "eval_cmd": "lm_eval --model local-chat-completions --model_args \"{...}\" --tasks ${EVAL_TASKS} --apply_chat_template --log_samples ... --seed 42",
+          "job_ids": [],
+          "source": "j-8846a1e0-1b60-4785-944c"
+        },
+        {
+          "label": "stack",
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "plugin": {
+            "repo": "./.work/Qwen3.5-397B-A17B-FP8/hill-climb/j-91c2/plugin",
+            "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+            "ref": "stack",
+            "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+            "patch": "./.work/Qwen3.5-397B-A17B-FP8/hill-climb/j-91c2/bench/accuracy-stack.patch"
+          },
+          "patch": {
+            "exit": 0,
+            "outcome": "applied"
+          },
+          "score": 0.8221,
+          "stderr": 0.0101,
+          "n": 1400,
+          "eval_cmd": "lm_eval --model local-chat-completions --model_args \"{...}\" --tasks ${EVAL_TASKS} --apply_chat_template --log_samples ... --seed 42",
+          "job_ids": [
+            "accuracy-stack-1"
+          ],
+          "source": "accuracy-stack-1"
+        }
+      ],
+      "gate": "pass",
+      "gate_pp": 1.5,
+      "delta_pp": -0.29,
+      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/accuracy-qwen3.5-397b-fp8-tp1-dp8-ep.md",
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "served",
+      "action": "serve",
+      "engine": "vllm",
+      "summary": "stack serving as accuracy-stack-s1-4, verified.",
+      "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+      "servers": [
+        {
+          "job_id": "accuracy-stack-s1-4",
+          "profile": "gke-v7x",
+          "port": 8000,
+          "files_port": 8790,
+          "engine": "vllm",
+          "image": "<registry>/vllm-torchtpu@sha256:3f2a",
+          "plugin": {
+            "repo": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/plugin",
+            "base_sha": "9b1c4e7a2d5f8036a1b4c7d0e3f6a9b2c5d8e1f4",
+            "ref": "stack",
+            "sha": "c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9",
+            "patch": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/bench/accuracy-stack.patch"
+          },
+          "deployments_json": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/e2e/deployments.json",
+          "launch_recipe": "./.work/GLM-5.2-FP8/hill-climb/j-58d59d77/e2e/launch.sh",
+          "hardware": "tpu7x|2x2x1|8|<registry>/vllm-torchtpu@sha256:3f2a",
+          "resource": "gke-v7x/0",
+          "holder": "serving-sweep:accuracy-stack:s1",
+          "sweep_dir": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/stack/sweep",
+          "verification": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/stack/verification.json"
+        }
+      ],
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "stopped",
+      "action": "stop",
+      "engine": "vllm",
+      "summary": "Cancelled accuracy-stack-s1-4; slot gke-v7x/0 free.",
+      "stopped": [
+        "accuracy-stack-s1-4"
+      ],
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "invalid_input",
+      "action": "bench",
+      "summary": "No baseline arm.",
+      "missing": [
+        {
+          "input": "arms[].baseline",
+          "reason": "exactly one arm is the baseline every other arm is compared with"
+        }
+      ],
+      "run_id": "20260921T120000Z-abcdef012345"
+    },
+    {
+      "status": "blocked",
+      "action": "bench",
+      "engine": "vllm",
+      "summary": "No slot of the hardware key.",
+      "failure_reason": "no slot of tpu7x|2x2x1|8",
+      "run_id": "20260921T120000Z-abcdef012345"
+    }
+  ]
+}

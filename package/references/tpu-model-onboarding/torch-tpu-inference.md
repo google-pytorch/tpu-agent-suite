@@ -72,8 +72,9 @@ next.
     knowledge base, chips from the profile.
 
 -   [ ] **Step 0.1b: Pick the TPU and book its slot (only for a sweep of
-    several shapes on `gke_job` in serving mode; before the rest of Step
-    0.1)**: Step 5b will
+    several shapes that Step 5b runs here, on `gke_job` in serving mode;
+    before the rest of Step 0.1; never for vLLM unless `handback.run_here`,
+    since Step 2b claims no slot)**: Step 5b will
     run the shapes on several servers at once, every one of them the same
     kind of TPU as this deployment: one accelerator, topology and image. So
     put this deployment on the kind with the most room for servers like it.
@@ -197,7 +198,45 @@ next.
     the server imports the module at `patches_path`. The
     manifest is not baked into the script; it travels beside it as an
     `--input` when the job is submitted.
--   [ ] **Step 3: Deploy, Forward, Monitor Health**: Using the
+-   [ ] **Step 2b: Hand a vLLM deployment back (vLLM on `gke_job`, with
+    the image pinned by digest; not in candidate mode)**: launch nothing and
+    claim no slot; the work you line up claims its own when it runs. Any
+    other backend, or an image named by tag only, continues at Step 3. Run
+    Step 4 (parity) when it applies and skip Steps 0.1b, 3, 5, 5b and 5c.
+    Line up the serving as tpu-serving-bench requests
+    ({{schema:serving-bench-request.json}}), each with:
+    -   this `run_id`, `engine: "vllm"`, `model`, `tpu`, and a `label`
+        unique to the request and the attempt (`onboard-bench-1`,
+        `onboard-serve-1`; the next attempt after a `handback.failure`
+        uses `-2`);
+    -   one `baseline: true` arm on the deployment's image by digest,
+        with `patches` the registry patches the recipe applies (each
+        file `apply_vllm_patch.sh` is given), and the recipe's own
+        `apply_vllm_patch.sh` lines removed, since serve_vllm.sh applies
+        the arm's patches;
+    -   `deployment`: `launch_recipe`, `deployments_json`, `port`,
+        `max_model_len` (the context-length key in `deployments.json`),
+        `inputs` (every `--input` Step 3 would submit, `fetch_weights.py`
+        included, except `serve_vllm.sh` and the patch files), and
+        `interpreter` and `submit_args` when Step 3 would pass them.
+
+    First a `bench` when the request asks for numbers, with `profile:
+    false` and `client_args` the client flags Step 5b would pass (its
+    measurement flags, `--max-concurrency-limit`, `--model` and
+    `--tokenizer`); then a `serve`, which verifies the deployment. Write
+    them, in that order, as a JSON list to
+    `<inference_work>/serving_requests.json`, and return `status:
+    "serve_pending"` with `output_files.deployments_json`,
+    `output_files.launch_recipe` and `output_files.serving_requests`.
+    tpu-agent sends them in order and wakes you with `handback`. On that
+    wake-up, `<inference_work>` already holds Steps 0 to 2 and 4. Copy
+    `handback.verification` to `<inference_work>/verification.json` as Step
+    5's report, record the benchmark's files as Step 5c says, and go to Step
+    6. A `handback.failure` goes back to Step 2 with its logs, as Step 3's
+    failure path says, and returns `serve_pending` again with new labels.
+    With `handback.run_here`, continue at Step 3 as for any other engine.
+-   [ ] **Step 3: Deploy, Forward, Monitor Health (not for vLLM, Step 2b,
+    unless `handback.run_here`)**: Using the
     torch-inference-coder instructions, submit the recipe (with `--serve` in
     serving mode only) under a `--name` you choose, then recover the **`job_id`** with
     `compute job list --json` -- never by command substitution on `submit`,
@@ -285,7 +324,10 @@ next.
     the patch registry. A
     higher limit or another layout is the user's call, and a separate
     measurement.
--   [ ] **Step 5c: Record the benchmark (only if Step 5b ran)**: Write
+-   [ ] **Step 5c: Record the benchmark (only if Step 5b ran a client here,
+    or `handback` brought the benchmark's files)**: For handed-back files,
+    return them as `output_files.bench_request`, `results_json` and
+    `benchmark_report` and go to Step 6. Otherwise write
     `<inference_work>/bench_request.json` as
     `{{schema:bench-request.json}}` describes, so a later stage can measure a
     change on exactly the same points: the `route` Step 5b took, the

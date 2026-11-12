@@ -47,6 +47,9 @@
 #              VLLM_DISTRIBUTED_TIMEOUT_S (default 1800, passed as
 #                --distributed-timeout-seconds when this vLLM has the flag);
 #              a timeout the caller sets, or passes as a flag, is kept
+# Patches: when the working directory holds vllm_patches.txt, each line names
+# a patch file there, applied in order with apply_vllm_patch.sh (beside this
+# script) before vLLM starts; one that does not apply (exit 4) fails the server.
 # Usage, in launch_vllm.sh:
 #   exec bash serve_vllm.sh "$(cat weights_path.txt)" --port 8000 ...
 
@@ -86,6 +89,24 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:
 echo "serve_vllm: timeouts engine_ready=${VLLM_ENGINE_READY_TIMEOUT_S}s" \
   "iteration=${VLLM_ENGINE_ITERATION_TIMEOUT_S}s" \
   "execute_model=${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}s" >&2
+
+if [ -f vllm_patches.txt ]; then
+  N=0
+  while read -r name; do
+    [ -n "$name" ] || continue
+    rc=0
+    bash "$(dirname "${BASH_SOURCE[0]}")/apply_vllm_patch.sh" "$name" >&2 </dev/null || rc=$?
+    if [ "$rc" -eq 4 ]; then
+      echo "serve_vllm: patch does not apply: $name" >&2
+      exit 4
+    elif [ "$rc" -ne 0 ]; then
+      echo "serve_vllm: patch failed (exit $rc): $name" >&2
+      exit "$rc"
+    fi
+    N=$((N + 1))
+  done < vllm_patches.txt
+  echo "serve_vllm: applied $N patch(es) from vllm_patches.txt" >&2
+fi
 
 # apply_vllm_patch.sh patches the plugin in place, which changes compiled
 # programs but not the image the compile caches are keyed on: a patched build

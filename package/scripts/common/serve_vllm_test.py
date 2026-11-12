@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for serve_vllm.sh's vLLM timeout and LIBTPU_INIT_ARGS defaults.
+"""Tests for serve_vllm.sh's defaults and its patch list.
 
 The script runs for real, against a stub `python3` and `vllm` beside it: the
 stub vLLM writes the arguments and environment it was started with to a file.
@@ -50,6 +50,13 @@ STUB_VLLM = """#!/bin/bash
   env | grep -E '^(VLLM_(ENGINE|EXECUTE)|LIBTPU_INIT_ARGS=|USE_PHASED_PROFILER=|PYTHON_TRACER_LEVEL=)' | sed 's/^/ENV /'
 } > "$STUB_OUT"
 """
+# Logs each patch it is given, and fails the one named in STUB_BAD_PATCH as
+# apply_vllm_patch.sh does a patch cut from another plugin revision.
+STUB_APPLIER = """#!/bin/bash
+echo "$1" >> "$STUB_APPLIED"
+[ "$1" = "$STUB_BAD_PATCH" ] && exit 4
+exit 0
+"""
 
 
 def _free_port() -> int:
@@ -73,7 +80,7 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
         self.python = os.path.join(bin_dir, "python3")
         self.out = os.path.join(self.dir, "vllm.out")
 
-    def _serve(self, *args, has_dist_flag=True, **env):
+    def _serve(self, *args, has_dist_flag=True, script=SCRIPT, rc=0, **env):
         """Run the script; return (vllm args, vllm env we set, stderr)."""
         full_env = {
             k: v
@@ -88,14 +95,16 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
             "STUB_HAS_DIST_FLAG": "1" if has_dist_flag else "0",
         })
         full_env.update(env)
-        proc = subprocess.run(["bash", SCRIPT, "/model", *args],
+        proc = subprocess.run(["bash", script, "/model", *args],
                               cwd=self.dir,
                               env=full_env,
                               capture_output=True,
                               text=True,
                               timeout=60,
                               check=False)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, rc, proc.stderr)
+        if rc:
+            return None, None, proc.stderr
         with open(self.out, encoding="utf-8") as f:
             lines = f.read().splitlines()
         argv = [line[4:] for line in lines if line.startswith("ARG ")]
@@ -192,6 +201,54 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
         self.assertNotIn("USE_PHASED_PROFILER", envs)
         self.assertEqual(envs["PYTHON_TRACER_LEVEL"], "0")
         self.assertIn("keeping the caller's --profiler-config", stderr)
+
+    def _with_applier(self, *patches):
+        """A job's layout: the script, the applier beside it, the list."""
+        script = os.path.join(self.dir, "serve_vllm.sh")
+        shutil.copy(SCRIPT, script)
+        with open(os.path.join(self.dir, "apply_vllm_patch.sh"),
+                  "w",
+                  encoding="utf-8") as f:
+            f.write(STUB_APPLIER)
+        if patches:
+            with open(os.path.join(self.dir, "vllm_patches.txt"),
+                      "w",
+                      encoding="utf-8") as f:
+                f.write("".join(n + "\n" for n in patches))
+        return script
+
+    def _applied(self):
+        path = os.path.join(self.dir, "applied")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as f:
+            return f.read().splitlines()
+
+    def test_no_list_applies_nothing(self):
+        self._serve(script=self._with_applier(),
+                    STUB_APPLIED=os.path.join(self.dir, "applied"))
+        self.assertEqual(self._applied(), [])
+
+    def test_patches_apply_in_order_before_vllm(self):
+        script = self._with_applier("01-rpa.patch", "02-gate.py")
+        argv, _, stderr = self._serve(script=script,
+                                      STUB_APPLIED=os.path.join(
+                                          self.dir, "applied"))
+        self.assertEqual(self._applied(), ["01-rpa.patch", "02-gate.py"])
+        self.assertEqual(argv[:2], ["serve", "/model"])
+        self.assertIn("serve_vllm: applied 2 patch(es)", stderr)
+
+    def test_a_patch_that_does_not_apply_fails_the_server(self):
+        script = self._with_applier("01-rpa.patch", "02-gate.py",
+                                    "03-late.patch")
+        _, _, stderr = self._serve(script=script,
+                                   rc=4,
+                                   STUB_APPLIED=os.path.join(
+                                       self.dir, "applied"),
+                                   STUB_BAD_PATCH="02-gate.py")
+        self.assertEqual(self._applied(), ["01-rpa.patch", "02-gate.py"])
+        self.assertIn("serve_vllm: patch does not apply: 02-gate.py", stderr)
+        self.assertFalse(os.path.exists(self.out))
 
 
 if __name__ == "__main__":
