@@ -15,18 +15,109 @@
 
 Defines data models for evaluating AI agents:
   - environment: Base container, packages, and workspace files.
-  - evaluation: Judge model, shared script verifiers, and test cases.
+  - evaluation: Judge model, timeouts, lifecycle hooks, verifiers, and cases.
 """
 
 from __future__ import annotations
 
-import pathlib
-from typing import Any, Literal, TextIO
+import re
+from pathlib import Path
+from typing import Annotated, Any, Literal, TextIO, TypeVar
 
 import pydantic
 import yaml
 
-Path = pathlib.Path
+from eval.utils import find_repo_root
+
+from . import gcs_utils
+
+_REPO_ROOT = find_repo_root()
+
+DEFAULT_BASE_IMAGE = (
+    "us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host:latest")
+
+RewardAggregation = Literal[
+    "weighted_mean",
+    "weighted-mean",
+    "weighted_sum",
+    "weighted-sum",
+    "all_pass",
+    "all-pass",
+    "any_pass",
+    "any-pass",
+]
+
+# Matches double-brace template placeholders `{{var_name}}` (with optional
+# inner whitespace). Any placeholder whose key is not in `prompt_vars` is left
+# untouched; a `prompt_vars` key that no placeholder uses is rejected.
+_PROMPT_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+
+def resolve_path(
+    path_str: str,
+    source_root: Path | None = None,
+    cache_root: Path | None = None,
+    repo_root: Path | None = None,
+) -> Path | None:
+    """Resolves file paths relative to suite directory, repo root (//), cwd, absolute paths, or GCS URIs."""
+    if not path_str or not path_str.strip():
+        return None
+    clean_path = path_str.strip()
+    if clean_path.startswith("gs://"):
+        return gcs_utils.fetch_gcs_asset(clean_path, cache_root=cache_root)
+    eff_repo_root = (repo_root or _REPO_ROOT).resolve()
+    if clean_path.startswith("//"):
+        rel = clean_path.removeprefix("//").lstrip("/")
+        if not rel:
+            return None
+        cand = (eff_repo_root / rel).resolve()
+        if not cand.is_relative_to(eff_repo_root):
+            return None
+        return cand if cand.exists() else None
+    p = Path(clean_path)
+    if p.is_absolute():
+        return p.resolve() if p.exists() else None
+    search_roots = ((source_root,
+                     eff_repo_root) if source_root is not None else
+                    (eff_repo_root, Path.cwd()))
+    for root in search_roots:
+        if root:
+            cand = (root / p).resolve()
+            if cand.exists():
+                return cand
+    return None
+
+
+def _clean_str_list(v: Any, *, allow_none: bool = False) -> Any:
+    """Normalizes string-or-list inputs, stripping and dropping blank strings."""
+    if v is None:
+        return None if allow_none else []
+    if isinstance(v, str):
+        stripped = v.strip()
+        return [stripped] if stripped else []
+    if isinstance(v, (list, tuple)):
+        return [
+            item.strip() if isinstance(item, str) else item for item in v
+            if not isinstance(item, str) or item.strip()
+        ]
+    return v
+
+
+def _none_to_list(v: Any) -> Any:
+    return [] if v is None else v
+
+
+def _none_to_dict(v: Any) -> Any:
+    return {} if v is None else v
+
+
+_T = TypeVar("_T")
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+NonNullList = Annotated[list[_T], pydantic.BeforeValidator(_none_to_list)]
+NonNullDict = Annotated[dict[_K, _V], pydantic.BeforeValidator(_none_to_dict)]
+CleanList = Annotated[list[_T], pydantic.BeforeValidator(_clean_str_list)]
 
 
 class StrictModel(pydantic.BaseModel):
@@ -78,20 +169,31 @@ class FileStaging(StrictModel):
 
 
 class ScriptCheck(StrictModel):
-    """Detailed configuration for a script-based verifier."""
+    """Configuration for a verifier (.py script or .toml judge)."""
 
-    script: str = pydantic.Field(
+    script: str | list[str] = pydantic.Field(
         ...,
-        description=
-        "Path to python verification script (relative or absolute).",
+        validation_alias=pydantic.AliasChoices("files", "script"),
+        description=(
+            "Path or list of paths to verifier scripts or judge.toml rubrics "
+            "(relative or absolute)."),
     )
-    args: list[str] = pydantic.Field(
+    deps: CleanList[str] = pydantic.Field(
         default_factory=list,
-        description="Command-line arguments passed to the verifier script.",
+        description=(
+            "Optional helper modules or support files staged into the verifier "
+            "group directory and added to PYTHONPATH."),
+    )
+    args: NonNullList[str] = pydantic.Field(
+        default_factory=list,
+        description=(
+            "Deprecated: prefer verifier_params. Command-line arguments "
+            "passed to the verifier script."),
     )
     weight: float = pydantic.Field(
         default=1.0,
-        ge=0.0,
+        validation_alias=pydantic.AliasChoices("reward_weight", "weight"),
+        allow_inf_nan=False,
         description="Relative scoring weight in reward aggregation.",
     )
     name: str | None = pydantic.Field(
@@ -103,21 +205,38 @@ class ScriptCheck(StrictModel):
         gt=0.0,
         description="Optional execution timeout in seconds.",
     )
-    verifier_params: dict[str, Any] = pydantic.Field(
+    verifier_params: NonNullDict[str, Any] = pydantic.Field(
         default_factory=dict,
-        description=
-        "Key-value parameters to be written to tests/verifer_params.json",
+        description=(
+            "Key-value parameters to be written to tests/verifier_params.json."
+        ),
     )
 
-    @pydantic.field_validator("args", mode="before")
+    @pydantic.field_validator("script", mode="before")
     @classmethod
-    def _coerce_none_lists(cls, v: Any) -> Any:
-        return [] if v is None else v
+    def _validate_script_paths(cls, v: Any) -> str | list[str]:
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Verifier path must not be empty")
+            return stripped
+        if isinstance(v, (list, tuple)):
+            items = [str(item).strip() for item in v if str(item).strip()]
+            if not items:
+                raise ValueError("Verifier path list must not be empty")
+            return items
+        return v
 
-    @pydantic.field_validator("verifier_params", mode="before")
-    @classmethod
-    def _coerce_none_dict(cls, v: Any) -> Any:
-        return {} if v is None else v
+    @property
+    def scripts(self) -> list[str]:
+        """Returns verifier source path(s) normalized as a list of strings."""
+        return ([self.script]
+                if isinstance(self.script, str) else list(self.script))
+
+    @property
+    def primary_script(self) -> str:
+        """Returns the first verifier source path."""
+        return self.scripts[0]
 
     @classmethod
     def coerce(cls, value: str | ScriptCheck | dict[str, Any]) -> ScriptCheck:
@@ -125,7 +244,7 @@ class ScriptCheck(StrictModel):
         if isinstance(value, ScriptCheck):
             return value
         if isinstance(value, str):
-            return cls(script=value)
+            return cls(script=value.strip())
         if isinstance(value, dict):
             return cls.model_validate(value)
         raise TypeError(f"Cannot coerce {type(value)} to ScriptCheck")
@@ -141,7 +260,9 @@ class ExpectationCriterion(StrictModel):
     )
     weight: float = pydantic.Field(
         default=1.0,
+        validation_alias=pydantic.AliasChoices("reward_weight", "weight"),
         ge=0.0,
+        allow_inf_nan=False,
         description="Relative scoring weight in reward aggregation.",
     )
     type: Literal["binary", "numeric", "likert"] = pydantic.Field(
@@ -163,6 +284,85 @@ class ExpectationCriterion(StrictModel):
         raise TypeError(f"Cannot coerce {type(value)} to ExpectationCriterion")
 
 
+class CaseEnvironmentOverride(StrictModel):
+    """Optional case-level overrides for container image, packages, and resources."""
+
+    base_image: str | None = pydantic.Field(
+        default=None,
+        description="Per-case base Docker image override.",
+    )
+    apt_packages: list[str] | None = pydantic.Field(
+        default=None,
+        description=(
+            "Per-case apt packages override (replaces suite apt_packages when "
+            "not None)."),
+    )
+    pip_packages: list[str] | None = pydantic.Field(
+        default=None,
+        description=(
+            "Per-case pip packages override (replaces suite pip_packages when "
+            "not None)."),
+    )
+    setup_scripts: list[str] | None = pydantic.Field(
+        default=None,
+        description=(
+            "Per-case container setup scripts override (replaces suite "
+            "setup_scripts when not None)."),
+    )
+    cpus: int | None = pydantic.Field(
+        default=None,
+        gt=0,
+        description="Per-case CPU core limit override.",
+    )
+    memory_mb: int | None = pydantic.Field(
+        default=None,
+        gt=0,
+        description="Per-case memory allocation override in MB.",
+    )
+    storage_mb: int | None = pydantic.Field(
+        default=None,
+        gt=0,
+        description="Per-case storage allocation override in MB.",
+    )
+    build_timeout_sec: float | None = pydantic.Field(
+        default=None,
+        gt=0.0,
+        description="Per-case container build timeout override in seconds.",
+    )
+    workdir: str | None = pydantic.Field(
+        default=None,
+        description="Per-case container working directory override.",
+    )
+    env_vars: dict[str, str] | None = pydantic.Field(
+        default=None,
+        description=(
+            "Per-case environment variables merged onto suite env_vars, "
+            "written to task.toml's [environment.env]."),
+    )
+
+    @pydantic.field_validator("base_image", "workdir", mode="before")
+    @classmethod
+    def _validate_optional_nonempty_str(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Value must not be empty")
+            return stripped
+        return v
+
+    @pydantic.field_validator(
+        "apt_packages",
+        "pip_packages",
+        "setup_scripts",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_optional_pkg_list(cls, v: Any) -> Any:
+        return _clean_str_list(v, allow_none=True)
+
+
 class TestCase(StrictModel):
     """Individual test case in an evaluation suite."""
 
@@ -170,6 +370,12 @@ class TestCase(StrictModel):
         ...,
         min_length=1,
         description="Unique identifier for the test case.",
+    )
+    description: str | None = pydantic.Field(
+        default=None,
+        description=(
+            "Optional task description written to task.toml [task]. Defaults "
+            "to the first non-empty line of the resolved prompt."),
     )
     prompt: str | None = pydantic.Field(
         default=None,
@@ -181,37 +387,65 @@ class TestCase(StrictModel):
         description=
         "Path to markdown/text file containing prompt (e.g. TASK.md).",
     )
-    workspace_files: list[str | FileStaging] = pydantic.Field(
+    prompt_vars: NonNullDict[str, Any] = pydantic.Field(
+        default_factory=dict,
+        description=(
+            "Template variables substituted into {{var}} placeholders in prompt"
+            " or prompt_file when present. Placeholders not in prompt_vars are"
+            " left untouched. A key that no placeholder uses is an error."),
+    )
+    environment: CaseEnvironmentOverride | None = pydantic.Field(
+        default=None,
+        description="Optional per-case container/resource overrides.",
+    )
+    workspace_files: NonNullList[str | FileStaging] = pydantic.Field(
         default_factory=list,
         description=
         "Case-specific files or directories to stage into workspace.",
     )
-    test_files: list[str | FileStaging] = pydantic.Field(
+    verifier_files: NonNullList[str | FileStaging] = pydantic.Field(
         default_factory=list,
+        validation_alias=pydantic.AliasChoices("verifier_files", "test_files"),
         description=(
-            "Case-specific auxiliary files or directories to stage into tests/."
-        ),
+            "Case-specific static files or directories to stage into tests/ "
+            "after agent execution (e.g., golden answers or schemas)."),
     )
-    expectations: list[str | ExpectationCriterion] = pydantic.Field(
+    expectations: NonNullList[str | ExpectationCriterion] = pydantic.Field(
         default_factory=list,
         description=(
             "List of LLM judge criteria (strings or ExpectationCriterion"
             " objects)."),
     )
-    script_verifiers: list[str | ScriptCheck] = pydantic.Field(
+    script_verifiers: NonNullList[str | ScriptCheck] = pydantic.Field(
         default_factory=list,
-        description="Case-specific script verifiers.",
+        validation_alias=pydantic.AliasChoices("verifiers",
+                                               "script_verifiers"),
+        description=(
+            "Case-specific verifiers (.py scripts or .toml rubrics)."),
     )
-    timeout_sec: float = pydantic.Field(
-        default=300.0,
+    timeout_sec: float | None = pydantic.Field(
+        default=None,
         gt=0.0,
-        description="Execution timeout for the agent in seconds.",
+        description=("Execution timeout for the agent in seconds (inherits "
+                     "evaluation.timeout_sec when None)."),
+    )
+    verifier_timeout_sec: float | None = pydantic.Field(
+        default=None,
+        gt=0.0,
+        description=("Execution timeout for the verifier in seconds (inherits "
+                     "evaluation.verifier_timeout_sec when None)."),
+    )
+    verifier_env: NonNullDict[str, str] = pydantic.Field(
+        default_factory=dict,
+        description=(
+            "Case-level verifier environment variables merged onto "
+            "evaluation.verifier_env, written to task.toml's [verifier.env]."),
     )
     metadata: dict[str, Any] | None = pydantic.Field(
         default=None,
-        description="Optional metadata dictionary.",
+        description="Optional metadata dictionary merged into [metadata].",
     )
-    verifier_params: dict[str, Any] = pydantic.Field(
+    verifier_params: NonNullDict[str, Any] = pydantic.Field(
         default_factory=dict,
         description=(
             "Case-level parameter overrides for tests/verifier_params.json."),
@@ -220,28 +454,24 @@ class TestCase(StrictModel):
         default=None,
         description="Optional explicit full task name override.",
     )
-    env: dict[str, str] = pydantic.Field(
-        default_factory=dict,
+    pre_verify: list[str] | None = pydantic.Field(
+        default=None,
         description=(
-            "Environment variables set in this case's container, written to "
-            "task.toml's [environment] env."),
+            "Case-level pre-verification scripts executed before RewardKit "
+            "(overrides evaluation.pre_verify when not None)."),
     )
-
-    @pydantic.field_validator(
-        "expectations",
-        "script_verifiers",
-        "workspace_files",
-        "test_files",
-        mode="before",
+    post_verify: list[str] | None = pydantic.Field(
+        default=None,
+        description=(
+            "Case-level post-verification scripts executed after RewardKit "
+            "(overrides evaluation.post_verify when not None)."),
     )
-    @classmethod
-    def _coerce_none_lists(cls, v: Any) -> Any:
-        return [] if v is None else v
-
-    @pydantic.field_validator("verifier_params", mode="before")
-    @classmethod
-    def _coerce_none_dict(cls, v: Any) -> Any:
-        return {} if v is None else v
+    reward_aggregation: RewardAggregation | None = pydantic.Field(
+        default=None,
+        description=(
+            "Case-level RewardKit aggregation strategy override for generated "
+            "tests/reward.toml."),
+    )
 
     @pydantic.model_validator(mode="after")
     def _validate_prompt_present(self) -> TestCase:
@@ -254,58 +484,89 @@ class TestCase(StrictModel):
         return self
 
     def resolve_prompt(self, source_root: Path | None = None) -> str:
-        """Resolves instruction prompt text from prompt string or prompt_file."""
-        if self.prompt:
-            return self.prompt.strip()
-        if self.prompt_file:
-            p = Path(self.prompt_file)
-            if not p.is_absolute():
-                if source_root and (source_root / p).is_file():
-                    p = (source_root / p).resolve()
-                elif (Path.cwd() / p).is_file():
-                    p = (Path.cwd() / p).resolve()
-                elif source_root:
-                    p = (source_root / p).resolve()
-            if not p.is_file():
+        """Resolves instruction prompt text and applies prompt_vars if set."""
+        if self.prompt and self.prompt.strip():
+            raw = self.prompt.strip()
+        elif self.prompt_file:
+            p = resolve_path(self.prompt_file, source_root=source_root)
+            if p is None or not p.is_file():
                 raise FileNotFoundError(
                     f"prompt_file not found: {self.prompt_file}")
-            return p.read_text(encoding="utf-8").rstrip()
-        raise ValueError(f"No prompt source found for test case '{self.name}'")
+            raw = p.read_text(encoding="utf-8").rstrip()
+        else:
+            raise ValueError(
+                f"No prompt source found for test case '{self.name}'")
+
+        return self.render_prompt(raw)
+
+    def render_prompt(self, raw: str) -> str:
+        """Substitutes prompt_vars into the {{var}} placeholders of raw text.
+
+        A placeholder with no matching key is left untouched, so a prompt can
+        carry literal `{{text}}`. A key that no placeholder uses is an error.
+
+        Raises:
+            ValueError: If prompt_vars holds a key the text never references.
+        """
+        if not self.prompt_vars:
+            return raw
+
+        used: set[str] = set()
+
+        def _substitute(match: re.Match[str]) -> str:
+            key = match.group(1)
+            if key not in self.prompt_vars:
+                return match.group(0)
+            used.add(key)
+            return str(self.prompt_vars[key])
+
+        rendered = _PROMPT_VAR_RE.sub(_substitute, raw)
+        unused = sorted(set(self.prompt_vars) - used)
+        if unused:
+            raise ValueError(
+                f"TestCase '{self.name}': prompt_vars keys not used by the "
+                f"prompt: {unused}")
+        return rendered
 
     def normalized_expectations(self) -> list[ExpectationCriterion]:
         """Returns all expectations coerced to ExpectationCriterion objects."""
         return [ExpectationCriterion.coerce(e) for e in self.expectations]
 
     def normalized_script_verifiers(self) -> list[ScriptCheck]:
-        """Returns all script verifiers coerced to ScriptCheck objects."""
+        """Returns all verifiers coerced to ScriptCheck objects."""
         return [ScriptCheck.coerce(sv) for sv in self.script_verifiers]
 
     def normalized_workspace_files(self) -> list[FileStaging]:
         """Returns all workspace files coerced to FileStaging objects."""
         return [FileStaging.coerce(f) for f in self.workspace_files]
 
-    def normalized_test_files(self) -> list[FileStaging]:
-        """Returns all test files coerced to FileStaging objects."""
-        return [FileStaging.coerce(f) for f in self.test_files]
+    def normalized_verifier_files(self) -> list[FileStaging]:
+        """Returns all verifier files coerced to FileStaging objects."""
+        return [FileStaging.coerce(f) for f in self.verifier_files]
 
 
 class EnvironmentConfig(StrictModel):
     """Environment and container configuration."""
 
     base_image: str = pydantic.Field(
-        default="python:3.12-slim",
+        default=DEFAULT_BASE_IMAGE,
         description="Base Docker image.",
     )
-
-    apt_packages: list[str] = pydantic.Field(
+    apt_packages: CleanList[str] = pydantic.Field(
         default_factory=list,
         description="System apt packages to install during container build.",
     )
-    pip_packages: list[str] = pydantic.Field(
+    pip_packages: CleanList[str] = pydantic.Field(
         default_factory=list,
         description="Python pip packages to install during container build.",
     )
-    workspace_files: list[str | FileStaging] = pydantic.Field(
+    setup_scripts: CleanList[str] = pydantic.Field(
+        default_factory=list,
+        description=(
+            "Container setup scripts (.py or .sh) executed during Docker build "
+            "and removed before the agent starts."),
+    )
+    workspace_files: CleanList[str | FileStaging] = pydantic.Field(
         default_factory=list,
         description=(
             "Suite-level files or directories to stage into the workspace."),
@@ -325,64 +586,144 @@ class EnvironmentConfig(StrictModel):
         gt=0,
         description="Storage allocation in MB.",
     )
+    build_timeout_sec: float | None = pydantic.Field(
+        default=None,
+        gt=0.0,
+        description="Optional container build timeout in seconds.",
+    )
     workdir: str = pydantic.Field(
         default="/workspace",
         description="Working directory in container.",
     )
-
-    @pydantic.field_validator(
-        "apt_packages",
-        "pip_packages",
-        "workspace_files",
-        mode="before",
+    env_vars: NonNullDict[str, str] = pydantic.Field(
+        default_factory=dict,
+        description=(
+            "Environment variables set in task containers, written to "
+            "task.toml's [environment.env]."),
     )
+
+    @pydantic.field_validator("base_image", "workdir", mode="before")
     @classmethod
-    def _coerce_none_lists(cls, v: Any) -> Any:
-        if v is None:
-            return []
+    def _validate_nonempty_str(cls, v: Any) -> Any:
         if isinstance(v, str):
-            v_str = v.strip()
-            return [v_str] if v_str else []
-        return list(v)
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Value must not be empty")
+            return stripped
+        return v
 
     def normalized_workspace_files(self) -> list[FileStaging]:
         """Returns suite-level workspace files coerced to FileStaging objects."""
         return [FileStaging.coerce(f) for f in self.workspace_files]
 
+    def merged_with(
+        self,
+        override: CaseEnvironmentOverride | None,
+    ) -> EnvironmentConfig:
+        """Returns an EnvironmentConfig with non-None case overrides applied."""
+        if override is None:
+            return self
+        return EnvironmentConfig(
+            base_image=(override.base_image if override.base_image is not None
+                        else self.base_image),
+            apt_packages=(list(override.apt_packages) if override.apt_packages
+                          is not None else list(self.apt_packages)),
+            pip_packages=(list(override.pip_packages) if override.pip_packages
+                          is not None else list(self.pip_packages)),
+            setup_scripts=(list(override.setup_scripts)
+                           if override.setup_scripts is not None else list(
+                               self.setup_scripts)),
+            workspace_files=list(self.workspace_files),
+            cpus=override.cpus if override.cpus is not None else self.cpus,
+            memory_mb=(override.memory_mb
+                       if override.memory_mb is not None else self.memory_mb),
+            storage_mb=(override.storage_mb if override.storage_mb is not None
+                        else self.storage_mb),
+            build_timeout_sec=(override.build_timeout_sec
+                               if override.build_timeout_sec is not None else
+                               self.build_timeout_sec),
+            workdir=(override.workdir
+                     if override.workdir is not None else self.workdir),
+            env_vars=({
+                **self.env_vars,
+                **override.env_vars,
+            } if override.env_vars is not None else dict(self.env_vars)),
+        )
+
 
 class EvaluationConfig(StrictModel):
-    """Evaluation configuration and test cases."""
+    """Evaluation configuration, suite-wide defaults, and test cases."""
 
     judge_model: str = pydantic.Field(
         default="gemini/gemini-3.6-flash",
         description="Default LLM judge model identifier.",
     )
-    script_verifiers: list[str | ScriptCheck] = pydantic.Field(
-        default_factory=list,
-        description=
-        "Suite-level script verifiers applied across all test cases.",
+    timeout_sec: float = pydantic.Field(
+        default=300.0,
+        gt=0.0,
+        description="Default agent execution timeout in seconds.",
     )
-    cases: list[TestCase] = pydantic.Field(
+    verifier_timeout_sec: float = pydantic.Field(
+        default=300.0,
+        gt=0.0,
+        description="Default verifier execution timeout in seconds.",
+    )
+    verifier_env: NonNullDict[str, str] = pydantic.Field(
+        default_factory=dict,
+        description=("Suite-level verifier environment variables written to "
+                     "task.toml's [verifier.env]."),
+    )
+    pre_verify: NonNullList[str] = pydantic.Field(
+        default_factory=list,
+        description=(
+            "Suite-level scripts executed before RewardKit in test.sh."),
+    )
+    post_verify: NonNullList[str] = pydantic.Field(
+        default_factory=list,
+        description=(
+            "Suite-level scripts executed after RewardKit in test.sh."),
+    )
+    reward_aggregation: RewardAggregation = pydantic.Field(
+        default="weighted_mean",
+        description=(
+            "Default RewardKit aggregation strategy for generated reward.toml."
+        ),
+    )
+    script_verifiers: NonNullList[str | ScriptCheck] = pydantic.Field(
+        default_factory=list,
+        validation_alias=pydantic.AliasChoices("verifiers",
+                                               "script_verifiers"),
+        description=(
+            "Suite-level verifiers applied across all test cases (.py scripts "
+            "or .toml rubrics)."),
+    )
+    verifier_files: NonNullList[str | FileStaging] = pydantic.Field(
+        default_factory=list,
+        validation_alias=pydantic.AliasChoices("verifier_files", "test_files"),
+        description=(
+            "Suite-level static files or directories staged into tests/ "
+            "after agent execution across all cases."),
+    )
+    cases: NonNullList[TestCase] = pydantic.Field(
         ...,
         description="List of test cases.",
     )
 
-    @pydantic.field_validator("script_verifiers", "cases", mode="before")
-    @classmethod
-    def _coerce_none_lists(cls, v: Any) -> Any:
-        return [] if v is None else v
-
     def normalized_script_verifiers(self) -> list[ScriptCheck]:
-        """Returns suite-level script verifiers coerced to ScriptCheck objects."""
+        """Returns suite-level verifiers coerced to ScriptCheck objects."""
         return [ScriptCheck.coerce(sv) for sv in self.script_verifiers]
+
+    def normalized_verifier_files(self) -> list[FileStaging]:
+        """Returns suite-level verifier files coerced to FileStaging objects."""
+        return [FileStaging.coerce(f) for f in self.verifier_files]
 
 
 class EvalSuite(StrictModel):
     """Root evaluation suite document."""
 
-    version: str = pydantic.Field(
-        default="1.0",
-        description="Schema version string.",
+    version: str | None = pydantic.Field(
+        default=None,
+        description="Optional legacy schema version string.",
     )
     name: str | None = pydantic.Field(
         default=None,

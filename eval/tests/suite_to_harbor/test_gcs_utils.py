@@ -22,7 +22,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from . import gcs_utils
+from eval.suite_to_harbor import gcs_utils
 
 Path = pathlib.Path
 
@@ -48,9 +48,13 @@ class GcsUtilsTest(unittest.TestCase):
     @mock.patch("shutil.which", return_value=None)
     def test_fetch_gcs_asset_missing_gcloud(
             self, mock_which: mock.MagicMock) -> None:
-        with self.assertRaises(FileNotFoundError) as ctx:
-            gcs_utils.fetch_gcs_asset("gs://bucket/asset.pb")
-        self.assertIn("gcloud", str(ctx.exception))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(FileNotFoundError) as ctx:
+                gcs_utils.fetch_gcs_asset(
+                    "gs://bucket/asset.pb",
+                    cache_root=Path(tmp_dir),
+                )
+            self.assertIn("gcloud", str(ctx.exception))
 
     def test_fetch_gcs_asset_cache_hit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -28,16 +28,16 @@ import ast
 import json
 import logging
 import os
-import pathlib
 import re
 import shutil
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from . import gcs_utils, schema, template_generators
 
-Path = pathlib.Path
+resolve_path = schema.resolve_path
 
 
 def sanitize_name(name: str) -> str:
@@ -46,28 +46,6 @@ def sanitize_name(name: str) -> str:
     clean = re.sub(r"[^a-z0-9_.-]+", "_", clean)
     clean = re.sub(r"_+", "_", clean)
     return clean.strip("_.-") or "eval_task"
-
-
-def resolve_path(
-    path_str: str,
-    source_root: Path | None = None,
-    cache_root: Path | None = None,
-) -> Path | None:
-    """Resolves file paths relative to suite directory, cwd, absolute paths, or GCS URIs."""
-    if not path_str or not path_str.strip():
-        return None
-    clean_path = path_str.strip()
-    if clean_path.startswith("gs://"):
-        return gcs_utils.fetch_gcs_asset(clean_path, cache_root=cache_root)
-    p = Path(clean_path)
-    if p.is_absolute() and p.exists():
-        return p.resolve()
-    for root in (source_root, Path.cwd()):
-        if root:
-            cand = (root / p).resolve()
-            if cand.exists():
-                return cand
-    return None
 
 
 def link_or_copy(src: str | Path, dest: str | Path) -> None:
@@ -120,15 +98,20 @@ def stage_file(
     staging: schema.FileStaging,
     dest_dir: Path,
     source_root: Path | None = None,
-) -> bool:
-    """Stages a source file or directory into dest_dir based on FileStaging."""
+) -> None:
+    """Stages a source file or directory into dest_dir based on FileStaging.
+
+    Raises:
+        FileNotFoundError: If the source path does not exist.
+    """
     resolved = resolve_path(staging.src, source_root=source_root)
     if not resolved:
-        logging.warning("File path not found: %s", staging.src)
-        return False
+        raise FileNotFoundError(f"File path not found: {staging.src}")
 
     dest_rel = staging.dest.strip()
-    if dest_rel.startswith("/workspace/"):
+    if dest_rel in ("/workspace", "/tests"):
+        dest_rel = ""
+    elif dest_rel.startswith("/workspace/"):
         dest_rel = dest_rel[len("/workspace/"):]
     elif dest_rel.startswith("workspace/"):
         dest_rel = dest_rel[len("workspace/"):]
@@ -138,15 +121,22 @@ def stage_file(
         dest_rel = dest_rel[len("tests/"):]
     is_dir_dest = dest_rel.endswith("/") or dest_rel in ("", ".")
     dest_rel = dest_rel.strip("/")
+    if ".." in Path(dest_rel).parts:
+        raise ValueError(
+            f"Destination path escapes target directory: {staging.dest!r}")
 
     dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_root = dest_dir.resolve()
+    dest_resolved = (dest_root / dest_rel).resolve() if dest_rel else dest_root
+    if not dest_resolved.is_relative_to(dest_root):
+        raise ValueError(
+            f"Destination path escapes target directory: {staging.dest!r}")
 
     if resolved.is_dir():
         target_dir = dest_dir / dest_rel if dest_rel else dest_dir
         target_dir.mkdir(parents=True, exist_ok=True)
         copy_filtered_tree(src=resolved, dest=target_dir)
-        return True
-    elif resolved.is_file():
+    else:
         dest_path = dest_dir / dest_rel if dest_rel else dest_dir
         if is_dir_dest or dest_path.is_dir():
             target_file = dest_path / resolved.name
@@ -154,8 +144,46 @@ def stage_file(
             target_file = dest_path
         target_file.parent.mkdir(parents=True, exist_ok=True)
         link_or_copy(resolved, target_file)
-        return True
-    return False
+
+
+def _dedup_name(stem: str, used: set[str], suffix: str = "") -> str:
+    """Returns `stem + suffix` or `f"{stem}_{idx}{suffix}"` and registers it in `used`."""
+    cand = f"{stem}{suffix}"
+    idx = 2
+    while cand in used:
+        cand = f"{stem}_{idx}{suffix}"
+        idx += 1
+    used.add(cand)
+    return cand
+
+
+def stage_lifecycle_hooks(
+    hooks: Sequence[str],
+    tests_dir: Path,
+    source_root: Path | None = None,
+    reserved_names: set[str] | None = None,
+) -> list[str]:
+    """Stages pre_verify / post_verify scripts into tests/ and returns basenames."""
+    clean_hooks = [h for h in hooks if h and h.strip()]
+    if not clean_hooks:
+        return []
+    staged_names: list[str] = []
+    used = reserved_names if reserved_names is not None else set()
+    tests_dir.mkdir(parents=True, exist_ok=True)
+
+    for hook_str in clean_hooks:
+        resolved = resolve_path(hook_str, source_root=source_root)
+        if not resolved or not resolved.is_file():
+            raise FileNotFoundError(
+                f"Lifecycle hook script not found: {hook_str}")
+
+        cand_name = _dedup_name(resolved.stem, used, resolved.suffix)
+        dest_file = tests_dir / cand_name
+        link_or_copy(resolved, dest_file)
+        os.chmod(dest_file, 0o755)
+        staged_names.append(cand_name)
+
+    return staged_names
 
 
 def bundle_workspace_data(
@@ -163,7 +191,6 @@ def bundle_workspace_data(
     task_dir: Path,
     source_root: Path | None = None,
     case: schema.TestCase | None = None,
-    case_workspace_files: Sequence[schema.FileStaging | str] | None = None,
 ) -> bool:
     """Stages workspace files into environment/data/."""
     data_dir = task_dir / "environment" / "data"
@@ -173,15 +200,9 @@ def bundle_workspace_data(
         stage_file(wf, dest_dir=data_dir, source_root=source_root)
 
     # 2. Case level files
-    staged_case_files: list[schema.FileStaging] = []
-    if case_workspace_files is not None:
-        staged_case_files.extend(
-            [schema.FileStaging.coerce(f) for f in case_workspace_files])
-    elif case is not None:
-        staged_case_files.extend(case.normalized_workspace_files())
-
-    for wf in staged_case_files:
-        stage_file(wf, dest_dir=data_dir, source_root=source_root)
+    if case is not None:
+        for wf in case.normalized_workspace_files():
+            stage_file(wf, dest_dir=data_dir, source_root=source_root)
 
     if data_dir.is_dir():
         has_files = any(f.is_file() for f in data_dir.rglob("*"))
@@ -192,35 +213,88 @@ def bundle_workspace_data(
     return False
 
 
+def bundle_setup_scripts(
+    env: schema.EnvironmentConfig,
+    task_dir: Path,
+    source_root: Path | None = None,
+) -> list[str]:
+    """Stages container setup scripts into environment/setup/ and returns filenames."""
+    scripts = [s for s in env.setup_scripts if s and s.strip()]
+    if not scripts:
+        return []
+
+    setup_dir = task_dir / "environment" / "setup"
+    setup_dir.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+    staged_names: list[str] = []
+
+    for script_str in scripts:
+        resolved = resolve_path(script_str, source_root=source_root)
+        if not resolved or not resolved.is_file():
+            raise FileNotFoundError(f"Setup script not found: {script_str}")
+
+        cand_name = _dedup_name(resolved.stem, used_names, resolved.suffix)
+        dest_file = setup_dir / cand_name
+        link_or_copy(resolved, dest_file)
+        os.chmod(dest_file, 0o755)
+        staged_names.append(cand_name)
+
+    return staged_names
+
+
 def bundle_script_verifiers(
     verifiers: Sequence[Any],
     task_dir: Path,
     source_root: Path | None = None,
-) -> None:
-    """Stages script verifiers into tests/<folder_name>/<script_filename>."""
+) -> list[tuple[str, schema.ScriptCheck]]:
+    """Stages verifiers (.py scripts or .toml judges) into tests/."""
     if not verifiers:
-        return
+        return []
 
-    used_names: set[str] = set()
+    tests_dir = task_dir / "tests"
+    used_names: set[str] = ({p.name
+                             for p in tests_dir.iterdir()}
+                            if tests_dir.is_dir() else set())
+    bundled: list[tuple[str, schema.ScriptCheck]] = []
     for raw_v in verifiers:
         sc = schema.ScriptCheck.coerce(raw_v)
-        resolved = resolve_path(sc.script, source_root=source_root)
-        clean_stem = sanitize_name(sc.name or Path(sc.script).stem)
+        script_list = sc.scripts
 
-        folder_name = clean_stem
-        count = 2
-        while folder_name in used_names:
-            folder_name = f"{clean_stem}_{count}"
-            count += 1
-        used_names.add(folder_name)
+        clean_stem = sanitize_name(sc.name or Path(sc.primary_script).stem)
+        folder_name = _dedup_name(clean_stem, used_names)
+        bundled.append((folder_name, sc))
 
-        check_dir = task_dir / "tests" / folder_name
+        check_dir = tests_dir / folder_name
         check_dir.mkdir(parents=True, exist_ok=True)
-        dest_file = check_dir / (resolved.name
-                                 if resolved else f"{folder_name}.py")
+        seen_toml = False
+        staged_files: set[str] = set()
+        for script_item in script_list:
+            resolved = resolve_path(script_item, source_root=source_root)
+            if not resolved or not resolved.is_file():
+                raise FileNotFoundError(
+                    f"Verifier file not found: {script_item}")
+            is_toml = resolved.suffix.lower() == ".toml"
+            if is_toml:
+                if seen_toml:
+                    raise ValueError(
+                        f"Verifier {folder_name!r} specifies multiple .toml "
+                        "files; split them into separate verifier entries.")
+                seen_toml = True
+                dest_file = check_dir / "judge.toml"
+            else:
+                dest_file = check_dir / resolved.name
 
-        if resolved and resolved.is_file():
-            if sc.args:
+            if dest_file.name in staged_files:
+                raise ValueError(
+                    f"Verifier {folder_name!r} has duplicate staged filename "
+                    f"{dest_file.name!r}.")
+            staged_files.add(dest_file.name)
+
+            if not is_toml and sc.args:
+                logging.debug(
+                    "ScriptCheck.args is deprecated for %s; prefer verifier_params.",
+                    script_item,
+                )
                 content = resolved.read_text(encoding="utf-8")
                 # Prepending an assignment pushes the file's own imports down,
                 # so ruff reads every one of them as E402. The generated file
@@ -254,9 +328,209 @@ def bundle_script_verifiers(
                                      encoding="utf-8")
             else:
                 shutil.copy2(resolved, dest_file)
-        else:
-            logging.warning("Script verifier file not found on disk: %s",
-                            sc.script)
+
+        for dep_item in sc.deps:
+            resolved_dep = resolve_path(dep_item, source_root=source_root)
+            if not resolved_dep or not resolved_dep.is_file():
+                raise FileNotFoundError(
+                    f"Verifier dependency not found: {dep_item}")
+            if resolved_dep.name in staged_files:
+                raise ValueError(
+                    f"Verifier {folder_name!r} dependency {resolved_dep.name!r} "
+                    "collides with an already staged file.")
+            staged_files.add(resolved_dep.name)
+            shutil.copy2(resolved_dep, check_dir / resolved_dep.name)
+    return bundled
+
+
+def _write_task_files(
+    suite_name: str,
+    case: schema.TestCase,
+    env: schema.EnvironmentConfig,
+    eval_cfg: schema.EvaluationConfig,
+    task_dir: Path,
+    source_root: Path | None,
+) -> None:
+    """Writes instruction.md and task.toml for a compiled case."""
+    prompt_text = case.resolve_prompt(source_root=source_root)
+    (task_dir / "instruction.md").write_text(prompt_text, encoding="utf-8")
+    (task_dir / "task.toml").write_text(
+        template_generators.generate_task_toml(
+            suite_name=suite_name,
+            case=case,
+            env=env,
+            eval_cfg=eval_cfg,
+            prompt_text=prompt_text,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _bundle_environment(
+    effective_env: schema.EnvironmentConfig,
+    case: schema.TestCase,
+    task_dir: Path,
+    source_root: Path | None,
+) -> None:
+    """Stages workspace data and setup scripts, and writes environment/Dockerfile."""
+    has_data = bundle_workspace_data(
+        env=effective_env,
+        task_dir=task_dir,
+        source_root=source_root,
+        case=case,
+    )
+    staged_setup = bundle_setup_scripts(
+        env=effective_env,
+        task_dir=task_dir,
+        source_root=source_root,
+    )
+    env_dir = task_dir / "environment"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "Dockerfile").write_text(
+        template_generators.generate_dockerfile(
+            env=effective_env,
+            has_data=has_data,
+            setup_scripts=staged_setup,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _stage_verifier_assets(
+    case: schema.TestCase,
+    eval_cfg: schema.EvaluationConfig,
+    task_dir: Path,
+    tests_dir: Path,
+    judge_model_override: str | None,
+    source_root: Path | None,
+) -> tuple[list[tuple[str, schema.ScriptCheck]], bool]:
+    """Stages verifier files, expectation rubrics, and script/toml verifiers."""
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    for vf in eval_cfg.normalized_verifier_files():
+        stage_file(staging=vf, dest_dir=tests_dir, source_root=source_root)
+    for vf in case.normalized_verifier_files():
+        stage_file(staging=vf, dest_dir=tests_dir, source_root=source_root)
+
+    judge_model = judge_model_override or eval_cfg.judge_model
+    judge_toml = template_generators.generate_judge_toml(
+        expectations=case.normalized_expectations(),
+        judge_model=judge_model,
+    )
+    if judge_toml:
+        expectations_dir = tests_dir / "expectations"
+        expectations_dir.mkdir(parents=True, exist_ok=True)
+        (expectations_dir / "judge.toml").write_text(judge_toml,
+                                                     encoding="utf-8")
+
+    all_verifiers = list(eval_cfg.normalized_script_verifiers()) + list(
+        case.normalized_script_verifiers())
+    bundled_verifiers = bundle_script_verifiers(
+        all_verifiers,
+        task_dir=task_dir,
+        source_root=source_root,
+    )
+    return bundled_verifiers, bool(judge_toml)
+
+
+def _write_reward_toml(
+    case: schema.TestCase,
+    eval_cfg: schema.EvaluationConfig,
+    tests_dir: Path,
+    bundled_verifiers: Sequence[tuple[str, schema.ScriptCheck]],
+    has_judge_toml: bool,
+) -> None:
+    """Writes tests/reward.toml unless verifier_files already staged one."""
+    reward_toml_path = tests_dir / "reward.toml"
+    if reward_toml_path.exists():
+        return
+    eff_aggregation = case.reward_aggregation or eval_cfg.reward_aggregation
+    eff_weights: dict[str, float] = {}
+    if any(sc.weight != 1.0 for _, sc in bundled_verifiers):
+        if has_judge_toml:
+            eff_weights["expectations"] = 1.0
+        for folder_name, sc in bundled_verifiers:
+            eff_weights[folder_name] = sc.weight
+    reward_toml_path.write_text(
+        template_generators.generate_reward_toml(
+            aggregation=eff_aggregation,
+            weights=eff_weights or None,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_verifier_params(
+    case: schema.TestCase,
+    tests_dir: Path,
+    bundled_verifiers: Sequence[tuple[str, schema.ScriptCheck]],
+) -> None:
+    """Writes tests/verifier_params.json keyed by verifier folder when non-empty."""
+    effective_params: dict[str, Any] = {}
+    if bundled_verifiers:
+        for folder_name, sc in bundled_verifiers:
+            is_toml = (len(sc.scripts) == 1
+                       and (tests_dir / folder_name / "judge.toml").is_file())
+            params: dict[str, Any] = {}
+            if sc.verifier_params:
+                params.update(sc.verifier_params)
+            if case.verifier_params:
+                params.update(case.verifier_params)
+            if not is_toml or params:
+                effective_params[folder_name] = params
+    elif case.verifier_params:
+        effective_params = dict(case.verifier_params)
+
+    if effective_params:
+        (tests_dir / "verifier_params.json").write_text(
+            json.dumps(effective_params, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _write_test_runner(
+    case: schema.TestCase,
+    eval_cfg: schema.EvaluationConfig,
+    tests_dir: Path,
+    bundled_verifiers: Sequence[tuple[str, schema.ScriptCheck]],
+    source_root: Path | None,
+) -> None:
+    """Stages pre/post lifecycle hooks and writes executable tests/test.sh."""
+    eff_pre_verify = (case.pre_verify
+                      if case.pre_verify is not None else eval_cfg.pre_verify)
+    eff_post_verify = (case.post_verify if case.post_verify is not None else
+                       eval_cfg.post_verify)
+    reserved_hook_names = {
+        "test.sh",
+        "reward.toml",
+        "verifier_params.json",
+    } | {p.name
+         for p in tests_dir.iterdir()}
+    staged_pre = stage_lifecycle_hooks(
+        eff_pre_verify,
+        tests_dir=tests_dir,
+        source_root=source_root,
+        reserved_names=reserved_hook_names,
+    )
+    staged_post = stage_lifecycle_hooks(
+        eff_post_verify,
+        tests_dir=tests_dir,
+        source_root=source_root,
+        reserved_names=reserved_hook_names,
+    )
+
+    pythonpath_dirs = [
+        folder_name for folder_name, sc in bundled_verifiers if sc.deps
+    ]
+    test_sh = tests_dir / "test.sh"
+    test_sh.write_text(
+        template_generators.generate_test_sh(
+            pre_verify=staged_pre,
+            post_verify=staged_post,
+            pythonpath_dirs=pythonpath_dirs,
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(test_sh, 0o755)
 
 
 def compile_case(
@@ -274,87 +548,49 @@ def compile_case(
         shutil.rmtree(task_dir)
     task_dir.mkdir(parents=True, exist_ok=True)
 
-    prompt_text = case.resolve_prompt(source_root=source_root)
-
-    # 1. Write instruction.md & task.toml
-    (task_dir / "instruction.md").write_text(prompt_text, encoding="utf-8")
-    (task_dir / "task.toml").write_text(
-        template_generators.generate_task_toml(
-            suite_name=suite_name,
-            case=case,
-            env=env,
-            prompt_text=prompt_text,
-        ),
-        encoding="utf-8",
-    )
-
-    # 2. Bundle workspace data & generate Dockerfile
-    has_data = bundle_workspace_data(
+    _write_task_files(
+        suite_name=suite_name,
+        case=case,
         env=env,
+        eval_cfg=eval_cfg,
         task_dir=task_dir,
         source_root=source_root,
+    )
+    _bundle_environment(
+        effective_env=env.merged_with(case.environment),
         case=case,
-    )
-    env_dir = task_dir / "environment"
-    env_dir.mkdir(parents=True, exist_ok=True)
-    (env_dir / "Dockerfile").write_text(
-        template_generators.generate_dockerfile(env=env, has_data=has_data),
-        encoding="utf-8",
+        task_dir=task_dir,
+        source_root=source_root,
     )
 
-    # 3. Setup RewardKit tests harness
     tests_dir = task_dir / "tests"
-    tests_dir.mkdir(parents=True, exist_ok=True)
-    (tests_dir / "reward.toml").write_text(
-        template_generators.generate_reward_toml(), encoding="utf-8")
-
-    # 3b. Stage case-level test files into tests/
-    for tf in case.normalized_test_files():
-        stage_file(staging=tf, dest_dir=tests_dir, source_root=source_root)
-
-    # 4. LLM judge expectations (tests/expectations/judge.toml)
-    judge_model = judge_model_override or eval_cfg.judge_model
-    judge_toml = template_generators.generate_judge_toml(
-        expectations=case.normalized_expectations(),
-        judge_model=judge_model,
+    bundled_verifiers, has_judge_toml = _stage_verifier_assets(
+        case=case,
+        eval_cfg=eval_cfg,
+        task_dir=task_dir,
+        tests_dir=tests_dir,
+        judge_model_override=judge_model_override,
+        source_root=source_root,
     )
-    if judge_toml:
-        expectations_dir = tests_dir / "expectations"
-        expectations_dir.mkdir(parents=True, exist_ok=True)
-        (expectations_dir / "judge.toml").write_text(judge_toml,
-                                                     encoding="utf-8")
-
-    # 5. Script verifiers (tests/<check>/...)
-    all_verifiers = list(eval_cfg.normalized_script_verifiers()) + list(
-        case.normalized_script_verifiers())
-    if all_verifiers:
-        bundle_script_verifiers(all_verifiers,
-                                task_dir=task_dir,
-                                source_root=source_root)
-
-    # 5b. Write custom params into verifier_params.json.
-    effective_params: dict[str, Any] = {}
-    for sv in all_verifiers:
-        params = {}
-        sc = schema.ScriptCheck.coerce(sv)
-        if sc.verifier_params:
-            params.update(sc.verifier_params)
-
-        if case.verifier_params:
-            params.update(case.verifier_params)
-        effective_params[sv.name or Path(sv.script).stem] = params
-
-    if effective_params:
-        (tests_dir / "verifier_params.json").write_text(
-            json.dumps(effective_params, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-    # 6. Executable test.sh
-    test_sh = tests_dir / "test.sh"
-    test_sh.write_text(template_generators.generate_test_sh(),
-                       encoding="utf-8")
-    os.chmod(test_sh, 0o755)
+    _write_reward_toml(
+        case=case,
+        eval_cfg=eval_cfg,
+        tests_dir=tests_dir,
+        bundled_verifiers=bundled_verifiers,
+        has_judge_toml=has_judge_toml,
+    )
+    _write_verifier_params(
+        case=case,
+        tests_dir=tests_dir,
+        bundled_verifiers=bundled_verifiers,
+    )
+    _write_test_runner(
+        case=case,
+        eval_cfg=eval_cfg,
+        tests_dir=tests_dir,
+        bundled_verifiers=bundled_verifiers,
+        source_root=source_root,
+    )
 
     return task_dir
 

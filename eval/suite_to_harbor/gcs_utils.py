@@ -17,11 +17,9 @@ from __future__ import annotations
 
 import logging
 import os
-import pathlib
 import shutil
 import subprocess
-
-Path = pathlib.Path
+from pathlib import Path
 
 DEFAULT_GCS_CACHE_DIR = Path.home(
 ) / ".cache" / "tpu-agent-suite" / "eval" / "gcs"
@@ -50,19 +48,13 @@ def fetch_gcs_asset(
 
     Raises:
         ValueError: If gcs_uri does not start with 'gs://'.
-        FileNotFoundError: If 'gcloud' CLI is not found in PATH.
+        FileNotFoundError: If the asset is not cached and 'gcloud' CLI is not
+            found in PATH.
         RuntimeError: If gcloud storage download fails.
     """
     clean_uri = gcs_uri.strip()
     if not clean_uri.startswith("gs://"):
         raise ValueError(f"Expected gs:// URI, got: {gcs_uri}")
-
-    gcloud_bin = shutil.which("gcloud")
-    if not gcloud_bin:
-        raise FileNotFoundError(
-            f"Cannot fetch GCS asset '{clean_uri}': 'gcloud' CLI not found in PATH. "
-            "Please install the Google Cloud SDK or pre-download the asset locally."
-        )
 
     root = cache_root or get_gcs_cache_root()
     rel_path = clean_uri.removeprefix("gs://").strip("/")
@@ -71,6 +63,13 @@ def fetch_gcs_asset(
     if cached_path.exists():
         logging.info("GCS asset cache hit: %s -> %s", clean_uri, cached_path)
         return cached_path
+
+    gcloud_bin = shutil.which("gcloud")
+    if not gcloud_bin:
+        raise FileNotFoundError(
+            f"Cannot fetch GCS asset '{clean_uri}': 'gcloud' CLI not found in PATH. "
+            "Please install the Google Cloud SDK or pre-download the asset locally."
+        )
 
     logging.info("GCS asset cache miss: Downloading %s...", clean_uri)
     cached_path.parent.mkdir(parents=True, exist_ok=True)
