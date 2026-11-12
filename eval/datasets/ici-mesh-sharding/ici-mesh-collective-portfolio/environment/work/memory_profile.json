@@ -1,0 +1,14 @@
+{
+  "memoryProfilePerAllocator": {
+    "TPU_HBM": {
+      "profileSummary": {
+        "memoryCapacity": 102005473280.0,
+        "peakStats": {
+          "peakBytesInUse": 45097156608.0,
+          "heapAllocatedBytes": 42949672960.0,
+          "stackReservedBytes": 2147483648.0
+        }
+      }
+    }
+  }
+}

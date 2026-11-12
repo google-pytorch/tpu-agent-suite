@@ -1,0 +1,5 @@
+{
+  "moduleName": "jit_train_step",
+  "totalBufferAllocationMib": 43008.0,
+  "entryComputationParametersMib": 14336.0
+}

@@ -1,0 +1,47 @@
+[
+  {
+    "operation": "ragged-all-to-all.moe_dispatch",
+    "category": "all-to-all",
+    "raw_time_ps": 380000000.0,
+    "occurrences": 32,
+    "source_file": "layers/fused_moe.py",
+    "expression": "%ragged-all-to-all.moe_dispatch = bf16[2048,4096] ragged-all-to-all(bf16[2048,4096] %tokens), replica_groups=[8,8]<=[64]",
+    "provenance": "jit(train_step)/layer/moe/routed_experts"
+  },
+  {
+    "operation": "all-gather.fsdp_fwd",
+    "category": "all-gather",
+    "raw_time_ps": 100000000.0,
+    "occurrences": 32,
+    "source_file": "sharding/maxtext_fsdp.py",
+    "expression": "%all-gather.fsdp_fwd = bf16[4096,4096] all-gather(bf16[1024,4096] %param), replica_groups=[16,4]<=[64]",
+    "provenance": "jit(train_step)/layer/remat/fsdp_weight_gather"
+  },
+  {
+    "operation": "all-reduce.tensor_mlp",
+    "category": "all-reduce",
+    "raw_time_ps": 60000000.0,
+    "occurrences": 32,
+    "source_file": "layers/collective_matmul.py",
+    "expression": "%all-reduce.tensor_mlp = bf16[2048,4096] all-reduce(bf16[2048,4096] %act), replica_groups=[32,2]<=[64]",
+    "provenance": "jit(train_step)/layer/mlp/wo"
+  },
+  {
+    "operation": "all-reduce.grad_norm",
+    "category": "all-reduce",
+    "raw_time_ps": 30000000.0,
+    "occurrences": 1,
+    "source_file": "train/optimizer.py",
+    "expression": "%all-reduce.grad_norm = f32[] all-reduce(f32[] %sq_norm), replica_groups=[1,64]<=[64]",
+    "provenance": "jit(train_step)/optimizer/clip_by_global_norm"
+  },
+  {
+    "operation": "fusion.moe_gmm",
+    "category": "convolution",
+    "raw_time_ps": 430000000.0,
+    "occurrences": 64,
+    "source_file": "layers/gmm.py",
+    "expression": "%fusion.moe_gmm = bf16[2048,4096] custom-call(...)",
+    "provenance": "jit(train_step)/layer/moe/gmm"
+  }
+]

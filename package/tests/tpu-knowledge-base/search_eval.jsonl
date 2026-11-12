@@ -623,6 +623,11 @@
 {"task": "general", "kind": "question", "query": "does lowering xla_tpu_scoped_vmem_limit_kib slow matmuls on v6e", "want": ["v6e-measured-vpu-memory-limits"]}
 {"task": "general", "kind": "question", "query": "No TPU topology found for count: 1", "want": ["vllm-torchtpu-mesh-constraints"]}
 {"task": "general", "kind": "question", "query": "num_row_partitions=32 must be <= num_simd_lanes=16 expert parallel", "want": ["vllm-torchtpu-mesh-constraints"]}
+{"task": "general", "kind": "question", "query": "attribute hlo all-gather all-to-all reduce-scatter to mesh axis replica groups", "want": ["ici-mesh-collective-attribution"]}
+{"task": "general", "kind": "question", "query": "3d torus 4x4x4 split physical axis wrap around link contention mesh", "want": ["ici-mesh-collective-attribution"]}
+{"task": "general", "kind": "question", "query": "reducible vs non-reducible scalar all-reduce collective ceiling", "want": ["ici-mesh-collective-attribution"]}
+{"task": "general", "kind": "question", "query": "mla compressed kv cache replicated across tensor parallel ranks hbm", "want": ["ici-mesh-collective-attribution"]}
+{"task": "general", "kind": "question", "query": "static paged kv pre-reservation 90 percent memory profile false oom", "want": ["ici-mesh-collective-attribution"]}
 {"task": "general", "kind": "question", "query": "TP vs DP for 8k/1k at high concurrency on vllm torch_tpu", "want": ["vllm-tp-dp-plan"]}
 {"task": "general", "kind": "question", "query": "does async scheduling help vllm torch_tpu throughput", "want": ["vllm-torchtpu-measured-serving-knobs"]}
 {"task": "general", "kind": "question", "query": "which layout does an all-reduce in a vllm serving trace come from", "want": ["serving-trace-attribution"]}

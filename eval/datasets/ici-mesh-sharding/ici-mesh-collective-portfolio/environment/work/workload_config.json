@@ -1,0 +1,17 @@
+{
+  "platform": "v5p",
+  "topology": "4x4x4",
+  "num_chips": 64,
+  "baseline_mesh": {
+    "data": 1,
+    "fsdp": 4,
+    "tensor": 2,
+    "sequence": 1,
+    "expert": 8
+  },
+  "batch_size": 128,
+  "sequence_length": 8192,
+  "num_heads": 32,
+  "num_kv_heads": 8,
+  "num_experts": 64
+}

@@ -1,0 +1,39 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version = "1.0"
+
+artifacts = [
+  { source = "/workspace", destination = "workspace" },
+  { source = "/root/.tpu-agent-suite/runs", destination = "tpu_agent_suite_runs" },
+]
+
+[task]
+name = "ici-mesh-sharding/ici-mesh-collective-portfolio"
+description = "An MoE training job on a 64-chip v5p slice (3D torus `4x4x4`, 1 device per chip) exported XProf JSON artifacts into `/workspace/work` (`workload_config.json`, `op_profile.json`, `memory_profile.json`, `memory_viewer.json`). This session has no TPU hardware and no remote compute backend, so do not submit or run any remote job. Using `ici-mesh-sharding`, attribute the collective time to mesh axes, check whether the baseline mesh `{\"data\": 1, \"fsdp\": 4, \"tensor\": 2, \"sequence\": 1, \"expert\": 8}` fits `4x4x4` without splitting physical torus axes, rank a candidate mesh portfolio, and write `/workspace/work/portfolio_recommendation.json` with keys `primary_bottleneck_axis` (string), `primary_bottleneck_role` (string), `collective_pct` (float), `baseline_requires_split_physical_axes` (bool), and `proposals` (list of 3 to 7 candidate dicts, each containing a `mesh` dict over `data`, `fsdp`, `tensor`, `sequence`, `expert`)."
+
+[metadata]
+category = "ici-mesh-sharding"
+
+[agent]
+timeout_sec = 1800.0
+
+[verifier]
+timeout_sec = 300.0
+
+[environment]
+workdir = "/workspace"
+cpus = 2
+memory_mb = 8192
+storage_mb = 10240

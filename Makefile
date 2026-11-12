@@ -114,6 +114,7 @@ test-eval:
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_antigravity_session_supervisor.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_attention_analyze.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_claude_session_supervisor.py" -v
+	$(PYTHON) -m unittest discover -s eval/tests -p "test_ici_mesh_portfolio_verifier.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_invoked_subagent.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_cpu_batch_verifier.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_moe_dcp_guardrails_verifier.py" -v
