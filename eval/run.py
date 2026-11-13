@@ -530,6 +530,74 @@ def adc_docker_config(hosts: list[str]) -> str | None:
     return cfg_dir
 
 
+_FROM_NEXUS_TPU_LATEST = re.compile(
+    r"^FROM\s+(?:--platform=\S+\s+)?(\S+/nexus-tpu:latest)\s*$", re.M)
+BASE_DIGEST_FILE = ".nexus-tpu-digest"
+
+
+def stage_base_digests(config: dict[str, Any]) -> None:
+    """Write nexus-tpu:latest's current digest into each task FROM it.
+
+    Harbor tags a task image by a hash of its environment/, which a moving
+    :latest base never changes; the digest file does, so a new base is a new
+    tag that every build path rebuilds and every pod pulls. A local config
+    also pulls the base, as Harbor's local build reuses a cached one.
+    """
+    gcloud_env = os.environ.copy()
+    adc_path = get_adc_path()
+    if adc_path.is_file():
+        gcloud_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = str(adc_path)
+    kwargs = ((config.get("environment") or {}).get("kwargs") or {})
+    digests: dict[str, str] = {}
+    for key in ("tasks", "datasets"):
+        for entry in config.get(key) or []:
+            path = entry.get("path") if isinstance(entry, dict) else entry
+            if not path:
+                continue
+            root = (REPO_ROOT / path).resolve()
+            task_dirs = ([root] if (root / "task.toml").is_file() else sorted(
+                p.parent for p in root.glob("*/task.toml")))
+            for task_dir in task_dirs:
+                dockerfile = task_dir / "environment" / "Dockerfile"
+                if not dockerfile.is_file():
+                    continue
+                base = _FROM_NEXUS_TPU_LATEST.search(
+                    dockerfile.read_text(encoding="utf-8"))
+                if not base:
+                    continue
+                ref = base.group(1)
+                if ref not in digests:
+                    try:
+                        digests[ref] = subprocess.run(
+                            [
+                                "gcloud", "artifacts", "docker", "images",
+                                "describe", ref,
+                                "--format=value(image_summary.digest)"
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                            env=gcloud_env).stdout.strip()
+                    except FileNotFoundError as exc:
+                        raise RuntimeError(
+                            f"gcloud is needed to resolve {ref}'s digest "
+                            f"for {task_dir.name}") from exc
+                    if not digests[ref]:
+                        # A blank digest would freeze the image tag.
+                        raise RuntimeError(f"gcloud gave no digest for {ref}")
+                    print(f"==> base image: {ref} = {digests[ref]}")
+                    if not kwargs.get("registry_name"):
+                        docker_env = os.environ.copy()
+                        cfg_dir = adc_docker_config([ref.split("/")[0]])
+                        if cfg_dir:
+                            docker_env["DOCKER_CONFIG"] = cfg_dir
+                        subprocess.run(["docker", "pull", "-q", ref],
+                                       check=True,
+                                       env=docker_env)
+                (dockerfile.parent / BASE_DIGEST_FILE).write_text(
+                    digests[ref] + "\n", encoding="utf-8")
+
+
 def prebuild_images_locally(config: dict[str, Any]) -> None:
     """Build and push each selected task's image locally, skipping Cloud Build.
 
@@ -577,11 +645,12 @@ def prebuild_images_locally(config: dict[str, Any]) -> None:
                         )
                         continue
                     print(f"==> building locally: {tag.split('/')[-1]}")
-                    subprocess.run(
-                        ["docker", "build", "-t", tag,
-                         str(task_dir / subdir)],
-                        check=True,
-                        env=docker_env)
+                    subprocess.run([
+                        "docker", "build", "--pull", "-t", tag,
+                        str(task_dir / subdir)
+                    ],
+                                   check=True,
+                                   env=docker_env)
                     subprocess.run(["docker", "push", tag],
                                    check=True,
                                    env=docker_env)
@@ -1367,6 +1436,24 @@ def setup_gke_credentials_if_needed(
 
     kubeconfig_path.chmod(0o644)
     return GkeCredentials(kubeconfig_path=kubeconfig_path)
+
+
+def describe_agent_environment(config: dict[str, Any]) -> str:
+    """Where the agent's own container runs: a remote GKE pod or this machine."""
+    env_spec = config.get("environment")
+    env_spec = env_spec if isinstance(env_spec, dict) else {}
+    env_type = resolve_template(env_spec.get("type")) or "docker"
+    if env_type != "gke":
+        return f"local {env_type} container on this machine"
+    kwargs = env_spec.get("kwargs") or {}
+    project = resolve_template(kwargs.get("project_id"))
+    registry = (f"{resolve_template(kwargs.get('registry_location', 'us'))}"
+                f"-docker.pkg.dev/{project}/"
+                f"{resolve_template(kwargs.get('registry_name'))}")
+    return (
+        f"remote GKE pod on {resolve_template(kwargs.get('cluster_name'))} "
+        f"({project}, {resolve_template(kwargs.get('region'))}), "
+        f"image from {registry}")
 
 
 def setup_harbor_gke_kubeconfig_if_needed(config: dict[str, Any],
@@ -2404,6 +2491,7 @@ def main() -> None:
             require_dataset(config, config_path)
             publish_skipped_tasks_summary(check_task_requirements(config))
             run_dataset_setup_if_present(config)
+            stage_base_digests(config)
             if not args.cloud_build:
                 prebuild_images_locally(config)
             check_gemini_api_key(config)
@@ -2430,6 +2518,8 @@ def main() -> None:
             print(
                 f"\n{prefix}Running Harbor Evaluation ({config_path}) as '{job_name}'..."
             )
+            print(
+                f"==> Agent environment: {describe_agent_environment(config)}")
 
             job_dir = jobs_dir / job_name
             eval_passed = False

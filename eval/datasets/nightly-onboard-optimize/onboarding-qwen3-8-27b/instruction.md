@@ -39,6 +39,11 @@ container that gets torn down, not only in a scrollback buffer.
 - **Retain at minimum**: raw benchmark output (not just the summary numbers),
 server logs, any generated or patched source, the serving config, and any
 profiles you captured.
+- **Record every GKE deployment as YAML**: for each Job, Pod, Service,
+ConfigMap or other object you create on the cluster, save its manifest under
+the artifact directory when you create it (`kubectl get <kind> <name> -o
+yaml` if a tool generated it for you), named so it matches the job in
+job_log.md.
 - **Pin every version you depended on**, recorded in one file alongside the
 artifacts:
 - container image — the **digest**, not just the tag
@@ -49,8 +54,9 @@ artifacts:
 - TPU runtime / accelerator type and topology
 - **Every benchmark row must be traceable** to the raw output it came from and
 the version set it ran against. State which.
-- Do not commit credentials or model weights. If ADC or a token is mounted,
-keep it out of the artifact directory and out of git history.
+- Keep credentials and model weights, including any checkpoint you derive or
+cut down, out of the artifact directory and out of git history. Record where
+a checkpoint lives (its path or bucket) instead.
 - At the end of the task run a artifacts organization step, where
 your artifact directory (or /logs/artifacts only if your agent environment does not already specify an artifact directory) is organized with all generated code, profiles,
 relevant logs as so on. Ready to be zipped for analysis.
@@ -86,13 +92,14 @@ cannot run, put it in the failure table instead of dropping it.
 Report numbers in tables, not prose. One row per (ISL/OSL, concurrency)
 point you measured.
 
-| Config | Topology | dtype | ISL/OSL | Concurrency | TTFT (ms) | ITL (ms) | Throughput (tok/s) |
-|---|---|---|---|---|---|---|---|
+| Config | Topology | dtype | ISL/OSL | Concurrency | TTFT (ms) | ITL (ms) | p90 E2E latency (s) | Output throughput (tok/s) |
+|---|---|---|---|---|---|---|---|---|
 
 Rules for the table:
 - Every bench config is its own job, named with the prefix `golden-qwen-<run-id>-bench-`. Only touch cluster resources you created.
-- TTFT and ITL are medians; Throughput is output tokens per second across all
-  requests. Mark the peak-throughput row for each
+- TTFT and ITL are medians; p90 E2E latency is the 90th percentile of each
+  request's end-to-end time; Output throughput is output tokens per second
+  across all requests. Mark the peak-throughput row for each
   ISL/OSL combination.
 - Every number is measured. If a cell is an estimate or a single sample, mark
   it. If you did not measure it, leave it blank — never fill it in plausibly.
@@ -125,10 +132,10 @@ resolved it:
 - **Do not reuse existing work.** Write everything this task needs yourself,
   except for packaged patches from the `vllm_patches` directory (use a matching
   patch if present; the directory or a patch for this model may not exist).
-  - You MAY read and use: the Hugging Face model card and config, the
-    torch_tpu source inside the provided container, Tokamax, public vLLM/TPU
-    documentation, and packaged patches from the `vllm_patches` directory (if
-    available).
+  - You MAY read and use: the Hugging Face model card and config, the staged
+    checkpoint (see Environment), the torch_tpu and vLLM-TorchTPU sources
+    inside the provided containers, Tokamax, public vLLM/TPU documentation,
+    and packaged patches from the `vllm_patches` directory (if available).
   - Except for packaged patches from the `vllm_patches` directory, you MUST NOT
     read or copy onboarding code, scripts, notebooks, configs, or output
     artifacts that already exist on any VM, disk, bucket, or container you did
@@ -148,9 +155,19 @@ resolved it:
 
 ## Environment
 
-- torch_tpu is not public. It is packaged in the container image specified by
-  `$TASK_DOCKER` in your environment. Resolve it to a digest before you start,
-  and report the digest you ran against.
+- Use torch_tpu, vLLM and other libraries from your environment when you
+  can. Your own container is built on `nexus-tpu:latest`, so torch_tpu and
+  vLLM-TorchTPU (at `/workspace/vllm-torchtpu`) are there to read and run,
+  but it has no TPU. Serve from the image in `$TASK_DOCKER` and report its
+  digest.
+- **Reuse the staged checkpoint; do not download the weights from Hugging
+  Face.** The model is staged at `gs://agent-suite-models/ckpt/hf/Qwen/Qwen3.8-27B/`,
+  Hugging Face revision `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`. Mount the bucket into your TPU job if
+  you need to (on GKE, the Cloud Storage FUSE CSI driver), or copy it to the
+  job's local disk; record which, and that revision, with the artifacts. If
+  the job cannot read the bucket, say so in the failure table and get it
+  there with your own credentials before falling back to Hugging Face at the
+  same revision.
 - Inspect your environment before assuming what is available: check for TPU
   access, a GKE cluster, and quota. Authenticate with ADC.
 - Prefer a clean GKE setup. A TPU VM is acceptable if the environment is clean.

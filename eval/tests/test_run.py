@@ -323,6 +323,53 @@ class TestCheckTaskRequirements(unittest.TestCase):
             self.assertIn("HF_TOKEN", meta.get("required_env", []), task_toml)
 
 
+class TestStageBaseDigests(unittest.TestCase):
+    """A task FROM nexus-tpu:latest gets a new image tag when :latest moves."""
+
+    def test_digest_moves_the_tag_only_for_latest_based_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, base in (
+                ("overlay", "--platform=linux/amd64 us-docker.pkg.dev/p/"
+                 "nexus-dev/nexus-tpu:latest"),
+                ("pinned",
+                 "us-docker.pkg.dev/p/nexus-dev/nexus-tpu@sha256:" + "0" * 64),
+            ):
+                (root / name / "environment").mkdir(parents=True)
+                (root / name / "task.toml").write_text(
+                    f'[task]\nname = "ds/{name}"\n', encoding="utf-8")
+                (root / name / "environment" / "Dockerfile").write_text(
+                    f"FROM {base}\n", encoding="utf-8")
+            kwargs = {
+                "registry_name": "r",
+                "registry_location": "us",
+                "project_id": "p"
+            }
+            config = {"environment": {"kwargs": kwargs}, "datasets": [tmp]}
+
+            def tag() -> str | None:
+                return _RUN_MOD.harbor_image_tag(root / "overlay",
+                                                 "environment", kwargs)
+
+            before = tag()
+            describe = MagicMock(stdout="sha256:aaa\n")
+            with patch.object(_RUN_MOD.subprocess, "run",
+                              return_value=describe) as run_cmd, \
+                    patch.object(_RUN_MOD, "get_adc_path",
+                                 return_value=root / "no-adc.json"):
+                _RUN_MOD.stage_base_digests(config)
+                first = tag()
+                describe.stdout = "sha256:bbb\n"
+                _RUN_MOD.stage_base_digests(config)
+            self.assertNotEqual(before, first)
+            self.assertNotEqual(first, tag())
+            self.assertFalse((root / "pinned" / "environment" /
+                              _RUN_MOD.BASE_DIGEST_FILE).exists())
+            # A GKE config builds with --pull; only a local config pulls here.
+            self.assertNotIn("pull",
+                             [c.args[0][1] for c in run_cmd.call_args_list])
+
+
 class TestLoadConfig(unittest.TestCase):
     """Unit tests for YAML config loading."""
 

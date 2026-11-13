@@ -49,6 +49,7 @@ SOURCE = REPO / "eval" / "verifiers" / "common" / "invoked_subagent.py"
 NIGHTLY_ONBOARD_OPTIMIZE = (REPO / "eval" / "datasets" /
                             "nightly-onboard-optimize")
 TPU_INFERENCE_VLLM = REPO / "eval" / "datasets" / "tpu-inference-vllm"
+ONBOARDING_FRONTIER = REPO / "eval" / "datasets" / "onboarding-frontier"
 NIGHTLY_FUNCTIONAL = REPO / "eval" / "datasets" / "nightly-functional"
 FIXTURES = pathlib.Path(
     __file__).resolve().parent / "fixtures" / "invoked_subagent"
@@ -65,7 +66,8 @@ TPU_INFERENCE_CARRIERS = (
     "tpu-inference-gpt-oss-20b-vllm",
     "tpu-inference-qwen3-8-27b-vllm",
 )
-CARRIERS = ONBOARD_CARRIERS + TPU_INFERENCE_CARRIERS
+FRONTIER_CARRIERS = ("deepseek-v4-1-flash", "glm-5-3-flash")
+CARRIERS = ONBOARD_CARRIERS + TPU_INFERENCE_CARRIERS + FRONTIER_CARRIERS
 
 
 def _load():
@@ -150,6 +152,7 @@ class CopiesTest(unittest.TestCase):
         task_roots = [
             *((NIGHTLY_ONBOARD_OPTIMIZE, t) for t in ONBOARD_CARRIERS),
             *((TPU_INFERENCE_VLLM, t) for t in TPU_INFERENCE_CARRIERS),
+            *((ONBOARDING_FRONTIER, t) for t in FRONTIER_CARRIERS),
         ]
         for dataset_root, task in task_roots:
             tests = dataset_root / task / "tests"
@@ -180,6 +183,7 @@ class CopiesTest(unittest.TestCase):
             NIGHTLY_ONBOARD_OPTIMIZE,
             TPU_INFERENCE_VLLM,
             NIGHTLY_FUNCTIONAL,
+            ONBOARDING_FRONTIER,
         ) for p in root.glob("**/tests/invoked_subagent/check.py"))
         self.assertEqual(carriers, sorted(CARRIERS))
 

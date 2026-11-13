@@ -8,8 +8,10 @@ it got there.
 
 ## Tasks
 
-One task per model. The brief, the image and the verifier are identical
-across all four; the model is the variable, so "size the topology yourself"
+One task per model. The verifier is identical across all four, and so are
+the brief and image of gemma, mistral and gpt-oss; Qwen3.8-27B, the
+control for `onboarding-frontier`, runs that dataset's overlay image and
+brief; the model is the variable, so "size the topology yourself"
 has more than one right answer and a run that hardcodes a slice stops
 scoring.
 

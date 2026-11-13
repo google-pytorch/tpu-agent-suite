@@ -28,6 +28,8 @@ eval/*/results/
 eval/*/jobs/
 **/.datasets/
 .*datasets/
+# Written by run.py's stage_base_digests.
+eval/datasets/**/environment/.nexus-tpu-digest
 
 # Harness state written while running agents from this directory, never a
 # source file.

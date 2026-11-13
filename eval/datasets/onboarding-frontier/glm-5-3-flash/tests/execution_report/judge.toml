@@ -1,0 +1,47 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reported only (weight 0 in ../reward.toml): one judge that explains the run.
+# Its value is in the `reasoning` of each criterion in
+# /logs/verifier/reward-details.json (test.sh also prints it to the verifier
+# log): the routing the agent chose, every step it performed, and an
+# explanation of what went wrong, if anything did.
+
+[judge]
+judge = "vertex_ai/gemini-3.8-flash"
+atif-trajectory = "/logs/agent/trajectory.json"
+timeout = 600
+
+[[criterion]]
+name = "routing"
+type = "binary"
+weight = 1.0
+description = "Explain the routing: list, in order, every delegation or subagent/skill invocation the agent made (receiving agent or skill, what it was asked to do, and what it returned), with Step IDs. For agent-suite runs, pass if the onboarding of zai-org/GLM-5.3-Flash to vLLM on TPU went to tpu-model-onboarding (or yeet-tpu / yeet-vllm-bench as appropriate); for baseline runs without subagent skills, describe how the agent structured its direct workflow and pass if it followed a coherent onboarding -> verification -> benchmark -> teardown sequence."
+
+[[criterion]]
+name = "steps"
+type = "numeric"
+min = 0.0
+max = 10.0
+weight = 0.0
+description = "Explain the steps the agent performed, in order and with Step IDs: the onboarding (vLLM version, image digest, parallelism chosen, the TPU type and topology the server actually ran on, the completion request and the response); the baseline benchmark suite (for each required ISL/OSL combination 1k/1k, 8k/1k, and 1k/8k if run, the concurrencies swept and the peak output tokens per second); the local git commit history; the version pinning and artifacts organization step in your artifact directory; and the cluster teardown recorded in job_log.md. Score with the number of distinct ISL/OSL regimes (0 to 3) that were measured on physical TPU hardware."
+
+[[criterion]]
+name = "errors"
+type = "binary"
+weight = 1.0
+description = "Explain everything that went wrong, with Step IDs: failed or refused job submissions, crashes, out-of-memory errors, timeouts, wrong hardware (a TPU type or topology other than the one the run was configured for: GKE_TPU_ACCELERATOR and GKE_TPU_TOPOLOGY in the agent's environment), serving with anything other than vLLM, use of torch_xla or the tpu-inference repo, bad or degenerate output, benchmark points that failed or were dropped, questions that blocked on the user, jobs or port forwards left running at the end, cluster jobs missing from job_log.md (or recorded there without their start time, or without their termination time when the agent terminated them), job names not prefixed golden-, benchmark configs not run as their own job, or inspecting cluster jobs the agent did not start. For each, give the error message, the likely cause, and whether and how the agent recovered. Pass if the run ended with no unrecovered error (the model was served with vLLM and benchmarked on the required ISL/OSL combinations, and everything deployed was torn down); otherwise fail and name the error that stopped or degraded the run."
+
+[scoring]
+aggregation = "weighted_mean"
