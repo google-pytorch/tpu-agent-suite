@@ -3,7 +3,7 @@
     {
       "name": "backend",
       "path": "compute.backend",
-      "prompt": "Compute backend to use: 'local' (agent runs on the TPU VM), 'gce_tpu_vm' (reach a Cloud TPU VM via gcloud), 'gke_pod' (exec into an already-running TPU pod), or 'gke_job' (dispatch a single-host TPU Job via kubectl)",
+      "prompt": "Compute backend to use: 'local' (agent runs on the TPU VM), 'gce_tpu_vm' (reach a Cloud TPU VM via gcloud), 'gke_pod' (exec into an already-running TPU pod), or 'gke_job' (dispatch a TPU Job via kubectl)",
       "type": "string",
       "choices": [
         "local",
@@ -112,7 +112,7 @@
           "gke_job"
         ]
       },
-      "prompt": "gke_job only: cloud.google.com/gke-tpu-topology node label, e.g. 2x2x1 or 2x2 (single-host only)",
+      "prompt": "gke_job only: cloud.google.com/gke-tpu-topology node label, e.g. 2x2x1, 2x2x2, or 2x4",
       "type": "string"
     },
     {

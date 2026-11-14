@@ -34,7 +34,7 @@
               "gke_pod",
               "gke_job"
             ],
-            "description": "Compute transport to use. 'local' runs on this machine. 'gce_tpu_vm' reaches a Cloud TPU VM via `gcloud ... tpu-vm ssh` (requires tpu_name/zone/project). 'gke_pod' execs into an already-running TPU pod via kubectl; 'gke_job' creates a single-host TPU Job via kubectl."
+            "description": "Compute transport to use. 'local' runs on this machine. 'gce_tpu_vm' reaches a Cloud TPU VM via `gcloud ... tpu-vm ssh` (requires tpu_name/zone/project). 'gke_pod' execs into an already-running TPU pod via kubectl; 'gke_job' creates a TPU Job via kubectl."
           },
           "params": {
             "type": "object",
@@ -74,7 +74,7 @@
               },
               "tpu_topology": {
                 "type": "string",
-                "description": "gke_job backend: value of the cloud.google.com/gke-tpu-topology node label, e.g. 2x2x1 or 2x2. Single-host only; a multi-host slice needs JobSet dispatch."
+                "description": "gke_job backend: value of the cloud.google.com/gke-tpu-topology node label, e.g. 2x2x1, 2x2x2, or 2x4."
               },
               "tpu_chips": {
                 "type": "integer",

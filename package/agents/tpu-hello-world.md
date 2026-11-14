@@ -251,9 +251,8 @@ A `cpu-fallback` run is **not** a pass: the arithmetic was done on the CPU, so
 the script prints no difference (it says the CPU comparison is not
 meaningful) and fails. Say so; do not report a difference for it.
 The usual cause is a pod scheduled without TPU chips in its resource limits,
-not an image that lacks a runtime -- and since the driver always requests
-them, on this path it more often means the topology is multi-host. A single
-pod cannot initialise a multi-host slice: `libtpu` wants every worker's
+not an image that lacks a runtime -- or a single pod attached to a multi-host
+slice without the other hosts running: `libtpu` wants every worker's
 hostname before it will open a device, so it returns nothing and the script
 falls through to the CPU.
 

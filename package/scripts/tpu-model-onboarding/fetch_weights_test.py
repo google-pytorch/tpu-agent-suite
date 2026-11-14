@@ -190,10 +190,14 @@ class FetchTest(unittest.TestCase):
             "config.json": 1,
         })
         hub.snapshot_download.return_value = "/snap"
-        with tempfile.TemporaryDirectory() as cache, uses_hub(hub, cache):
+        with tempfile.TemporaryDirectory() as cache, uses_hub(hub, cache), \
+                mock.patch.object(fw, "_locked", wraps=fw._locked) as locked:
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 self.assertEqual(fw.fetch("org/m", interval=0.01), "/snap")
+            self.assertEqual(sorted(os.listdir(cache)), [".locks"])
+            self.assertTrue(locked.call_args.args[0].endswith(
+                "tpu-agent-suite-models--org--m"))
         kwargs = hub.snapshot_download.call_args.kwargs
         self.assertEqual(sorted(kwargs["allow_patterns"]),
                          ["config.json", "model.safetensors"])

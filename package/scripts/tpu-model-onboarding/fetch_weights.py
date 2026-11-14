@@ -37,7 +37,9 @@ through a download the pod is then evicted for.
 
 Files already in the hub cache (`HF_HUB_CACHE`) are not downloaded again;
 that is the library's own behaviour. On gke_job with `hf_cache_pvc` set, that
-cache is a volume every pod shares, so a model downloads once. Without it,
+cache is a volume every pod shares, so a model downloads once: fetches
+into it at the same time (the pods of a multi-host job) take turns, and
+the later ones find the files there. Without it,
 each pod starts empty and downloads again; this script makes that smaller and
 visible, it does not share it.
 
@@ -837,6 +839,30 @@ def fetch(model_id: str,
 
     repo_cache = os.path.join(constants.HF_HUB_CACHE,
                               "models--" + model_id.replace("/", "--"))
+    # Under the hub's own .locks folder, which cache scans skip.
+    lock = os.path.join(constants.HF_HUB_CACHE, ".locks",
+                        "tpu-agent-suite-" + os.path.basename(repo_cache))
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    # The pods of a multi-host job, and Jobs sharing hf_cache_pvc, run this
+    # at once against one cache: one downloads while the others wait, then
+    # find every file there and return the same path. On a pod's own
+    # /dev/shm the lock is never held by anyone else.
+    with _locked(
+            lock, f"WEIGHTS WAIT {model_id}: another job is downloading "
+            f"it to {constants.HF_HUB_CACHE}; this one goes on when that one "
+            "is done"):
+        return _download_snapshot(model_id, revision, interval, info, sizes,
+                                  sel, repo_cache, started)
+
+
+def _download_snapshot(model_id: str, revision: str | None, interval: float,
+                       info, sizes: dict[str, int], sel: Selection,
+                       repo_cache: str, started: float) -> str:
+    """`fetch`'s download of the selected files, under its lock."""
+    # pylint: disable=g-import-not-at-top
+    import huggingface_hub
+    from huggingface_hub import constants
+
     blobs = os.path.join(repo_cache, "blobs")
     # Progress counts this selection only. The blob store can also hold other
     # revisions and files this run skips, so its size alone overstates it:

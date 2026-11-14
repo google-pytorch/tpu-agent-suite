@@ -438,6 +438,16 @@ If the vLLM engine is requested:
     keeping any the recipe sets; don't lower them. If the image probe's
     `vllm_timeout_envs` reports one as `false`, this vLLM renamed it: say so
     in the report.
+8.  **Multi-host.** On `gke_job` or `gce_tpu_vm`, a slice larger than one node
+    (`inspect` reports `job_hosts`) runs the same `launch_vllm.sh` on every
+    host; `serve_vllm.sh` then has host 0 serve while the others join it
+    through Ray. Size `--tensor-parallel-size` / `--data-parallel-size` to the
+    whole slice (`job_devices`) and change nothing else. Logs, health, the
+    port-forward and the profile files are host 0's. `compute` and the script
+    do all of it: don't write a JobSet or pass `--nnodes` or
+    `--data-parallel-size-local`. The script defaults to Ray, not
+    vLLM-torchtpu's `mp`; set `TPU_MULTIHOST_BACKEND=mp` only to use vLLM's
+    `--nnodes` or multi-host DP `--headless` launch instead.
 
 Example `<inference_work>/launch_vllm.sh` generated from JSON:
 ```bash

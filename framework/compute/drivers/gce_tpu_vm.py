@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 from typing import Any
@@ -113,13 +114,17 @@ class GceTpuVmDriver(shell.RemoteShellDriver):
         cls.add_cli_arg(parser, "--zone", help="GCP zone of compute resource")
         cls.add_cli_arg(parser, "--project", help="GCP project ID")
 
-    def _gcloud_base(self, subcmd: str = "ssh") -> list[str]:
+    def _gcloud_base(self,
+                     subcmd: str = "ssh",
+                     worker: str | None = None) -> list[str]:
         """Build a `gcloud compute tpus tpu-vm` command addressing this VM."""
         cmd = [
             "gcloud", "compute", "tpus", "tpu-vm", subcmd, self.tpu_name,
             f"--zone={self.zone}", f"--project={self.project}"
         ]
         if subcmd == "ssh":
+            if worker is not None:
+                cmd.append(f"--worker={worker}")
             cmd.extend(_SSH_MULTIPLEX_FLAGS)
             # Only ssh and scp take it; `describe` rejects the flag.
             if self.internal_ip:
@@ -128,16 +133,28 @@ class GceTpuVmDriver(shell.RemoteShellDriver):
 
     def _sh(self,
             script: str,
-            timeout: int | None = None) -> subprocess.CompletedProcess:
+            timeout: int | None = None,
+            worker: str | None = "all") -> subprocess.CompletedProcess:
         return subprocess.run(
-            self._gcloud_base("ssh") + [f"--command={script}"],
+            self._gcloud_base("ssh", worker=worker) + [f"--command={script}"],
             capture_output=True,
             text=True,
             timeout=timeout,
         )
 
+    def _sh_leader(self,
+                   script: str,
+                   timeout: int | None = None,
+                   worker: int | None = None) -> subprocess.CompletedProcess:
+        return self._sh(script,
+                        timeout=timeout,
+                        worker=str(worker) if worker is not None else None)
+
+    def _env_preamble(self) -> str:
+        return f'eval "$({shell.probe_command("python3", "--env")})"'
+
     def _copy_in(self, src: Path, dest: str) -> subprocess.CompletedProcess:
-        return self._scp(str(src), f"{self.tpu_name}:{dest}")
+        return self._scp(str(src), f"{self.tpu_name}:{dest}", worker="all")
 
     def _copy_out(self, src: str, dest: Path) -> subprocess.CompletedProcess:
         return self._scp(f"{self.tpu_name}:{src}/*",
@@ -153,20 +170,38 @@ class GceTpuVmDriver(shell.RemoteShellDriver):
              source: str,
              destination: str,
              recurse: bool = False,
-             timeout: int = 120) -> subprocess.CompletedProcess:
+             timeout: int = 120,
+             worker: str | None = None) -> subprocess.CompletedProcess:
         cmd = ["gcloud", "compute", "tpus", "tpu-vm", "scp"]
         if recurse:
             cmd.append("--recurse")
+        if worker is not None:
+            cmd.append(f"--worker={worker}")
         cmd.extend([
             source, destination, f"--zone={self.zone}",
             f"--project={self.project}"
         ])
         if self.internal_ip:
             cmd.append("--internal-ip")
-        return subprocess.run(cmd,
-                              capture_output=True,
-                              text=True,
-                              timeout=timeout)
+        res = subprocess.run(cmd,
+                             capture_output=True,
+                             text=True,
+                             timeout=timeout)
+        if (res.returncode != 0 and "SSH Key is not present in the SSH agent"
+                in (res.stderr or "") and os.environ.get("SSH_AUTH_SOCK")):
+            # `gcloud compute tpus tpu-vm scp --worker=all` runs VerifyKeyInAgent
+            # when >1 worker is targeted and aborts if an active ssh-agent (e.g.
+            # corp agent) does not hold ~/.ssh/google_compute_engine, even when
+            # that key file is unencrypted on disk.
+            res = subprocess.run(cmd,
+                                 capture_output=True,
+                                 text=True,
+                                 timeout=timeout,
+                                 env={
+                                     **os.environ,
+                                     "SSH_AUTH_SOCK": "",
+                                 })
+        return res
 
     def _port_forward_command(
         self,

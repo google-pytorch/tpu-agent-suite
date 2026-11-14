@@ -306,6 +306,32 @@ class TestHostProbe(unittest.TestCase):
         self.assertNotIn("hbm_gb_per_device", details)
         self.assertIn("tpu9z", details["hbm_gb_note"])
 
+    def test_multihost_slice_scales_chips_and_env(self):
+        """Verify multi-host TPU VM metadata scales slice chips and builds TPU_* env."""
+        meta = {
+            "ACCELERATOR_TYPE": "tpu7x-16",
+            "TOPOLOGY": "2x2x2",
+            "CHIPS_PER_HOST_BOUNDS": "2,2,1",
+            "agent-worker-number": "1",
+            "worker-network-endpoints": "n:0:10.0.0.1,n:1:10.0.0.2",
+        }
+        with self._probed(vfio=[f"/dev/vfio/{i}" for i in range(8)],
+                          meta=meta):
+            profile = self.driver.inspect()
+        d = profile.details
+        self.assertEqual(
+            (profile.chips, profile.available_chips, d["job_hosts"],
+             d["chips_per_host"], d["job_devices"]), (8, 8, 2, 4, 16))
+        self.assertEqual(
+            probe.multihost_env(meta), {
+                "TPU_NUM_HOSTS": "2",
+                "TPU_WORKER_ID": "1",
+                "TPU_NODE_ID": "1",
+                "TPU_CHIPS_PER_HOST": "4",
+                "TPU_WORKER_HOSTNAMES": "10.0.0.1,10.0.0.2",
+                "TPU_HEAD_HOST": "10.0.0.1",
+            })
+
     def test_list_devices_filters_unbacked_accel_nodes(self):
         """Verify static unbacked /dev/accel* nodes do not shadow /dev/vfio/[0-9]*."""
 
@@ -827,6 +853,47 @@ class TestRemoteShellDrivers(ScriptMixin, unittest.TestCase):
         pinned = GkePodDriver.from_params({"pod": "p-1", "kube_context": "c"})
         self.assertEqual(pinned._kubectl_base(),
                          ["kubectl", "--context", "c", "-n", "default"])
+
+    @patch("subprocess.run")
+    def test_gce_tpu_vm_multihost(self, mock_run):
+        """Verify multi-host worker targeting, status aggregation, and scp fallback."""
+        driver = GceTpuVmDriver(tpu_name="t", zone="z", project="p")
+        mock_run.return_value = completed()
+        for call, want_all in (
+            (lambda: driver._sh("echo hi"), True),
+            (lambda: driver._sh_leader("echo leader"), False),
+            (lambda: driver._copy_in(Path("/a"), "/b"), True),
+            (lambda: driver._copy_out("/a", Path("/b")), False),
+        ):
+            mock_run.reset_mock()
+            call()
+            self.assertEqual("--worker=all" in mock_run.call_args.args[0],
+                             want_all)
+        self.assertIn("--env", driver._env_preamble())
+        for raw, expected in (
+            ("COMPLETED 0\nCOMPLETED 0\n", ("COMPLETED", 0)),
+            ("COMPLETED 0\nRUNNING\n", ("RUNNING", None)),
+            ("RUNNING\nFAILED 2\n", ("FAILED", 2)),
+        ):
+            self.assertEqual(shell._parse_status_line(raw), expected)
+        job_id = driver.submit(self._script("echo hi\n", suffix=".sh"))
+        mock_run.return_value = completed("@1 FAILED 2\n@0 COMPLETED 0\n")
+        st = driver.get_status(job_id)
+        self.assertEqual((st.status, st.exit_code, st.error),
+                         ("FAILED", 2, "worker 1 exited 2"))
+        mock_run.return_value = completed("crash on worker 1\n")
+        self.assertEqual(driver.fetch_logs(job_id),
+                         "=== worker 1 (exit 2) ===\ncrash on worker 1\n")
+        self.assertIn("--worker=1", mock_run.call_args.args[0])
+        mock_run.side_effect = [
+            completed(returncode=1,
+                      stderr="SSH Key is not present in the SSH agent."),
+            completed(returncode=0),
+        ]
+        with patch.dict(os.environ, {"SSH_AUTH_SOCK": "/tmp/agent.sock"}):
+            self.assertEqual(driver._copy_in(Path("/a"), "/b").returncode, 0)
+        self.assertEqual(
+            mock_run.call_args_list[-1].kwargs["env"]["SSH_AUTH_SOCK"], "")
 
 
 def _free_port() -> int:

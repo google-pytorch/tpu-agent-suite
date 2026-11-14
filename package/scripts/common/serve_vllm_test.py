@@ -11,14 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for serve_vllm.sh's defaults and its patch list.
+"""Tests for serve_vllm.sh's vLLM timeout and LIBTPU_INIT_ARGS defaults,
+its patch list, and its multi-host leader/worker split.
 
-The script runs for real, against a stub `python3` and `vllm` beside it: the
-stub vLLM writes the arguments and environment it was started with to a file.
+The script runs for real, against a stub `python3`, `vllm` and `ray` beside
+it: the stub vLLM writes the arguments and environment it was started with
+to a file, and the stub Ray each call it gets.
 """
 
 import json
 import os
+import pathlib
 import shutil
 import socket
 import subprocess
@@ -47,7 +50,7 @@ esac
 STUB_VLLM = """#!/bin/bash
 {
   for arg in "$@"; do printf 'ARG %s\\n' "$arg"; done
-  env | grep -E '^(VLLM_(ENGINE|EXECUTE)|LIBTPU_INIT_ARGS=|USE_PHASED_PROFILER=|PYTHON_TRACER_LEVEL=)' | sed 's/^/ENV /'
+  env | grep -E '^(VLLM_(ENGINE|EXECUTE)|LIBTPU_INIT_ARGS=|RAY_ADDRESS=|USE_PHASED_PROFILER=|PYTHON_TRACER_LEVEL=)' | sed 's/^/ENV /'
 } > "$STUB_OUT"
 """
 # Logs each patch it is given, and fails the one named in STUB_BAD_PATCH as
@@ -56,6 +59,15 @@ STUB_APPLIER = """#!/bin/bash
 echo "$1" >> "$STUB_APPLIED"
 [ "$1" = "$STUB_BAD_PATCH" ] && exit 4
 exit 0
+"""
+# Records each call, answers `status` with RAY_STATUS_TPUS chips, and in
+# `start --block` exits with RAY_BLOCK_EXIT (default 0).
+STUB_RAY = """#!/bin/bash
+echo "RAY $*" >> "$STUB_RAY_OUT"
+case "$*" in
+  status*) echo " 0.0/${RAY_STATUS_TPUS:-8}.0 TPU" ;;
+  *--block*) exit "${RAY_BLOCK_EXIT:-0}" ;;
+esac
 """
 
 
@@ -72,29 +84,36 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         bin_dir = os.path.join(self.dir, "bin")
         os.makedirs(bin_dir)
-        for name, text in (("python3", STUB_PYTHON), ("vllm", STUB_VLLM)):
+        for name, text in (("python3", STUB_PYTHON), ("vllm", STUB_VLLM),
+                           ("ray", STUB_RAY)):
             path = os.path.join(bin_dir, name)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             os.chmod(path, 0o755)
         self.python = os.path.join(bin_dir, "python3")
         self.out = os.path.join(self.dir, "vllm.out")
+        self.ray_out = os.path.join(self.dir, "ray.out")
 
-    def _serve(self, *args, has_dist_flag=True, script=SCRIPT, rc=0, **env):
-        """Run the script; return (vllm args, vllm env we set, stderr)."""
+    def _run(self, *args, has_dist_flag=True, script=SCRIPT, **env):
+        """Run the script; return (returncode, vllm args, vllm env, ray calls, stderr)."""
+        for p in (self.out, self.ray_out):
+            if os.path.exists(p):
+                os.remove(p)
         full_env = {
             k: v
-            for k, v in os.environ.items() if k not in TIMEOUT_ENVS +
-            LLO_ENVS + PROFILER_ENVS and k != "VLLM_DISTRIBUTED_TIMEOUT_S"
+            for k, v in os.environ.items()
+            if k not in TIMEOUT_ENVS + LLO_ENVS + PROFILER_ENVS and k !=
+            "VLLM_DISTRIBUTED_TIMEOUT_S" and not k.startswith(("TPU_", "RAY_"))
         }
         full_env.update({
             "TPU_AGENT_SUITE_PYTHON": self.python,
             "VLLM_PROFILE_DIR": os.path.join(self.dir, "profile"),
             "VLLM_PROFILE_FILES_PORT": str(_free_port()),
             "STUB_OUT": self.out,
+            "STUB_RAY_OUT": self.ray_out,
             "STUB_HAS_DIST_FLAG": "1" if has_dist_flag else "0",
+            **env,
         })
-        full_env.update(env)
         proc = subprocess.run(["bash", script, "/model", *args],
                               cwd=self.dir,
                               env=full_env,
@@ -102,15 +121,27 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
                               text=True,
                               timeout=60,
                               check=False)
-        self.assertEqual(proc.returncode, rc, proc.stderr)
-        if rc:
-            return None, None, proc.stderr
-        with open(self.out, encoding="utf-8") as f:
-            lines = f.read().splitlines()
+        lines = (pathlib.Path(self.out).read_text(
+            encoding="utf-8").splitlines() if os.path.exists(self.out) else [])
+        ray_lines = (pathlib.Path(self.ray_out).read_text(
+            encoding="utf-8").splitlines()
+                     if os.path.exists(self.ray_out) else [])
         argv = [line[4:] for line in lines if line.startswith("ARG ")]
         envs = dict(line[4:].split("=", 1) for line in lines
                     if line.startswith("ENV "))
-        return argv, envs, proc.stderr
+        return proc.returncode, argv, envs, [line[4:] for line in ray_lines
+                                             ], proc.stderr
+
+    def _serve(self, *args, has_dist_flag=True, script=SCRIPT, rc=0, **env):
+        """Run the script; return (vllm args, vllm env we set, stderr)."""
+        code, argv, envs, _, stderr = self._run(*args,
+                                                has_dist_flag=has_dist_flag,
+                                                script=script,
+                                                **env)
+        self.assertEqual(code, rc, stderr)
+        if rc:
+            return None, None, stderr
+        return argv, envs, stderr
 
     def test_defaults_are_tpu_sized(self):
         argv, envs, stderr = self._serve("--port", "8000")
@@ -249,6 +280,66 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
         self.assertEqual(self._applied(), ["01-rpa.patch", "02-gate.py"])
         self.assertIn("serve_vllm: patch does not apply: 02-gate.py", stderr)
         self.assertFalse(os.path.exists(self.out))
+
+    def test_multihost_leader_and_worker(self):
+
+        def host(worker: int, *extra: str, **env):
+            return self._run("--port",
+                             "8000",
+                             *extra,
+                             TPU_NUM_HOSTS="2",
+                             TPU_CHIPS_PER_HOST="4",
+                             TPU_WORKER_ID=str(worker),
+                             TPU_HEAD_HOST="127.0.0.1",
+                             TPU_MULTIHOST_JOIN_TIMEOUT_S="0",
+                             **env)[:4]
+
+        code, argv, envs, ray = host(0)
+        self.assertEqual(
+            (code, argv[:2], envs["RAY_ADDRESS"], ray[0], ray[-1]),
+            (0, ["serve", "/model"], "127.0.0.1:6379",
+             "start --head --port=6379", "stop --force"))
+        self.assertEqual(host(0, RAY_STATUS_TPUS="4")[:2], (1, []))
+
+        with socket.socket() as head:
+            head.bind(("127.0.0.1", 0))
+            head.listen()
+            port = head.getsockname()[1]
+            code, argv, _, ray = host(1, TPU_MULTIHOST_RAY_PORT=str(port))
+            crashed = host(1,
+                           TPU_MULTIHOST_RAY_PORT=str(port),
+                           RAY_BLOCK_EXIT="1")[0]
+        self.assertEqual(
+            (code, crashed, argv, ray),
+            (0, 1, [], [f"start --address=127.0.0.1:{port} --block"]))
+        self.assertEqual(
+            host(0, "--data-parallel-size", "3",
+                 TPU_MULTIHOST_BACKEND="mp")[0], 2)
+
+        for worker in (0, 1):
+            code, argv, _, ray = host(worker, TPU_MULTIHOST_BACKEND="mp")
+            self.assertEqual((code, ray, "--headless" in argv),
+                             (0, [], worker == 1))
+            i = argv.index("--nnodes")
+            self.assertEqual(argv[i:i + 4],
+                             ["--nnodes", "2", "--node-rank",
+                              str(worker)])
+            code, argv, _, ray = host(worker,
+                                      "--data-parallel-size",
+                                      "8",
+                                      "--api-server-count",
+                                      "4",
+                                      TPU_MULTIHOST_BACKEND="mp")
+            self.assertEqual(
+                (code, "--nnodes" in argv, "--headless"
+                 in argv, "--data-parallel-start-rank" in argv, argv[-3:]
+                 == ["--api-server-count", "0", "--headless"]),
+                (0, False, worker == 1, worker == 1, worker == 1))
+            i = argv.index("--data-parallel-size-local")
+            self.assertEqual(argv[i:i + 4], [
+                "--data-parallel-size-local", "4", "--data-parallel-address",
+                "127.0.0.1"
+            ])
 
 
 if __name__ == "__main__":

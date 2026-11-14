@@ -19,7 +19,7 @@ The framework ships with 4 built-in compute drivers:
 | Backend | Description | Required Parameters (`environment.json` / CLI) | Optional Parameters |
 | :--- | :--- | :--- | :--- |
 | `local` | Direct execution on the local host machine. | None | `python_interpreter` (`--interpreter`, default `sys.executable`) |
-| `gce_tpu_vm` | Remote Cloud TPU VM via GCE API / SSH. | `tpu_name` (`--tpu-name`), `zone` (`--zone`), `project` (`--project`) | `python_interpreter` (`--interpreter`, default `python3`) |
+| `gce_tpu_vm` | Remote Cloud TPU VM via GCE API / SSH (see [Multi-host execution](#multi-host-execution-on-gce_tpu_vm)). | `tpu_name` (`--tpu-name`), `zone` (`--zone`), `project` (`--project`) | `python_interpreter` (`--interpreter`, default `python3`) |
 | `gke_pod` | Exec into an existing Kubernetes pod on GKE via `kubectl exec`. | `pod` (`--pod`) | `namespace` (`--namespace`, default `"default"`), `container` (`--container`), `kube_context` (`--kube-context`), `python_interpreter` (`--interpreter`, default `python3`) |
 | `gke_job` | Dispatch a TPU Job onto GKE via `kubectl`, optionally scheduled via Kueue (see [Multi-host execution](#multi-host-execution-on-gke_job)). | `image` (`--image`), `tpu_accelerator` (`--tpu-accelerator`), `tpu_topology` (`--tpu-topology`) | Cluster, Kueue, staging, cache, and placement settings — see [`gke_job` optional parameters](#gke_job-optional-parameters) |
 
@@ -29,6 +29,12 @@ The framework ships with 4 built-in compute drivers:
 - **Worker environment**: Each pod has `TPU_NUM_HOSTS`, `TPU_WORKER_ID` / `TPU_NODE_ID` (`0` is the leader), `TPU_CHIPS_PER_HOST`, `TPU_HEAD_HOST`, and `TPU_WORKER_HOSTNAMES` set, and `MEGASCALE_*` blanked.
 - **Chips per node**: On `v5e` and `v6e`, chips per pod come from the cluster's nodes automatically when `tpu_chips` is unset, since a `2x4` topology can be either one 8-chip node or two 4-chip nodes.
 - **Status, logs & outputs**: `status` reports `RUNNING` once every host is running and `FAILED` (naming the host) when any host fails. `logs`, `wait --until log:`, and `port-forward` read from the leader (host `0`), and only the leader returns `--output` files.
+
+### Multi-host execution on `gce_tpu_vm`
+
+- **All workers**: On a multi-host TPU VM slice, `run`, `submit`, `status`, and `cancel` address every worker (`--worker=all`).
+- **Worker environment**: Each worker has `TPU_NUM_HOSTS`, `TPU_WORKER_ID` / `TPU_NODE_ID` (`0` is the leader), `TPU_CHIPS_PER_HOST`, `TPU_HEAD_HOST`, and `TPU_WORKER_HOSTNAMES` set from the TPU VM's GCE metadata.
+- **Leader-only reads**: `inspect`, `logs`, `artifacts`, and `port-forward` read worker `0` (the leader).
 
 ### `gke_job` optional parameters
 

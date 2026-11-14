@@ -46,7 +46,14 @@
 #              VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS (default 1800),
 #              VLLM_DISTRIBUTED_TIMEOUT_S (default 1800, passed as
 #                --distributed-timeout-seconds when this vLLM has the flag);
-#              a timeout the caller sets, or passes as a flag, is kept
+#              a timeout the caller sets, or passes as a flag, is kept;
+#              multi-host, set by compute: TPU_NUM_HOSTS,
+#                TPU_WORKER_ID (0 serves), TPU_HEAD_HOST, TPU_CHIPS_PER_HOST;
+#              TPU_MULTIHOST_BACKEND (default ray; or mp for vLLM's
+#                --nnodes/--headless launch),
+#              TPU_MULTIHOST_JOIN_TIMEOUT_S (default 900; how long a host
+#                waits for the others before failing),
+#              TPU_MULTIHOST_RAY_PORT (default 6379)
 # Patches: when the working directory holds vllm_patches.txt, each line names
 # a patch file there, applied in order with apply_vllm_patch.sh (beside this
 # script) before vLLM starts; one that does not apply (exit 4) fails the server.
@@ -64,6 +71,9 @@ PY="${TPU_AGENT_SUITE_PYTHON:-python3}"
 PY="$(command -v "${PY/#\~/$HOME}" || true)"
 VLLM="$(dirname "$PY")/vllm"
 [ -x "$VLLM" ] || VLLM="$(command -v vllm)"
+# Only a multi-host server needs Ray, and only then must it be there.
+RAY="$(dirname "$PY")/ray"
+[ -x "$RAY" ] || RAY="$(command -v ray || echo ray)"
 
 mkdir -p "$PROFILE_DIR"
 export VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR"
@@ -175,6 +185,121 @@ sys.exit("distributed_timeout_seconds" not in EngineArgs.__dataclass_fields__)' 
   ARGS+=(--distributed-timeout-seconds "${VLLM_DISTRIBUTED_TIMEOUT_S:-1800}")
 fi
 
+# Multi-host: one vLLM server across the hosts of a slice. Every host ran
+# everything above, so env, patches, compile-cache folders and the weights
+# path are the same on each; only here do they part. Host 0 (the leader)
+# serves; the others lend it their chips. TPU_* come from compute.
+NUM_HOSTS="${TPU_NUM_HOSTS:-1}"
+RAY_STARTED=""
+if [ "$NUM_HOSTS" -gt 1 ]; then
+  WORKER_ID="${TPU_WORKER_ID:-0}"
+  HEAD="${TPU_HEAD_HOST:?serve_vllm: TPU_NUM_HOSTS=$NUM_HOSTS but no TPU_HEAD_HOST}"
+  export TPU_MULTIHOST_BACKEND="${TPU_MULTIHOST_BACKEND:-ray}"
+  RAY_PORT="${TPU_MULTIHOST_RAY_PORT:-6379}"
+  echo "serve_vllm: host $WORKER_ID of $NUM_HOSTS," \
+    "backend $TPU_MULTIHOST_BACKEND, leader $HEAD" >&2
+
+  # Retries the command after $1 (what it waits for) until it succeeds, or
+  # fails this host after TPU_MULTIHOST_JOIN_TIMEOUT_S: a host that never
+  # comes would otherwise hold the others' chips until the job's timeout.
+  wait_for() {
+    local what="$1" deadline=$((SECONDS + ${TPU_MULTIHOST_JOIN_TIMEOUT_S:-900}))
+    shift
+    until "$@"; do
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "serve_vllm: gave up waiting for $what" >&2
+        return 1
+      fi
+      sleep 2
+    done
+  }
+
+  case "$TPU_MULTIHOST_BACKEND" in
+    ray)
+      if [ "$WORKER_ID" != 0 ]; then
+        # shellcheck disable=SC2317  # called through wait_for
+        head_up() { timeout 2 bash -c ": </dev/tcp/$HEAD/$RAY_PORT" 2>/dev/null; }
+        wait_for "the Ray head at $HEAD:$RAY_PORT" head_up
+        "$RAY" start --address="$HEAD:$RAY_PORT" --block &
+        RAY_PID=$!
+        STOPPED=0
+        trap 'STOPPED=1; kill "$RAY_PID" 2>/dev/null' TERM INT
+        rc=0
+        wait "$RAY_PID" || rc=$?
+        while kill -0 "$RAY_PID" 2>/dev/null; do
+          rc=0
+          wait "$RAY_PID" || rc=$?
+        done
+        # Ray exits non-zero when the head goes, which is how a finished
+        # leader ends too; fail only if the worker died while the head stayed up.
+        if [ "$rc" -ne 0 ] && [ "$STOPPED" = 0 ] && head_up; then
+          exit "$rc"
+        fi
+        exit 0
+      fi
+      "$RAY" start --head --port="$RAY_PORT"
+      RAY_STARTED=1
+      export RAY_ADDRESS="127.0.0.1:$RAY_PORT"
+      # Ray counts /dev/vfio/[0-9]* per host (8 on 4-chip dual-core tpu7x).
+      TPUS_PER_HOST="${TPU_CHIPS_PER_HOST:-4}"
+      vfio=(/dev/vfio/[0-9]*)
+      [ -e "${vfio[0]}" ] && [ "${#vfio[@]}" -gt "$TPUS_PER_HOST" ] && TPUS_PER_HOST="${#vfio[@]}"
+      TOTAL_CHIPS=$((NUM_HOSTS * TPUS_PER_HOST))
+      # shellcheck disable=SC2317  # called through wait_for
+      ray_complete() {
+        "$RAY" status 2>/dev/null | grep -qE "/${TOTAL_CHIPS}\.0 TPU"
+      }
+      if ! wait_for "$TOTAL_CHIPS TPU chips in Ray" ray_complete; then
+        "$RAY" status >&2 || true
+        "$RAY" stop --force >/dev/null 2>&1 || true
+        exit 1
+      fi
+      echo "serve_vllm: all $NUM_HOSTS hosts joined ($TOTAL_CHIPS chips)" >&2
+      ;;
+    mp)
+      # vLLM's own multi-node launch: `vllm serve` on every host, headless
+      # on all but the leader, which they rendezvous at -- by DP rank when
+      # data-parallel, by --nnodes when tensor/pipeline-parallel.
+      DP=1
+      HAS_ASC=""
+      prev=""
+      for arg in "${ARGS[@]}"; do
+        case "$prev" in
+          --data-parallel-size | -dp) DP="$arg" ;;
+        esac
+        case "$arg" in
+          --data-parallel-size=* | -dp=*) DP="${arg#*=}" ;;
+          --api-server-count | --api-server-count=* | -asc | -asc=*) HAS_ASC=1 ;;
+        esac
+        prev="$arg"
+      done
+      if [ "$DP" -gt 1 ]; then
+        if [ $((DP % NUM_HOSTS)) -ne 0 ]; then
+          echo "serve_vllm: --data-parallel-size ($DP) must be a multiple of TPU_NUM_HOSTS ($NUM_HOSTS)" >&2
+          exit 2
+        fi
+        DP_LOCAL=$((DP / NUM_HOSTS))
+        ARGS+=(--data-parallel-size-local "$DP_LOCAL"
+          --data-parallel-address "$HEAD"
+          --data-parallel-rpc-port "${TPU_MULTIHOST_DP_PORT:-13345}")
+        [ "$WORKER_ID" = 0 ] || ARGS+=(
+          --data-parallel-start-rank $((WORKER_ID * DP_LOCAL)))
+      else
+        ARGS+=(--nnodes "$NUM_HOSTS" --node-rank "$WORKER_ID"
+          --master-addr "$HEAD" --master-port 29500)
+      fi
+      if [ "$WORKER_ID" != 0 ]; then
+        [ -z "$HAS_ASC" ] || ARGS+=(--api-server-count 0)
+        exec "$VLLM" serve "${ARGS[@]}" --headless
+      fi
+      ;;
+    *)
+      echo "serve_vllm: TPU_MULTIHOST_BACKEND must be ray or mp" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 FILES_LOG="${PROFILE_DIR%/}.files.log"
 # No --bind: dual-stack, so the port-forward reaches it as it reaches vLLM.
 "$PY" -m http.server "$FILES_PORT" --directory "$PROFILE_DIR" \
@@ -202,4 +327,6 @@ while kill -0 "$VLLM_PID" 2>/dev/null; do
   STATUS=$?
 done
 kill "$FILES_PID" 2>/dev/null
+# Stopping the head ends the other hosts' Ray workers, and with them the job.
+[ -z "$RAY_STARTED" ] || "$RAY" stop --force >/dev/null 2>&1
 exit "$STATUS"

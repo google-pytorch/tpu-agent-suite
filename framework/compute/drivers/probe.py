@@ -19,6 +19,7 @@ import glob
 import json
 import math
 import os
+import shlex
 import sys
 import urllib.request
 from typing import Any
@@ -109,6 +110,41 @@ def product(text: str, sep: str = "x") -> int:
         return max(0, math.prod(int(d) for d in text.lower().split(sep)))
     except (AttributeError, ValueError):
         return 0
+
+
+def multihost_env(meta: dict[str, str] | None = None) -> dict[str, str]:
+    """Multi-host `TPU_*` environment implied by GCE metadata, or `{}`."""
+    if meta is None:
+        meta = read_metadata()
+    raw = (meta.get("worker-network-endpoints")
+           or meta.get("WORKER_NETWORK_ENDPOINTS")
+           or meta.get("TPU_WORKER_HOSTNAMES") or "")
+    hosts = [e.split(":")[-1].strip() for e in raw.split(",") if e.strip()]
+    if len(hosts) <= 1:
+        return {}
+    worker = meta.get("agent-worker-number") or meta.get("WORKER_ID") or "0"
+    env = {
+        "TPU_NUM_HOSTS": str(len(hosts)),
+        "TPU_WORKER_ID": worker,
+        "TPU_NODE_ID": worker,
+        "TPU_WORKER_HOSTNAMES": ",".join(hosts),
+        "TPU_HEAD_HOST": hosts[0],
+    }
+    chips = product(meta.get("CHIPS_PER_HOST_BOUNDS", ""), ",")
+    if chips > 0:
+        env["TPU_CHIPS_PER_HOST"] = str(chips)
+    return env
+
+
+def _slice_hosts(chips: int, topology: str, meta: dict[str, str]) -> int:
+    """Hosts in the slice when `meta` describes a multi-host TPU slice."""
+    if chips <= 0:
+        return 1
+    env = multihost_env(meta)
+    if env:
+        return int(env["TPU_NUM_HOSTS"])
+    return max(1, product(meta.get("HOST_BOUNDS", ""), ","),
+               product(topology) // chips)
 
 
 def read_metadata() -> dict[str, str]:
@@ -277,6 +313,14 @@ def probe_host() -> dict[str, Any]:
         "pci_functions": pci_count,
         "devices_per_chip": per_chip,
     }
+    hosts = _slice_hosts(chips, topology, meta)
+    if hosts > 1:
+        chips_per_host = chips
+        chips = chips_per_host * hosts
+        available = available * hosts
+        details["job_chips"] = chips
+        details["job_hosts"] = hosts
+        details["chips_per_host"] = chips_per_host
     # Tensor parallelism is sized to devices, not chips, so report the device
     # count and per-device HBM under the same keys gke_job uses. An unknown
     # generation falls back to hbm_gb 0 and one device per chip; say so
@@ -302,4 +346,8 @@ def probe_host() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    print(json.dumps(probe_host()))
+    if "--env" in sys.argv[1:]:
+        for key, val in multihost_env().items():
+            print(f'export {key}="${{{key}:-{shlex.quote(val)}}}"')
+    else:
+        print(json.dumps(probe_host()))

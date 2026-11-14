@@ -49,10 +49,11 @@ _PROBE_SOURCE = (
 _PROBE_B64 = base64.b64encode(_PROBE_SOURCE.encode("utf-8")).decode("ascii")
 
 
-def probe_command(python_interpreter: str = "python3") -> str:
+def probe_command(python_interpreter: str = "python3", *args: str) -> str:
     """Build the shell command that runs the host probe on the target."""
+    tail = "".join(f" {shlex.quote(a)}" for a in args)
     return (f"{python_interpreter} -c \"import base64;"
-            f"exec(base64.b64decode('{_PROBE_B64}').decode('utf-8'))\"")
+            f"exec(base64.b64decode('{_PROBE_B64}').decode('utf-8'))\"{tail}")
 
 
 @contextlib.contextmanager
@@ -125,7 +126,10 @@ _LEADING_ASSIGNMENTS = re.compile(r"((?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)(.*)",
                                   re.DOTALL)
 
 
-def run_inner_script(command: str, pidfile: str, cd_dir: str | None) -> str:
+def run_inner_script(command: str,
+                     pidfile: str,
+                     cd_dir: str | None,
+                     preamble: str = "") -> str:
     """The script the target actually executes.
 
     It records its own pid before `exec`ing the workload, so the pid in the
@@ -137,6 +141,8 @@ def run_inner_script(command: str, pidfile: str, cd_dir: str | None) -> str:
     lines = [f"echo $$ > {shlex.quote(pidfile)}"]
     if cd_dir:
         lines.append(f"cd {shlex.quote(cd_dir)} || exit 1")
+    if preamble:
+        lines.append(preamble.rstrip("\n"))
     lines.append(f"{assignments}exec {workload}")
     return "\n".join(lines) + "\n"
 
@@ -185,6 +191,18 @@ class RemoteShellDriver(base.ComputeDriver):
         """
         raise NotImplementedError
 
+    def _sh_leader(self,
+                   script: str,
+                   timeout: int | None = None,
+                   worker: int | None = None) -> subprocess.CompletedProcess:
+        """Run a shell script on the leader host (or `worker` on multi-host)."""
+        del worker
+        return self._sh(script, timeout=timeout)
+
+    def _env_preamble(self) -> str:
+        """Shell lines run on each host before launching a workload."""
+        return ""
+
     def _copy_in(self, src: Path, dest: str) -> subprocess.CompletedProcess:
         """Copy a local file to an absolute path on the target."""
         raise NotImplementedError
@@ -202,7 +220,7 @@ class RemoteShellDriver(base.ComputeDriver):
         """Run the shared probe on the target and parse its profile."""
         interpreter = self.python_interpreter or "python3"
         try:
-            proc = self._sh(probe_command(interpreter), timeout=timeout)
+            proc = self._sh_leader(probe_command(interpreter), timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - reported in the profile
             return _unreachable_profile(f"error: {exc}", {"error": str(exc)})
 
@@ -302,7 +320,8 @@ class RemoteShellDriver(base.ComputeDriver):
         pidfile = f"{run_dir}.pid"
         inner_path = f"{run_dir}.launch.sh"
         inner = run_inner_script(command, pidfile,
-                                 run_dir if staged_run else None)
+                                 run_dir if staged_run else None,
+                                 self._env_preamble())
         inner_b64 = base64.b64encode(inner.encode("utf-8")).decode("ascii")
         lock_wait = _lock_wait_seconds(timeout)
         use_lock = not os.environ.get("TPU_AGENT_SUITE_COMPUTE_NO_RUN_LOCK")
@@ -437,8 +456,12 @@ class RemoteShellDriver(base.ComputeDriver):
         quoted_args = " ".join(shlex.quote(a) for a in (args or []))
         quoted_dir = shlex.quote(remote_dir)
         quoted_recipe = shlex.quote(recipe_name)
-        inner = (f"{runner} {quoted_recipe} {quoted_args} > output.log 2>&1; "
-                 f"echo $? > exit_code.txt")
+        preamble = self._env_preamble()
+        prefix = (f"{preamble.rstrip()}; "
+                  f"echo \"${{TPU_WORKER_ID:-0}}\" > worker_id.txt; "
+                  if preamble.strip() else "")
+        inner = (f"{prefix}{runner} {quoted_recipe} {quoted_args} "
+                 f"> output.log 2>&1; echo $? > exit_code.txt")
         launch = (f"cd {quoted_dir} && "
                   f"( nohup setsid sh -c {shlex.quote(inner)} "
                   f"< /dev/null > /dev/null 2>&1 & echo $! > pid.txt; "
@@ -454,15 +477,18 @@ class RemoteShellDriver(base.ComputeDriver):
         record = jobs.JobRecord.load(job_id)
         remote_dir = self._remote_dir(job_id)
         quoted = shlex.quote(remote_dir)
-        script = (f"if [ -f {quoted}/pid.txt ]; then "
-                  f"{_live_pid(quoted)}"
-                  f"if [ -n \"$LIVE\" ]; then echo RUNNING; "
-                  f"elif [ -f {quoted}/exit_code.txt ]; then "
-                  f"CODE=$(cat {quoted}/exit_code.txt); "
-                  f"if [ \"$CODE\" = \"0\" ]; then echo \"COMPLETED 0\"; "
-                  f"else echo \"FAILED $CODE\"; fi; "
-                  f"else echo \"FAILED 1\"; fi; "
-                  f"else echo UNKNOWN; fi")
+        script = (
+            f"W=$(cat {quoted}/worker_id.txt 2>/dev/null || true); "
+            f"P=${{W:+@$W }}; "
+            f"if [ -f {quoted}/pid.txt ]; then "
+            f"{_live_pid(quoted)}"
+            f"if [ -n \"$LIVE\" ]; then echo \"${{P}}RUNNING\"; "
+            f"elif [ -f {quoted}/exit_code.txt ]; then "
+            f"CODE=$(cat {quoted}/exit_code.txt); "
+            f"if [ \"$CODE\" = \"0\" ]; then echo \"${{P}}COMPLETED 0\"; "
+            f"else echo \"${{P}}FAILED $CODE\"; fi; "
+            f"else echo \"${{P}}FAILED 1\"; fi; "
+            f"else echo \"${{P}}UNKNOWN\"; fi")
         try:
             proc = self._sh(script, timeout=30)
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller
@@ -470,7 +496,8 @@ class RemoteShellDriver(base.ComputeDriver):
                                                     status="UNKNOWN",
                                                     error=str(exc))
 
-        status, exit_code = _parse_status_line((proc.stdout or "").strip())
+        status, exit_code, failed_worker = _parse_status_lines((proc.stdout
+                                                                or "").strip())
         if record and record.status == "CANCELLED":
             # The remote process was killed, so the probe now reports FAILED.
             # Cancellation is the truer account of why it stopped, so keep it.
@@ -482,6 +509,8 @@ class RemoteShellDriver(base.ComputeDriver):
                 end_time=record.end_time,
             )
         if record and status != "UNKNOWN":
+            if failed_worker:
+                record.extra["failed_worker"] = failed_worker
             record.mark(status, exit_code)
         return base.AsynchronousExecutionResult(
             job_id=job_id,
@@ -489,15 +518,24 @@ class RemoteShellDriver(base.ComputeDriver):
             exit_code=exit_code,
             start_time=record.start_time if record else None,
             end_time=record.end_time if record else None,
+            error=f"worker {failed_worker} exited {exit_code}"
+            if failed_worker else None,
         )
 
     def fetch_logs(self, job_id: str) -> str:
-        """Read the job's log file off the target."""
+        """Read the job's log file off the target (or the first failed worker)."""
+        record = jobs.JobRecord.load(job_id)
+        worker = record.extra.get("failed_worker") if record else None
         remote_dir = self._remote_dir(job_id)
-        proc = self._sh(
+        proc = self._sh_leader(
             f"cat {shlex.quote(remote_dir)}/output.log 2>/dev/null",
-            timeout=60)
-        return proc.stdout or ""
+            timeout=60,
+            worker=worker,
+        )
+        out = proc.stdout or ""
+        if worker:
+            return f"=== worker {worker} (exit {record.exit_code}) ===\n{out}"
+        return out
 
     def fetch_artifacts(self, job_id: str, dest_dir: Path) -> list[Path]:
         """Copy the job's artifacts directory back, returning what arrived.
@@ -632,8 +670,8 @@ def require_file(path: str, field: str) -> Path:
     return resolved
 
 
-def _parse_status_line(raw: str) -> tuple[str, int | None]:
-    """Parse the status probe's `STATUS [exit_code]` line."""
+def _parse_one_status_line(raw: str) -> tuple[str, int | None]:
+    """Parse one worker's `STATUS [exit_code]` line."""
     if raw == "RUNNING":
         return "RUNNING", None
     for prefix, fallback in (("COMPLETED", 0), ("FAILED", 1)):
@@ -647,6 +685,42 @@ def _parse_status_line(raw: str) -> tuple[str, int | None]:
                     code = fallback
             return prefix, code
     return "UNKNOWN", None
+
+
+_STATUS_PRIORITY = {"FAILED": 0, "RUNNING": 1, "UNKNOWN": 2, "COMPLETED": 3}
+
+
+def _parse_status_line(raw: str) -> tuple[str, int | None]:
+    """Parse the status probe's `STATUS [exit_code]` line(s).
+
+    On a multi-host target, each worker prints a line: any FAILED fails the
+    job, any RUNNING keeps it running, and COMPLETED requires every worker.
+    """
+    status, code, _ = _parse_status_lines(raw)
+    return status, code
+
+
+def _parse_status_lines(raw: str) -> tuple[str, int | None, int | None]:
+    """Return `(status, exit_code, failed_worker)` across per-worker lines."""
+    entries: list[tuple[int, tuple[str, int | None]]] = []
+    for idx, line in enumerate(raw.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        worker_id = idx
+        if stripped.startswith("@"):
+            tag, _, rest = stripped[1:].partition(" ")
+            if tag.isdigit() and rest:
+                worker_id = int(tag)
+                stripped = rest.strip()
+        entries.append((worker_id, _parse_one_status_line(stripped)))
+    if not entries:
+        return "UNKNOWN", None, None
+    worker_id, (status, code) = min(entries,
+                                    key=lambda item:
+                                    (_STATUS_PRIORITY[item[1][0]], item[0]))
+    return status, code, (worker_id
+                          if status == "FAILED" and worker_id > 0 else None)
 
 
 def profile_from_dict(data: dict[str, Any],
