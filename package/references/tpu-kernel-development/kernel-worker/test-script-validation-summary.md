@@ -32,7 +32,7 @@ structure:
 -   Note that mock execution ran the harness with the base kernel bound in as
     `opt_computation` too, since no optimized kernel exists yet.
 -   State that the harness is ready to be reused, unchanged, for every
-    iteration of the self-refinement loop and for every autotune trial.
+    iteration of the self-refinement loop.
 -   Provide the path: {test_file_path}
 
 ### OPTION 2: If all_checks_passed is False

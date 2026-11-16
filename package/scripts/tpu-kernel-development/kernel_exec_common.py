@@ -15,9 +15,10 @@
 
 Both `test_harness_template.py` (which times a kernel) and
 `profile_harness_template.py` (which traces it) have to reach the accelerator
-with **the same compilation**. If they do not, `best_time_ms` describes one
-executable and the trace describes another: the trace can contain layout
-copies, or a differently tiled Pallas call, that the timed run never executed
+with **the same compilation**. If they do not, the time the test harness
+measured (`RESULT_TIME`) describes one executable and the trace describes
+another: the trace can contain layout copies, or a differently tiled Pallas
+call, that the timed run never executed
 -- and the planning step (`plan-kernel`) then optimises against a bottleneck the benchmark never
 saw. Nothing about that failure is visible in either output.
 

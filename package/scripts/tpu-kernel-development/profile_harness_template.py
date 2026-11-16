@@ -99,7 +99,7 @@ def main():
             args = tuple(dynamic_args) + tuple(static_args)
             static_argnums = tuple(range(len(dynamic_args), len(args)))
             # The benchmark's compile path, not a fresh jax.jit: the trace has
-            # to describe the executable `best_time_ms` was measured on.
+            # to describe the executable `RESULT_TIME` was measured on.
             step = compile_and_align(  # noqa: F821
                 opt_computation, args, static_argnums)  # noqa: F821
             # Warm up outside the trace: compile here, measure there.

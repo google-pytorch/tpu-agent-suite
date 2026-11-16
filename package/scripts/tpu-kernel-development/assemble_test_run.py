@@ -14,8 +14,7 @@
 # limitations under the License.
 """Deterministically binds an optimized kernel into the shared harness.
 
-Run once per iteration (Phase 3, against `{optimized_kernel_path}`) and once
-per autotune trial (Phase 4, against each placeholder-substituted candidate).
+Run once per iteration (Phase 3, against `{optimized_kernel_path}`).
 Takes the already-assembled shared harness (`assemble_test_harness.py`'s
 output -- unchanged across the whole run) and the optimized kernel's current
 source, and produces a runnable script.

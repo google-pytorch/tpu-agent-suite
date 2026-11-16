@@ -21,8 +21,6 @@ tpu_dependencies:
   - ml_dtypes
   - torch
   - tpu-info
-scripts:
-- scripts/tpu-kernel-development/run_autotune.py
 ---
 
 # tpu-kernel-development
@@ -171,7 +169,7 @@ when it lands after.
 Never write session output anywhere else — in particular, never into a
 `workspace/` directory relative to your current working directory, and never
 into the installed package tree (`{{package}}`), which is read-only shipped
-content. Package-relative paths such as `{{script:tpu-kernel-development/run_autotune.py}}` name
+content. Package-relative paths written as script or reference tokens name
 shipped files to read or execute, never output locations.
 
 ## External state, isolated iterations
@@ -183,7 +181,7 @@ shipped files to read or execute, never output locations.
 2.  **Each iteration's heavy work runs in an isolated agent**. Your own context
     only ever holds one state read + one kernel-worker dispatch + one profiling
     dispatch + two short return summaries per iteration — not five iterations'
-    worth of plan/implement/compile/test/autotune/profile transcripts.
+    worth of plan/implement/compile/test/profile transcripts.
 
 ## How to dispatch kernel-worker agent
 
@@ -231,7 +229,7 @@ executed, never measured, and never compared against.
               base.py  — PURE JAX, the denominator of every
                          number this run reports
                             ▼
-              plan -> implement -> compile -> test -> autotune -> profile
+              plan -> implement -> compile -> test -> profile
                             ▼
                     state.best_code_path
 
@@ -572,7 +570,7 @@ state.json.
     Then:
     -   set `library_check.result` to `"use_failed"`, and put the reason in
         `library_check.summary`: the kernel-worker's error, or both times
-        (e.g. "tuned Tokamax 0.512 ms, baseline 0.481 ms");
+        (e.g. "Tokamax 0.512 ms, baseline 0.481 ms");
     -   reset `state.best_code_path` to `state.base_kernel_path` and
         `state.best_optimized_time` to `"Infinity"`, so the Tokamax kernel is
         not kept as the result;
@@ -651,7 +649,7 @@ state.json.
 4.  **When the kernel-worker agent returns, get its trace explained.** Re-read
     `<work>/state.json`; take the last entry of `state.history`. If its
     `profile_trace_dir` is a path (the kernel-worker captured a trace in its Phase
-    4.5) invoke {{agent:tpu-diagnostics}} with a `profiling-request` JSON
+    4) invoke {{agent:tpu-diagnostics}} with a `profiling-request` JSON
     object, using that entry's own `profile_trace_dir` value and both paths
     spelled out fully resolved:
 
@@ -797,8 +795,8 @@ Once `state.iteration == state.max_iterations`:
 4.  Point to the best code file (`state.best_code_path`) as the result of the
     loop, spelled out as its fully resolved path. When
     `state.library_check.result` is `"use"`, say that this file calls the
-    Tokamax kernel (this run did not write it), and give its latency before
-    and after tuning, from the iteration's `autotune_summary`. When it is
+    Tokamax kernel (this run did not write it), and give its latency and
+    speedup from that iteration's `state.history` entry. When it is
     `"use_failed"`, say that the Tokamax kernel was tried first and why it
     was not kept (`library_check.summary`), then report the built kernel.
 

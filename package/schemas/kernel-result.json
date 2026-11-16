@@ -145,7 +145,7 @@
           "speedup": {
             "type": "number",
             "minimum": 0,
-            "description": "This iteration's measured speedup over the baseline, from the harness's paired base-vs-optimized timing in a single process, of the kernel as the iteration left it -- after autotuning, when a configuration was applied. Reported per iteration rather than only at the end because the loop branches on it: above 1.0 the next iteration's planner builds on this kernel and the loop may keep it as its best, at or below 1.0 the planner restarts from the baseline and the kernel is never kept. Absent when correctness failed and the harness printed no timing line."
+            "description": "This iteration's measured speedup over the baseline, from the harness's paired base-vs-optimized timing in a single process, of the kernel the iteration built. Reported per iteration rather than only at the end because the loop branches on it: above 1.0 the next iteration's planner builds on this kernel and the loop may keep it as its best, at or below 1.0 the planner restarts from the baseline and the kernel is never kept. Absent when correctness failed and the harness printed no timing line."
           },
           "base_choice": {
             "type": "string",

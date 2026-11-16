@@ -80,7 +80,7 @@ Decompose identified bottlenecks into 2–3 concrete, orthogonal architectural h
    - For isolated compute or memory-bandwidth bound operators (e.g. attention, custom scan, ragged indirection, GMM), read {{reference:tpu-kernel-development/kernel-worker/plan-kernel.md}} and use its planning method yourself, in this context, in *ideation/propose-only mode*.
    - Work from the target operator source code, input tensor shapes, and XProf timing. Apply its roofline analysis, its tiling and memory-layout guidance, and its knowledge-retrieval steps (the kernel optimization router, the concept pages, and the hardware page for the target chip).
    - Produce 2–3 candidate Pallas optimization strategies (e.g. double-buffered VMEM tiling, custom scan with state carry, fused routing), and record each as a hypothesis.
-   - **Important**: that reference is written for the tpu-kernel-development loop's kernel-worker. Here you use it strictly to propose hypotheses: skip its loop-only steps -- reading `<work>/state.json`, the ideas ledger, choosing an optimization base, and writing `{kernel_plan_path}` -- and do NOT compile, autotune, or execute an inner hardware loop.
+   - **Important**: that reference is written for the tpu-kernel-development loop's kernel-worker. Here you use it strictly to propose hypotheses: skip its loop-only steps -- reading `<work>/state.json`, the ideas ledger, choosing an optimization base, and writing `{kernel_plan_path}` -- and do NOT compile, tune, or execute an inner hardware loop.
 
 2. **System-Level Bottlenecks — Decompose Directly**:
    For whole-workload directions that operate across framework, topology, or runtime boundaries, the researcher formulates Tier 2 hypotheses directly to preserve global context:

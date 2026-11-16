@@ -738,22 +738,45 @@ class TestKernelResultNoSpeedup(unittest.TestCase):
             " 1.0, and `optimized_time` is better (smaller) than"
             " `state.best_optimized_time`", text)
 
-    def test_worker_records_the_tuned_kernels_speedup(self):
-        """Phase 3 timed the untuned kernel; the gate needs the one on disk."""
+    def test_worker_records_phase_3s_speedup(self):
+        """No phase rewrites the kernel after the run that timed it."""
         text = " ".join(
             (PACKAGE_DIR / "agents" / "kernel-worker.md").read_text().split())
-        self.assertIn(
-            "it is the `SPEEDUP` line in the `stdout` of the `all_results`"
-            " entry whose `config` is `best_config`", text)
-
-    def test_tuned_trials_print_a_paired_speedup(self):
-        """The line the worker reads exists in every trial's stdout."""
+        self.assertIn("**`speedup` is the `SPEEDUP` Phase 3 captured**", text)
+        self.assertIn("Nothing after Phase 3 changes that file", text)
         harness = (PACKAGE_DIR / "scripts" / "tpu-kernel-development" /
                    "test_harness_template.py").read_text()
         self.assertIn('print(f"SPEEDUP: {geo_mean_speedup:.4f}")', harness)
-        autotune = (PACKAGE_DIR / "scripts" / "tpu-kernel-development" /
-                    "run_autotune.py").read_text()
-        self.assertIn('"stdout": stdout,', autotune)
+
+    def test_loop_has_no_autotune_phase(self):
+        """Neither the loop nor the worker sweeps configs or ships a tool to."""
+        scripts = PACKAGE_DIR / "scripts" / "tpu-kernel-development"
+        references = (PACKAGE_DIR / "references" / "tpu-kernel-development" /
+                      "kernel-worker")
+        for gone in (scripts / "run_autotune.py",
+                     scripts / "apply_best_config.py",
+                     scripts / "tune_library_kernel.py",
+                     references / "autotune-planner.md",
+                     references / "autotune-summary.md"):
+            with self.subTest(path=gone.name):
+                self.assertFalse(gone.exists())
+        for agent in ("kernel-worker.md", "tpu-kernel-development.md"):
+            text = (PACKAGE_DIR / "agents" / agent).read_text().lower()
+            with self.subTest(agent=agent):
+                self.assertNotIn("autotun", text)
+                self.assertNotIn("sweep", text)
+        # The profile capture was renumbered from Phase 4.5 to Phase 4. Join
+        # whitespace first: a reference wrapped across a line still counts.
+        docs = [
+            PACKAGE_DIR / "agents" / "kernel-worker.md",
+            PACKAGE_DIR / "agents" / "tpu-kernel-development.md",
+            *sorted((PACKAGE_DIR / "references" /
+                     "tpu-kernel-development").rglob("*.md")),
+        ]
+        for doc in docs:
+            text = " ".join(doc.read_text().split()).lower()
+            with self.subTest(doc=doc.name):
+                self.assertNotIn("phase 4.5", text)
 
     def test_orchestrator_returns_no_speedup(self):
         text = " ".join((PACKAGE_DIR / "agents" /

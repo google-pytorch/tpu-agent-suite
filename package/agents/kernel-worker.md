@@ -18,12 +18,10 @@ scripts:
 - scripts/tpu-kernel-development/test_harness_template.py
 - scripts/tpu-kernel-development/profile_harness_template.py
 - scripts/tpu-kernel-development/kernel_exec_common.py
-- scripts/tpu-kernel-development/run_autotune.py
 - scripts/tpu-kernel-development/capture_torch_golden.py
 - scripts/tpu-kernel-development/cuda_static_facts.py
 - scripts/tpu-kernel-development/verify_port.py
 - scripts/tpu-kernel-development/ledger.py
-- scripts/tpu-kernel-development/apply_best_config.py
 references:
 - references/tpu-kernel-development/general_rules.md
 - references/tpu-kernel-development/kernel-worker/synthesize-baseline.md
@@ -39,8 +37,6 @@ references:
 - references/tpu-kernel-development/kernel-worker/test-script-validation-summary.md
 - references/tpu-kernel-development/kernel-worker/compilation-summary.md
 - references/tpu-kernel-development/kernel-worker/summarize-test-results.md
-- references/tpu-kernel-development/kernel-worker/autotune-planner.md
-- references/tpu-kernel-development/kernel-worker/autotune-summary.md
 ---
 
 # kernel-worker agent
@@ -51,7 +47,7 @@ parameters you were given are the session `run_id` and the `work_dir` of the
 kernel you are working on — figure out everything else by reading
 `<work>/state.json` yourself (see "Artifact root" below). You carry
 out the iteration yourself -- planning, implementing, compiling, testing,
-autotuning and the repair loops -- by following the references this document
+profiling and the repair loops -- by following the references this document
 names. The one step you delegate is the CUDA reference analysis (Phase 0.6),
 which must run in a context of its own.
 
@@ -109,15 +105,9 @@ in the second costs only the benefit of the reference.
 │   ├── kernel_plan.md
 │   ├── optimized.py
 │   ├── test_run.py
-│   ├── autotune_spec.json
-│   ├── autotune_template.py
-│   ├── autotune_full_template.py
-│   ├── autotune_payload.json
-│   ├── autotune_results.json
-│   ├── autotune_summary.md
-│   ├── profile_kernel.py        # assembled, Phase 4.5
-│   ├── trace.tar.gz             # trace archive, Phase 4.5; removed once unpacked
-│   ├── tensorboard/             # unpacked trace, Phase 4.5
+│   ├── profile_kernel.py        # assembled, Phase 4
+│   ├── trace.tar.gz             # trace archive, Phase 4; removed once unpacked
+│   ├── tensorboard/             # unpacked trace, Phase 4
 │   └── profile_summary.md       # written after you return, by the XProf analyst
 └── iter2/ ...
 ```
@@ -136,7 +126,7 @@ write this iteration into someone else's session.
 Never write iteration output anywhere else — in particular, never into a
 `workspace/` directory relative to your current working directory, and never
 into the installed package tree (`{{package}}`), which is read-only shipped
-content. Package-relative paths such as `{{script:tpu-kernel-development/run_autotune.py}}` in
+content. Package-relative paths such as `{{script:tpu-kernel-development/assemble_test_run.py}}` in
 this document name shipped scripts you read or execute, never output locations.
 
 Whenever you hand a path to a subagent or to a script, pass it fully resolved
@@ -160,7 +150,7 @@ later iteration:
     `{{script:tpu-kernel-development/assemble_test_harness.py}}` (NOT hand-written or hand-copied by an
     LLM) from `{get_inputs_path}` + `{base_kernel_path}` +
     `{{script:tpu-kernel-development/test_harness_template.py}}`. It never contains an optimized kernel —
-    see Phase 3 and Phase 4 for how the current iteration's kernel gets bound
+    see Phase 3 for how the current iteration's kernel gets bound
     into a copy of it, via `{{script:tpu-kernel-development/assemble_test_run.py}}`, at execution time.
 
 Everything else resolves within the active iteration directory
@@ -168,13 +158,10 @@ Everything else resolves within the active iteration directory
 
 *   `{kernel_plan_path}`: `<work>/iter<n>/kernel_plan.md`
 *   `{optimized_kernel_path}`: `<work>/iter<n>/optimized.py`
-*   `{autotune_spec_path}`: `<work>/iter<n>/autotune_spec.json`
-*   `{autotune_results_path}`: `<work>/iter<n>/autotune_results.json`
-*   `{autotune_summary_path}`: `<work>/iter<n>/autotune_summary.md`
 *   `{profile_script_path}`: `<work>/iter<n>/profile_kernel.py` — assembled,
-    never hand-written (Phase 4.5).
+    never hand-written (Phase 4).
 *   `{profile_trace_dir}`: `<work>/iter<n>/tensorboard` — where the trace lands
-    *here*, once the archive `compute run` returned is unpacked (Phase 4.5).
+    *here*, once the archive `compute run` returned is unpacked (Phase 4).
 
 --------------------------------------------------------------------------------
 
@@ -250,7 +237,7 @@ more specific, the phase wins. If the file cannot be read, stop and return
         no `staging_bucket` -- or its `status` is `fail`, **stop and return
         `needs_input`**. A profile trace is tens of MB, and without a bucket
         the pod can reach, `gke_job` returns outputs through the pod's log,
-        which carries 1 MiB: every Phase 4.5 capture would be lost and every
+        which carries 1 MiB: every Phase 4 capture would be lost and every
         plan made without a profile. In `error_message`, say that, quote the
         failing check's `detail` and `fix` (or "no `staging_bucket` is set"),
         and give the setup command:
@@ -300,21 +287,10 @@ more specific, the phase wins. If the file cannot be read, stop and return
     -   `previous_optimized_kernel` — the path to the previous iteration's optimized kernel code, which is the `optimized_kernel` of the last entry in `state.history`, or `none` if `state.history` is empty.
     -   `previous_compilation_status` — the path to the previous iteration's compilation status, which is the `compile_ok` of the last entry in `state.history`, or `none` if `state.history` is empty.
     -   `previous_testing_status` — the path to the previous iteration's testing status, which is the `test_ok` of the last entry in `state.history`, or `none` if `state.history` is empty.
-    -   `previous_autotune_summary` — the path to the previous iteration's autotune summary, which is the `autotune_summary` of the last entry in `state.history`, or `none` if `state.history` is empty.
-    -   `previous_profile_summary` — the path to the previous iteration's profile summary, which is the `profile_summary` of the last entry in `state.history`, or `none` if `state.history` is empty or that field is `null`. You capture that iteration's trace (Phase 4.5) but never read it: the loop hands the trace to the package's XProf analyst after you return, and records the report path in that history entry.
-    {
-        "iteration": n,
-        "kernel_plan": `{kernel_plan_path}`,
-        "optimized_kernel": `{optimized_kernel_path}`,
-        "compile_ok": <bool>,
-        "test_ok": <bool>,
-        "optimized_time": <float>,
-        "speedup": <float>,
-        "base_choice": "base" | "iter<k>",
-        "profile_trace_dir": `{profile_trace_dir}`,
-        "profile_summary": null,
-        "autotune_summary": `{autotune_summary_path}`
-    }
+    -   `previous_profile_summary` — the path to the previous iteration's profile summary, which is the `profile_summary` of the last entry in `state.history`, or `none` if `state.history` is empty or that field is `null`. You capture that iteration's trace (Phase 4) but never read it: the loop hands the trace to the package's XProf analyst after you return, and records the report path in that history entry.
+
+    The `previous_*` values all come from the last entry of `state.history`;
+    Phase 5 defines that entry's fields.
 
 3.  **Resolve the target hardware** — skip when `state.tpu_spec` is already
     set. This is not part of Phase 0.1, because Phase 0.1 is skipped whenever
@@ -371,7 +347,7 @@ more specific, the phase wins. If the file cannot be read, stop and return
     note why in `<work>/tpu_kernel_debug_history.md`; Setup step 1 has
     already read the file, so the run goes on.
 
-4.  **Create Iteration Subfolder**: Create a dedicated subfolder `<work>/iter<n>` for this iteration. All generated files, kernel implementations, plan documents, autotune specifications, and profiling traces for this iteration must be placed inside this subfolder. (`base.py` and `test_kernel.py` are NOT per-iteration — see Phase 0.10.)
+4.  **Create Iteration Subfolder**: Create a dedicated subfolder `<work>/iter<n>` for this iteration. All generated files, kernel implementations, plan documents, and profiling traces for this iteration must be placed inside this subfolder. (`base.py` and `test_kernel.py` are NOT per-iteration — see Phase 0.10.)
 
 --------------------------------------------------------------------------------
 
@@ -824,8 +800,8 @@ ends in a confident, wrong speedup.
 ### Phase 0.10: Prepare Shared Base Kernel & Test Harness (Execute ONCE — idempotent)
 
 This phase produces the three shared artifacts (`{base_kernel_path}`,
-`{get_inputs_path}`, `{test_file_path}`) that every iteration — and every
-autotune trial — reuses unchanged. Because each iteration is a fresh,
+`{get_inputs_path}`, `{test_file_path}`) that every iteration reuses
+unchanged. Because each iteration is a fresh,
 memory-less kernel-worker invocation, "once" is enforced by checking whether these
 files already exist on disk, not by remembering that you already did this.
 
@@ -1012,8 +988,7 @@ Tokamax kernel. Skip steps 1 and 2 below and follow
         not overfit to it), previous kernel plan `{previous_kernel_plan}`,
         previous optimized kernel `{previous_optimized_kernel}`, compilation
         status `{previous_compilation_status}`, testing status
-        `{previous_testing_status}`, autotune summary
-        `{previous_autotune_summary}`, and profile summary
+        `{previous_testing_status}`, and profile summary
         `{previous_profile_summary}`. Decide whether to keep optimizing on top
         of `{previous_optimized_kernel}` or restart from scratch on original
         `{base_kernel_path}` if the previous kernel cannot be further improved,
@@ -1083,126 +1058,33 @@ assembles this iteration's runnable script and executes it.
         `{{runtime}} compute run --code <work>/iter<n>/test_run.py --timeout 300`
     Save the results (stdout containing `CORRECTNESS: <bool>`,
     `BASE_TIME_CASE_i`, `OPT_TIME_CASE_i`,
-    `SPEEDUP_CASE_i`, `RESULT_TIME`, `PERF_METRICS`, `SPEEDUP`, or
+    `SPEEDUP_CASE_i`, `RESULT_TIME`, `SPEEDUP`, or
     `ERROR: ...`) to `{test_results}`.
 
     **Capture `SPEEDUP` verbatim from that stdout now.** It is the geometric
     mean of the harness's paired base-vs-optimized measurements, taken in one
     process, and it is written to `state.history` in Phase 5 — which is where
     the next iteration's planner reads it to decide whether to build on this
-    kernel or restart from `base.py` — unless the Phase 4 sweep replaces this
-    kernel with a tuned configuration, whose own `SPEEDUP` Phase 5 records
-    instead. Parse it as a float. Never compute a
+    kernel or restart from `base.py`. Parse it as a float. Never compute a
     speedup yourself, and never derive one from wall-clock duration: that
     includes queue wait and JIT compilation. If `CORRECTNESS: False`, the
     harness exits before printing any timing line — record `speedup` as `null`
     for this iteration.
+
+    **Capture `RESULT_TIME` the same way.** It is the optimized kernel's
+    latency, the geometric mean over the cases, and Phase 5 records it as
+    `optimized_time`. Record the number before ` ms` as a float:
+    `RESULT_TIME: 0.357894 ms` is `0.357894`, never the string
+    `"0.357894 ms"`. When no timing line was printed (the kernel did not
+    compile, or `CORRECTNESS: False`), record `null`, never `0.0`: Phase 5
+    compares it against `state.best_optimized_time`, where `0.0` would rank a
+    failed kernel as the fastest.
 3.  **Summarize Test Results**:
     -   Read and follow {{reference:tpu-kernel-development/kernel-worker/summarize-test-results.md}}
         for the test results `{test_results}`.
 4.  If test execution succeeded (`CORRECTNESS: True` and exit code 0), proceed to Phase 4. Otherwise, proceed to Phase 5, with `test_ok` set to False.
 
-### Phase 4: Autotuning Loop
-
-Perform parameter sweeps to find the most performant tiling sizes. Every trial
-is graded with the exact same correctness/benchmark logic as Phase 3 — it
-reuses the shared harness rather than re-deriving its own, so a trial's "best
-config" agrees with what the real test run would measure.
-
-> **If the target cannot run these phases**: Phase 4 (Autotune) and Phase 4.5
-> (Profiling) carry a payload to the target and bring results back in the same
-> `compute run`. If the configured backend refuses that -- the runtime reports
-> it does not support synchronous `run` -- skip Phases 4 and 4.5 and proceed
-> directly to Phase 5 (Update State) using the Phase 3 test latency as the
-> measured time. Do not switch backends or reproduce the transfer by hand.
-
-> **Tokamax kernels.** If `state.library_check.result` is `"use"`, skip this
-> sweep and follow the Phase 4 section of
-> {{reference:tpu-kernel-development/kernel-worker/swap-library-kernel.md}}. Phase 5 then
-> records the latency and speedup measured there.
-
-> **Fallback latency.** Whenever this phase does not produce a `best_time_ms`
-> -- for example, if the sweep ran and every trial failed -- `optimized_time` is
-> the `RESULT_TIME` the Phase 3 harness printed for `{optimized_kernel_path}` as
-> it stood after Phase 3. That number measured the kernel that actually exists on
-> disk, which is the only thing Phase 5 should compare against
-> `state.best_optimized_time`.
-
-1.  **Plan Tuning Specs**:
-    -   Read and follow {{reference:tpu-kernel-development/kernel-worker/autotune-planner.md}}
-        yourself: identify the tunable parameters in `{optimized_kernel_path}`,
-        create a `code_template` containing ONLY the parameterized kernel
-        implementation (no correctness checks, no timing logic — the harness
-        at `{test_file_path}` supplies those), define a search space, and save
-        the autotune specification JSON to `{autotune_spec_path}`.
-2.  **Run Autotuning Sweep**:
-    -   Read `{autotune_spec_path}` JSON to get `code_template` and `search_space`.
-    -   Write `code_template` (which contains only the kernel) to a temporary script `<work>/iter<n>/autotune_template.py`.
-    -   Assemble the fully parameterized trial template with the test harness using the deterministic script:
-        ```bash
-        python3 {{script:tpu-kernel-development/assemble_test_run.py}} \
-          {test_file_path} <work>/iter<n>/autotune_template.py \
-          <work>/iter<n>/autotune_full_template.py
-        ```
-    -   Construct a final JSON payload containing `search_space` from `{autotune_spec_path}` and `code_template` loaded from the newly created `<work>/iter<n>/autotune_full_template.py`. Save this as `<work>/iter<n>/autotune_payload.json`.
-    -   Execute the autotuning sweep via `run_autotune.py`. The payload
-        travels to the compute target with `--input` and the results come
-        back with `--output`; the script itself only ever sees bare file
-        names in its working directory, which is what makes the same command
-        work on `local` and on a remote TPU VM alike:
-        ```bash
-        # Outer --timeout bounds overall execution; inner flags control per-trial (120s) and total sweep (1800s) budgets
-        {{runtime}} compute run --code {{script:tpu-kernel-development/run_autotune.py}} --timeout 2000 \
-          --input <work>/iter<n>/autotune_payload.json \
-          --output autotune_results.json:<work>/iter<n>/autotune_results.json \
-          -- autotune_payload.json autotune_results.json \
-             --trial-timeout 120 --total-timeout 1800
-        ```
-    -   The runner script will evaluate combinations and write `{autotune_results_path}` with `"status": "success", "all_results": [...], "best_config": {...}, "best_time_ms": float`. When no trial succeeded it writes `"status": "failed"`, `"best_config": null`, `"best_time_ms": null`, and a `"failure_reason"` explaining why.
-    -   Trials run one after another inside that single `compute run`, so the
-        sweep never competes with itself for the accelerator. It does compete
-        with anything else on the target: a backend that attaches to an
-        existing machine or pod has no admission control, so a second
-        tpu-kernel-development loop or any other TPU workload on the same target makes
-        colliding trials fail and skews `best_config` toward whichever
-        configurations happened to run alone. Do not share a target during a
-        sweep. A sweep whose `failure_reason` says every trial failed
-        identically is the signature of that collision (or of a broken
-        environment), not evidence that every configuration is bad -- say so
-        in the summary rather than blaming the search space.
-    -   Keep each step one `compute run`. On a queued backend (e.g. `gke_job`)
-        every run is a new Job that waits for admission and a node, often longer
-        than it then runs. The harness already measures every input case in
-        one process and `run_autotune.py` runs every trial of the payload in
-        one: never split cases or trials across several runs. To try more
-        configurations, widen the payload's `search_space`, keeping
-        `--total-timeout` inside the cluster's time limit if it has one.
-3.  **Apply Best Configuration** (deterministic — no LLM):
-    -   First read `{autotune_results_path}` and check `status`. **Only if it
-        is `"success"`**, run:
-        ```bash
-        python3 {{script:tpu-kernel-development/apply_best_config.py}} \
-          {autotune_spec_path} {autotune_results_path} {optimized_kernel_path}
-        ```
-    -   This substitutes `best_config` values into `code_template`'s
-        placeholders and overwrites `{optimized_kernel_path}` — a mechanical
-        string substitution, not something that needs an agent's judgment.
-    -   If `status` is `"failed"`, do not run the script (it refuses anyway):
-        there is no measured configuration to apply, and
-        `{optimized_kernel_path}` stays exactly as Phase 3 tested it. Proceed
-        to step 4 with `{autotune_results}` as-is so the summary records the
-        `failure_reason`, and use the **Fallback latency** rule for
-        `optimized_time` in Phase 5.
-    -   If the script exits non-zero on a `"success"` result, treat it the
-        same as any other tool/execution failure per the Strict Debuggability
-        protocol below.
-4.  **Summarize Autotuning Results**:
-    -   Read and follow {{reference:tpu-kernel-development/kernel-worker/autotune-summary.md}} to
-        summarize `{autotune_results}`, save the report to
-        `{autotune_summary_path}`, and verify the best configuration was
-        applied to `{optimized_kernel_path}`.
-
-### Phase 4.5: Capture the Profile Trace
+### Phase 4: Capture the Profile Trace
 
 You capture the trace; you do **not** read it. Reading and explaining a profile
 belongs to the package's XProf analyst, which the loop delegates to after you
@@ -1212,6 +1094,12 @@ other in this workflow, and because it needs this iteration's real
 
 Skip this phase entirely if `compile_ok` or `test_ok` is False — there is
 nothing worth profiling — and leave the Phase 5 trace fields `null`.
+
+> **If the target cannot carry a payload**: this phase sends the profile
+> script to the target and brings the trace back in the same `compute run`.
+> If the configured backend refuses that -- the runtime reports it does not
+> support synchronous `run` -- skip this phase and go to Phase 5. Do not
+> switch backends or reproduce the transfer by hand.
 
 1.  **Assemble the profile script** (deterministic — no LLM):
     ```bash
@@ -1251,20 +1139,12 @@ nothing worth profiling — and leave the Phase 5 trace fields `null`.
 
 ### Phase 5: Update State
 
-**`optimized_time` is `{autotune_results_path}`'s `best_time_ms`** when the
-sweep succeeded (the harness-measured latency for the config actually applied
-to `{optimized_kernel_path}` in Phase 4 step 3); otherwise it is Phase 3's
-`RESULT_TIME` per the **Fallback latency** rule. The Phase 4.5 trace is for
-bottleneck *analysis* and produces no timing number to report here.
-
-**`speedup` measures the same kernel.** When the sweep succeeded, it is the
-`SPEEDUP` line in the `stdout` of the `all_results` entry whose `config` is
-`best_config` -- the trial `best_time_ms` came from. Every trial runs the full
-harness, so that line is the paired base-vs-optimized measurement of the
-configuration Phase 4 step 3 wrote to `{optimized_kernel_path}`. Phase 3's
-`SPEEDUP` measured the untuned kernel, which no longer exists on disk once a
-configuration is applied. When the sweep did not succeed, the kernel is still
-the one Phase 3 tested, and `speedup` is Phase 3's.
+**`optimized_time` is the `RESULT_TIME` the Phase 3 harness printed** for
+`{optimized_kernel_path}`, and **`speedup` is the `SPEEDUP` Phase 3 captured**.
+Nothing after Phase 3 changes that file, so both describe the kernel on disk,
+which is the only thing Phase 5 should compare against
+`state.best_optimized_time`. The Phase 4 trace is for bottleneck *analysis*
+and produces no timing number to report here.
 
 `profile_summary` stays `null`: the analyst writes that report after you
 return, and the loop fills the field in. What you record is where you left the
@@ -1297,14 +1177,11 @@ trace, so the loop knows there is one to hand over.
             "speedup": <float>,
             "base_choice": "base" | "iter<k>",
             "profile_trace_dir": `{profile_trace_dir}`,
-            "profile_summary": null,
-            "autotune_summary": `{autotune_summary_path}`
+            "profile_summary": null
            }
         ```
 
-        -   `speedup` is the float described above -- the best trial's
-            `SPEEDUP` line when the sweep succeeded, Phase 3's otherwise -- as
-            a JSON number. Write `null` when correctness failed and no
+        -   `speedup` is Phase 3's `SPEEDUP`, as a JSON number. Write `null` when correctness failed and no
             timing line was printed. **This field is not decoration**: the next
             iteration's planner applies a literal `> 1.0` rule to it to decide
             whether to build on this kernel or restart from `base.py`, so a

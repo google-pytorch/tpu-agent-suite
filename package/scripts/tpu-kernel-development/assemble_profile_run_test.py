@@ -234,7 +234,7 @@ class TestAssembleProfileRun(unittest.TestCase):
         ast.parse(self._assemble())
 
     def test_profile_uses_the_benchmarks_compile_path(self):
-        """The trace must describe the executable `best_time_ms` was measured on.
+        """The trace must describe the executable `RESULT_TIME` was measured on.
 
         A fresh `jax.jit(opt_computation, ...)` here compiles with default
         layouts, while the benchmark compiles with AUTO layouts and re-lays out

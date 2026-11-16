@@ -128,5 +128,5 @@ version.
     validation runs again.
 -   Unlike per-iteration kernel work, exhausting retries here is a
     **run-blocking failure**: nothing downstream (planning, implementation,
-    testing, autotuning) can proceed without a valid harness. Say so plainly
+    testing, profiling) can proceed without a valid harness. Say so plainly
     if you reach max retries.

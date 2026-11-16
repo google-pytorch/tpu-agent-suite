@@ -50,7 +50,7 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
     *   First iteration of optimization on `{base_kernel_path}`.
 *   **REVISION / NEXT ITERATION Plan:**
     *   Previous plan and code files are provided (`{previous_kernel_plan}`, `{previous_optimized_kernel}`).
-    *   Execution results from prior iterations are provided (`{previous_compilation_status}`, `{previous_testing_status}`, `{previous_autotune_summary}`, `{previous_profile_summary}`).
+    *   Execution results from prior iterations are provided (`{previous_compilation_status}`, `{previous_testing_status}`, `{previous_profile_summary}`).
 
 ### Step 2: Gather Context and Decide Optimization Base
 
@@ -61,7 +61,6 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
 - Previous Optimized Kernel: `{previous_optimized_kernel}`
 - Previous Compilation Status: `{previous_compilation_status}`
 - Previous Testing Status: `{previous_testing_status}`
-- Previous Autotune Summary: `{previous_autotune_summary}`
 - Previous Profile Summary: `{previous_profile_summary}`
 
 **For NEW and REVISION Plans alike:**
@@ -168,12 +167,12 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
 
 **For REVISIONS / NEXT ITERATION Plans:**
 
-1.  **Read previous artifacts:** Use `read` to read `{previous_kernel_plan}`, `{previous_optimized_kernel}`, `{previous_autotune_summary}` (if not `none`), and `{previous_profile_summary}` (if not `none`).
+1.  **Read previous artifacts:** Use `read` to read `{previous_kernel_plan}`, `{previous_optimized_kernel}`, and `{previous_profile_summary}` (if not `none`).
     When `{previous_profile_summary}` is `none`, no profile of the previous
     iteration exists: say "no profile" in the plan. Cite a profile, a trace or
     an XProf finding only from a file you actually read -- a citation to
     evidence that was never produced reads later as a measurement.
-2.  **Review execution results:** Analyze `{previous_compilation_status}`, `{previous_testing_status}`, `{previous_autotune_summary}`, and `{previous_profile_summary}` to identify what failed or what performance bottlenecks remain.
+2.  **Review execution results:** Analyze `{previous_compilation_status}`, `{previous_testing_status}` and `{previous_profile_summary}` to identify what failed or what performance bottlenecks remain.
 3.  **Decide Optimization Base — an explicit numerical rule, not a judgement
     call.**
 
@@ -209,7 +208,7 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
         the baseline and earned nothing.
     *   Compare the values as read from `state.json`. Do NOT re-derive a speedup
         from `base_time_ms` / `optimized_time`, and do NOT read one out of the
-        prose in `{previous_profile_summary}` or `{previous_autotune_summary}` —
+        prose in `{previous_profile_summary}` —
         summaries round, restate and omit. `state.json` is the only authority.
     *   This rule fixes the **starting code** only; it does not constrain your
         strategy. When row 1 or row 3 sends you back to `base.py`, you still

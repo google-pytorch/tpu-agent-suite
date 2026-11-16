@@ -33,7 +33,7 @@ To make your existing AGY Agent compatible with the framework, restructure it to
 ### Worked Example: tpu-kernel-development
 
 1. AGY's `tpu-kernel-development/subagents/plan_kernel_agent.md` becomes `references/tpu-kernel-development/kernel-worker/plan-kernel.md`, a reference the kernel-worker follows in its own context
-2. AGY's flat `tools/` directory splits by scope: `tools/run_autotune.py` becomes `scripts/tpu-kernel-development/run_autotune.py` (shared by tpu-kernel-development sub-agents that touch autotuning), while a single-purpose tool like `tools/generate_profile_script.py` becomes `scripts/tpu-kernel-development/assemble_profile_run.py` (used only by the kernel-worker's profiling phase).
+2. The source harness's flat `tools/` directory moves under the skill's own `scripts/` directory: for example, `tools/generate_profile_script.py` becomes `scripts/tpu-kernel-development/assemble_profile_run.py` (used by the kernel-worker's profiling phase).
 3. Python dependencies are declared centrally at the package root in `requirements-client.txt` (host) and `requirements-tpu.txt` (remote TPU workloads).
 4. Anything that talked to the accelerator directly (AGY's `tools/tpu_client.py` and `server/tpu_server.py`) has no counterpart: sub-agents reach compute through `{{runtime}} compute` instead of shipping their own transport.
 
@@ -57,7 +57,7 @@ To make your existing AGY Agent compatible with the framework, restructure it to
 
 2. **Template Agent References**: Replace hardcoded file paths or skill names with TPU agent suite template tokens (`{{agent:<name>}}`). Agent names referenced this way must resolve to a declared agent name in the package.
 
-3. **Name Package Files By Token**: A token is the only way to name a package file in an instruction or a reference. Write `{{script:tpu-kernel-development/run_autotune.py}}`, which renders to the installed path `~/.tpu-agent-suite/packages/<name>@<version>/scripts/tpu-kernel-development/run_autotune.py`. A path typed out, such as `scripts/tpu-kernel-development/run_autotune.py`, is read from the agent's workspace, where the file is not, so `verify` rejects it. Frontmatter lists are declarations, not prose, and keep plain paths.
+3. **Name Package Files By Token**: A token is the only way to name a package file in an instruction or a reference. Write `{{script:tpu-kernel-development/assemble_test_run.py}}`, which renders to the installed path `~/.tpu-agent-suite/packages/<name>@<version>/scripts/tpu-kernel-development/assemble_test_run.py`. A path typed out, such as `scripts/tpu-kernel-development/assemble_test_run.py`, is read from the agent's workspace, where the file is not, so `verify` rejects it. Frontmatter lists are declarations, not prose, and keep plain paths.
 
 4. Route all remote execution and accelerator operations through Unified Compute (`{{runtime}} compute`).
 
@@ -145,7 +145,7 @@ delegates:
 - analyze-cuda-reference
 scripts:
 - scripts/tpu-kernel-development/assemble_test_harness.py
-- scripts/tpu-kernel-development/run_autotune.py
+- scripts/tpu-kernel-development/assemble_test_run.py
 references:
 - references/tpu-kernel-development/kernel-worker/plan-kernel.md
 - references/tpu-kernel-development/kernel-worker/implement-kernel.md
@@ -189,16 +189,16 @@ After (`package/agents/kernel-worker.md`):
         {{reference:tpu-kernel-development/kernel-worker/implement-kernel.md}} yourself...
 ```
 
-3. Name each tool by its token (e.g. `tpu-kernel-development/tools/run_autotune.py` -> `{{script:tpu-kernel-development/run_autotune.py}}`):
+3. Name each tool by its token (e.g. `tpu-kernel-development/tools/assemble_test_run.py` -> `{{script:tpu-kernel-development/assemble_test_run.py}}`):
 
 Before (`tpu-kernel-development/subagents/worker.md`)
 
 ```
 ...
 
-### Phase 4: Autotuning
-1.  Run the autotuning sweep:
-    `python3 tpu-kernel-development/tools/run_autotune.py --payload {payload_path}`
+### Phase 3: Test Execution
+1.  Assemble the runnable test script:
+    `python3 tpu-kernel-development/tools/assemble_test_run.py {test_file_path} {optimized_kernel_path} {test_run_path}`
 ...
 ```
 
@@ -207,9 +207,9 @@ After (`package/agents/kernel-worker.md`)
 ```
 ...
 
-### Phase 4: Autotuning
-1.  Run the autotuning sweep:
-    `python3 {{script:tpu-kernel-development/run_autotune.py}} --payload {payload_path}`
+### Phase 3: Test Execution
+1.  Assemble the runnable test script:
+    `python3 {{script:tpu-kernel-development/assemble_test_run.py}} {test_file_path} {optimized_kernel_path} {test_run_path}`
 ...
 ```
 
@@ -269,7 +269,7 @@ Currently, the agents in this package take different (but valid) approaches:
 | | Approach | When it fits |
 | :---- | :---- | :---- |
 | `tpu-model-onboarding` | Subagents use free-form interaction without schema contracts | Subagents take a free-form prompt and return a status/summary. Cheapest to author and maintain. |
-| `tpu-kernel-development` | All 3 agents across 3 dedicated request/result schema pairs, the driver included; everything inside one kernel-worker iteration -- planning, implementing, the repair loops, porting, formatting, the autotune plan -- is a reference the kernel-worker follows itself | Subagents pass structured state between pipeline stages (kernel artifacts, iteration counts, latencies) where a typed contract catches real errors. |
+| `tpu-kernel-development` | All 3 agents across 3 dedicated request/result schema pairs, the driver included; everything inside one kernel-worker iteration -- planning, implementing, the repair loops, porting, formatting -- is a reference the kernel-worker follows itself | Subagents pass structured state between pipeline stages (kernel artifacts, iteration counts, latencies) where a typed contract catches real errors. |
 | `tpu-diagnostics` | One pair, `profiling-request` / `profiling-result`, that types only what the package owns | A shared specialist several orchestrators call. The contract types the status, the failure reason and the artifact paths, and passes XProf's own field names and values through, because those change between nightlies. |
 
 Introduce a dedicated schema pair when subagents exchange structured fields
@@ -429,7 +429,7 @@ Each referenced markdown file must declare its metadata in leading YAML frontmat
 | **`accepts`** | `string` | Yes | Relative path to the input JSON Schema in `schemas/`. |
 | **`produces`** | `string` | Yes | Relative path to the output JSON Schema in `schemas/`. |
 | **`delegates`** | `array[string]` | Yes | List of agent names this agent is allowed to invoke (empty `[]` for leaf agents). |
-| **`scripts`** | `array[string]` | Optional | Executable Python files bundled for this agent (e.g. `scripts/tpu-kernel-development/run_autotune.py`). Every entry must be under `scripts/`. |
+| **`scripts`** | `array[string]` | Optional | Executable Python files bundled for this agent (e.g. `scripts/tpu-kernel-development/assemble_test_run.py`). Every entry must be under `scripts/`. |
 | **`references`** | `array[string]` | Optional | Files or directories under `references/` this agent reads. A directory brings every file under it. Every entry must be under `references/`; a schema or data file is not declared here, it is named by `{{schema:..}}` or `{{data:..}}`. |
 | **`host_dependencies`** | `array[string]` | Optional | Unpinned package names the agent's scripts need on the host. |
 | **`tpu_dependencies`** | `array[string]` | Optional | Unpinned package names the agent's scripts need in the TPU workload environment. |

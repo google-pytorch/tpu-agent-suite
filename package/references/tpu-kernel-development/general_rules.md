@@ -35,9 +35,9 @@ never builds inputs or sets tolerances, which is why rule 1 does not reach it.
     and are copied, not chosen. Never shrink a dimension, a batch size or a
     sequence length to get past an OOM, a VMEM overflow or a timeout. Shrink
     the **tile**, never the problem.
--   **Autotuning searches implementation parameters only** — block sizes,
-    grid order, buffering depth. A search space that varies a problem
-    dimension is measuring a different computation.
+-   **A timing that compares implementations varies implementation
+    parameters only** — block sizes, grid order, buffering depth. One that
+    varies a problem dimension is measuring a different computation.
 -   **`atol`, `rtol`, `max_iterations` and `seed` are the values resolved in
     setup and recorded in `state.json`.** Never loosen a tolerance to make a
     gate or a test pass; a gate that cannot pass stops the run.
