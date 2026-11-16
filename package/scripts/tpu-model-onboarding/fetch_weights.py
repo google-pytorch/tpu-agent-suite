@@ -62,11 +62,12 @@ neither collide nor read a file another is still writing. A file is renamed
 into place only once it is whole, and a file already there at its full size
 is not copied again.
 
-The copy uses `gcloud storage`, else `gsutil`, else the google-cloud-storage
-library, whichever the job has, with the job's own credentials (the TPU VM's
-service account, or Workload Identity on gke_job). A pod with no identity for
-the bucket can be given an access token in a file named by `GCS_TOKEN_FILE`;
-the token is read, never printed.
+The copy uses a local bucket mount under `GCS_MOUNT_ROOT` (`<root>/<bucket>/...`,
+symlinking selected files in place without occupying `/dev/shm`), else `gcloud
+storage`, else `gsutil`, else the google-cloud-storage library, with the job's
+own credentials (the TPU VM's service account, or Workload Identity on
+gke_job). A pod with no identity for the bucket can be given an access token in
+a file named by `GCS_TOKEN_FILE`; the token is read, never printed.
 
 Usage, as a script:  python3 fetch_weights.py <model_id | gs://bucket/dir>
                          [--path-file FILE]
@@ -146,6 +147,8 @@ COMPILE_RESERVE_UNKNOWN = 16 * 1024**3
 LAYER_KEYS = ("num_hidden_layers", "num_layers", "n_layer")
 
 GCS_SCHEME = "gs://"
+# Root directory where GCS buckets are FUSE-mounted locally (`<root>/<bucket>/...`).
+GCS_MOUNT_ENV = "GCS_MOUNT_ROOT"
 # Where gs:// checkpoints are copied when set; otherwise beside the hub cache.
 CHECKPOINT_DIR_ENV = "CHECKPOINT_DIR"
 # A file holding an access token, for a pod with no identity of its own for
@@ -534,12 +537,62 @@ class _LibraryStorage:
             raise _GcsError(f"{type(exc).__name__}: {exc}") from exc
 
 
-def _gcs_storage() -> _CliStorage | _LibraryStorage:
-    """The way this job reads GCS: gcloud, else gsutil, else the library.
+def _mounted_entry(mount_root: str, url: str) -> str | None:
+    bucket, path = parse_gcs_url(url)
+    try:
+        bkt_dir = _local(os.path.abspath(mount_root), bucket)
+        cand = _local(bkt_dir, path) if path else bkt_dir
+    except ValueError:
+        return None
+    real_bkt = os.path.realpath(bkt_dir)
+    real_cand = os.path.realpath(cand)
+    if real_cand != real_bkt and not real_cand.startswith(real_bkt + os.sep):
+        return None
+    return cand
 
-    gsutil cannot take an access token from a file, so with one it is
-    passed over for the library.
-    """
+
+class _MountStorage:
+    """Lists and symlinks objects from a local FUSE mount (`GCS_MOUNT_ROOT`)."""
+
+    zero_copy = True
+
+    def __init__(self, mount_root: str) -> None:
+        self.mount_root = mount_root
+
+    def list(self, folder_url: str) -> dict[str, int]:
+        base = _mounted_entry(self.mount_root, folder_url)
+        if not base or not os.path.isdir(base):
+            return {}
+        out: dict[str, int] = {}
+        for cur, _, files in os.walk(base):
+            rel_dir = os.path.relpath(cur, base)
+            for f in files:
+                rel = f if rel_dir == "." else posixpath.join(
+                    rel_dir.replace(os.sep, "/"), f)
+                with contextlib.suppress(OSError):
+                    out[rel] = os.path.getsize(os.path.join(cur, f))
+        return out
+
+    def copy_many(self, srcs: list[str], folder: str) -> None:
+        for src in srcs:
+            target = _mounted_entry(self.mount_root, src)
+            if not target or not os.path.isfile(target):
+                raise _GcsError(f"missing mounted object for {src}")
+            dst = os.path.join(folder, posixpath.basename(src))
+            if os.path.lexists(dst):
+                os.remove(dst)
+            os.symlink(target, dst)
+
+
+def _gcs_storage(
+        url: str | None = None
+) -> _MountStorage | _CliStorage | _LibraryStorage:
+    """The way this job reads GCS: local mount, gcloud, gsutil, or library."""
+    mount_root = os.environ.get(GCS_MOUNT_ENV) or None
+    if url and mount_root:
+        mdir = _mounted_entry(mount_root, url)
+        if mdir and os.path.isdir(mdir) and os.listdir(mdir):
+            return _MountStorage(mount_root)
     token_file = os.environ.get(GCS_TOKEN_ENV) or None
     if token_file and not os.path.isfile(token_file):
         raise FileNotFoundError(
@@ -645,7 +698,7 @@ def gcs_listing(url: str) -> dict[str, int]:
     """{file name under the gs:// folder: size in bytes}, read with the job's
     credentials. Raises PermissionError, FileNotFoundError or RuntimeError
     with a message that says what to do."""
-    return _list_folder(_gcs_storage(), url, _folder_url(url))
+    return _list_folder(_gcs_storage(url), url, _folder_url(url))
 
 
 def gcs_weight_bytes(url: str, local: str) -> int | None:
@@ -678,7 +731,7 @@ def fetch_gcs(url: str,
     try:
         folder_url = _folder_url(url)
         dest = dest or gcs_dest(url)
-        storage = _gcs_storage()
+        storage = _gcs_storage(url)
     except (ValueError, OSError) as exc:
         _say(f"{FAILED}: {exc}")
         raise
@@ -729,9 +782,11 @@ def fetch_gcs(url: str,
                 with open(_local(dest, "config.json"), encoding="utf-8") as f:
                     layers = config_layers(json.load(f))
         # A job that only tokenizes compiles nothing.
+        zero_copy = getattr(storage, "zero_copy", False)
         reserve = 0 if small_only else compile_reserve(layers)
         space = cache_space(dest)
-        problem_text = space_problem(url, dest, needed, reserve, space)
+        problem_text = space_problem(url, dest, 0 if zero_copy else needed,
+                                     reserve, space)
         if problem_text:
             problem_text = problem_text.replace(
                 "point HF_HUB_CACHE",
@@ -782,7 +837,8 @@ def fetch_gcs(url: str,
             _say(f"{FAILED}: {problem_text}")
             raise OSError(errno.EIO, problem_text)
 
-    _say(f"{READY} {dest} ({total / GB:.1f} GB; copied {needed / GB:.1f} GB "
+    verb = "linked" if zero_copy else f"copied {needed / GB:.1f} GB"
+    _say(f"{READY} {dest} ({total / GB:.1f} GB; {verb} "
          f"from {url} in {int(time.monotonic() - started)}s)")
     return dest
 

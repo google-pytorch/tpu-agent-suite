@@ -980,6 +980,37 @@ class GcsStorageChoiceTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.choose({"gcloud"}, {fw.GCS_TOKEN_ENV: "/nope/token"})
 
+    def test_mounted_gcs_root_symlinks_selected_files_without_copying_space(
+            self):
+        with tempfile.TemporaryDirectory() as d:
+            mnt = os.path.join(d, "mnt")
+            ckpt = os.path.join(mnt, "bkt", "ckpt", "m")
+            os.makedirs(os.path.join(ckpt, "original"))
+            with open(os.path.join(ckpt, "config.json"), "w",
+                      encoding="utf-8") as f:
+                f.write('{"num_hidden_layers": 2}')
+            write(os.path.join(ckpt, "model.safetensors"), 4096)
+            write(os.path.join(ckpt, "original", "model.safetensors"), 4096)
+            dest = os.path.join(d, "dest")
+            tiny = fw.Space(free=1024, shm_limit=1024)
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {fw.GCS_MOUNT_ENV: mnt}), \
+                    mock.patch.object(fw, "cache_space", return_value=tiny), \
+                    mock.patch.object(fw, "compile_reserve", return_value=0), \
+                    contextlib.redirect_stdout(out):
+                got = fw.fetch("gs://bkt/ckpt/m/", interval=0.01)
+                self.assertTrue(
+                    os.path.islink(os.path.join(got, "model.safetensors")))
+                self.assertFalse(os.path.exists(os.path.join(got, "original")))
+                small = fw.fetch_gcs("gs://bkt/ckpt/m/",
+                                     dest=dest,
+                                     small_only=True)
+                self.assertTrue(
+                    os.path.islink(os.path.join(small, "config.json")))
+                self.assertFalse(
+                    os.path.exists(os.path.join(small, "model.safetensors")))
+            self.assertIn("linked from gs://bkt/ckpt/m/", out.getvalue())
+
 
 class CliStorageTest(unittest.TestCase):
 

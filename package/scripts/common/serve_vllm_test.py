@@ -44,6 +44,7 @@ STUB_PYTHON = """#!/bin/bash
 case "$*" in
   *http.server*) exec sleep 30 ;;
   *distributed_timeout_seconds*) [ "$STUB_HAS_DIST_FLAG" = 1 ] ;;
+  *"- worker-0.svc"*) echo "2002:db8::1" ;;
   *) exit 0 ;;
 esac
 """
@@ -227,10 +228,13 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
     def test_caller_profiler_config_is_not_overridden(self):
         argv, envs, stderr = self._serve(
             "--profiler-config.profiler=torch",
-            "--profiler-config.torch_profiler_dir=/custom")
+            "--profiler-config.torch_profiler_dir=/custom",
+            "--data-parallel-address", "worker-0.svc")
         self.assertNotIn("--profiler-config", argv)
         self.assertNotIn("USE_PHASED_PROFILER", envs)
         self.assertEqual(envs["PYTHON_TRACER_LEVEL"], "0")
+        self.assertEqual(argv[argv.index("--data-parallel-address") + 1],
+                         "2002:db8::1")
         self.assertIn("keeping the caller's --profiler-config", stderr)
 
     def _with_applier(self, *patches):

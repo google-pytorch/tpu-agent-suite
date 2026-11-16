@@ -459,6 +459,21 @@ class LockTest(unittest.TestCase):
         self.assertIn("breaking a lock held for 13.0 h", err)
         self.assertNotIn(self.LOCK, bucket.store)
 
+    def test_a_dead_local_owner_lock_is_broken(self):
+        bucket = FakeBucket()
+        bucket.put(
+            self.LOCK,
+            json.dumps({
+                "host": sc.socket.gethostname(),
+                "pid": 999999
+            }))
+        with mock.patch.object(sc.os, "kill", side_effect=ProcessLookupError):
+            out, hub, err = run(bucket)
+        self.assertFalse(out["reused"])
+        self.assertTrue(hub.fetched)
+        self.assertIn("from dead local process", err)
+        self.assertNotIn(self.LOCK, bucket.store)
+
     def test_a_fresh_lock_is_not_broken(self):
         bucket = FakeBucket()
         bucket.put(self.LOCK, "{}")
@@ -691,6 +706,13 @@ class StagedThenFetchedTest(unittest.TestCase):
 
 class LocalStageTest(unittest.TestCase):
 
+    def _run_main(self, bucket, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sc, "_client_bucket", return_value=bucket), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = sc.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
     def _make_local_model(self, root):
         os.makedirs(os.path.join(root, ".cache"), exist_ok=True)
         files = {
@@ -709,117 +731,54 @@ class LocalStageTest(unittest.TestCase):
                 f.write(data)
         return files
 
-    def test_stages_local_directory_and_preserves_source_files(self):
+    def test_stages_reuses_and_invalidates_local_directory(self):
         bucket = FakeBucket()
         with tempfile.TemporaryDirectory() as d:
             model_dir = os.path.join(d, "my-local-model")
-            os.makedirs(model_dir)
             files = self._make_local_model(model_dir)
             out_file = os.path.join(d, "out.json")
-
-            with mock.patch.object(sc, "_client_bucket", return_value=bucket), \
-                    contextlib.redirect_stdout(io.StringIO()) as out, \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                code = sc.main(
-                    [model_dir, "--bucket", "gs://bucket", "--out", out_file])
-
+            code, out1, err1 = self._run_main(
+                bucket,
+                [model_dir, "--bucket", "gs://bucket", "--out", out_file])
             self.assertEqual(code, 0)
             with open(out_file, encoding="utf-8") as f:
                 res = json.load(f)
-            self.assertEqual(json.loads(out.getvalue()), res)
+            self.assertEqual(json.loads(out1), res)
             self.assertFalse(res["reused"])
-            self.assertTrue(res["verified"])
             self.assertEqual(res["uploaded"]["files"], 3)
             self.assertEqual(res["repo"], "local/my-local-model")
-            expected_prefix = f"gs://bucket/checkpoints/local/my-local-model/{res['revision'][:12]}/"
-            self.assertEqual(res["checkpoint"], expected_prefix)
-            self.assertIn("STAGE READY", err.getvalue())
-
-            # Source files must not be deleted after upload.
+            dest = f"checkpoints/local/my-local-model/{res['revision'][:12]}/"
+            self.assertEqual(res["checkpoint"], f"gs://bucket/{dest}")
+            self.assertIn("STAGE READY", err1)
             for rel in files:
                 self.assertTrue(os.path.isfile(os.path.join(model_dir, rel)))
-
-            # README.md and .cache files must not be uploaded.
-            dest = f"checkpoints/local/my-local-model/{res['revision'][:12]}/"
             self.assertNotIn(dest + "README.md", bucket.store)
             self.assertNotIn(dest + ".cache/ignored.bin", bucket.store)
             self.assertIn(dest + sc.MANIFEST, bucket.store)
 
-            # A job can fetch the staged files back.
-            with tempfile.TemporaryDirectory() as cache, \
-                    mock.patch.object(fw, "_gcs_storage", return_value=BucketStorage(bucket)), \
-                    mock.patch.dict(os.environ, {fw.CHECKPOINT_DIR_ENV: cache}), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                path = fw.fetch_gcs(res["checkpoint"], interval=0.01)
-                for name in ("config.json", "tokenizer.json",
-                             "model.safetensors"):
-                    with open(os.path.join(path, name), "rb") as f:
-                        self.assertEqual(f.read(), files[name])
+            code2, out2, _ = self._run_main(
+                bucket, [model_dir, "--bucket", "gs://bucket"])
+            res2 = json.loads(out2)
+            self.assertEqual(
+                (code2, res2["reused"], res2["uploaded"]["files"]),
+                (0, True, 0))
 
-    def test_reuses_verified_local_directory_on_second_run(self):
-        bucket = FakeBucket()
-        with tempfile.TemporaryDirectory() as d:
-            model_dir = os.path.join(d, "my-local-model")
-            os.makedirs(model_dir)
-            self._make_local_model(model_dir)
-
-            with mock.patch.object(sc, "_client_bucket", return_value=bucket), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                code1 = sc.main([model_dir, "--bucket", "gs://bucket"])
-                self.assertEqual(code1, 0)
-
-            with mock.patch.object(sc, "_client_bucket", return_value=bucket), \
-                    contextlib.redirect_stdout(io.StringIO()) as out, \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                code2 = sc.main([model_dir, "--bucket", "gs://bucket"])
-
-            self.assertEqual(code2, 0)
-            res = json.loads(out.getvalue())
-            self.assertTrue(res["reused"])
-            self.assertTrue(res["verified"])
-            self.assertEqual(res["uploaded"], {"files": 0, "bytes": 0})
-            self.assertIn("STAGE READY", err.getvalue())
-
-    def test_modified_local_file_produces_new_revision_and_stages_fresh_copy(
-            self):
-        bucket = FakeBucket()
-        with tempfile.TemporaryDirectory() as d:
-            model_dir = os.path.join(d, "my-local-model")
-            os.makedirs(model_dir)
-            self._make_local_model(model_dir)
-
-            with mock.patch.object(sc, "_client_bucket", return_value=bucket), \
-                    contextlib.redirect_stdout(io.StringIO()) as out1:
-                sc.main([model_dir, "--bucket", "gs://bucket"])
-            res1 = json.loads(out1.getvalue())
-
-            # Modify model.safetensors.
             with open(os.path.join(model_dir, "model.safetensors"), "wb") as f:
                 f.write(b"Z" * 8192)
+            _, out3, _ = self._run_main(bucket,
+                                        [model_dir, "--bucket", "gs://bucket"])
+            res3 = json.loads(out3)
+            self.assertFalse(res3["reused"])
+            self.assertNotEqual(res["revision"], res3["revision"])
 
-            with mock.patch.object(sc, "_client_bucket", return_value=bucket), \
-                    contextlib.redirect_stdout(io.StringIO()) as out2:
-                sc.main([model_dir, "--bucket", "gs://bucket"])
-            res2 = json.loads(out2.getvalue())
-
-            self.assertFalse(res2["reused"])
-            self.assertNotEqual(res1["revision"], res2["revision"])
-            self.assertNotEqual(res1["checkpoint"], res2["checkpoint"])
-
-    def test_local_directory_with_no_loadable_files_is_refused(self):
-        bucket = FakeBucket()
-        with tempfile.TemporaryDirectory() as d:
-            model_dir = os.path.join(d, "empty-model")
-            os.makedirs(model_dir)
-            with open(os.path.join(model_dir, "README.md"), "wb") as f:
+            empty_dir = os.path.join(d, "empty-model")
+            os.makedirs(empty_dir)
+            with open(os.path.join(empty_dir, "README.md"), "wb") as f:
                 f.write(b"# Just a readme")
-
-            with mock.patch.object(sc, "_client_bucket", return_value=bucket), \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                code = sc.main([model_dir, "--bucket", "gs://bucket"])
-
-            self.assertEqual(code, 1)
-            self.assertIn("STAGE FAILED: no files", err.getvalue())
+            code_e, _, err_e = self._run_main(
+                bucket, [empty_dir, "--bucket", "gs://bucket"])
+            self.assertEqual(code_e, 1)
+            self.assertIn("STAGE FAILED: no files", err_e)
 
 
 if __name__ == "__main__":

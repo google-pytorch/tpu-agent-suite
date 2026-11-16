@@ -66,9 +66,11 @@ import os
 import pathlib
 import posixpath
 import re
+import signal
 import socket
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -383,15 +385,32 @@ class _Lock:
         self.generation = blob.generation
         return True
 
+    @staticmethod
+    def _dead_local_owner(blob) -> bool:
+        try:
+            owner = json.loads(blob.download_as_bytes())
+            pid = int(owner.get("pid") or 0)
+            if owner.get("host") == socket.gethostname() and pid > 0:
+                os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        return False
+
     def break_if_stale(self, stale_sec: float) -> bool:
-        """Deletes the lock if it is older than `stale_sec`; True if gone."""
+        """Deletes the lock if older than `stale_sec` or owned by a dead local PID."""
         blob = self.bucket.get_blob(self.name)
         if blob is None:
             return True
-        if _age_sec(blob) < stale_sec:
+        age = _age_sec(blob)
+        dead = age < stale_sec and self._dead_local_owner(blob)
+        if age < stale_sec and not dead:
             return False
-        _say(f"STAGE NOTE breaking a lock held for {_age_sec(blob) / 3600:.1f}"
-             f" h: gs://{self.bucket.name}/{self.name}")
+        why = "from dead local process" if dead else f"held for {age / 3600:.1f} h"
+        _say(
+            f"STAGE NOTE breaking a lock {why}: gs://{self.bucket.name}/{self.name}"
+        )
         try:
             blob.delete(if_generation_match=blob.generation)
         except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -670,6 +689,10 @@ def main(argv: list[str] | None = None) -> int:
         "plan": local_plan,
         "fetch": local_fetch(args.model)
     } if os.path.isdir(args.model) else {})
+    prev_term = None
+    if threading.current_thread() is threading.main_thread():
+        prev_term = signal.signal(signal.SIGTERM,
+                                  lambda s, _: sys.exit(128 + s))
     try:
         out = stage(_client_bucket(args.bucket),
                     args.model,
@@ -686,6 +709,9 @@ def main(argv: list[str] | None = None) -> int:
             args.bucket, f"{type(exc).__name__}: {exc}")
         _say(f"STAGE FAILED: {problem}")
         return 1
+    finally:
+        if prev_term is not None:
+            signal.signal(signal.SIGTERM, prev_term)
     text = json.dumps(out, indent=2)
     if args.out:
         pathlib.Path(args.out).write_text(text + "\n", encoding="utf-8")

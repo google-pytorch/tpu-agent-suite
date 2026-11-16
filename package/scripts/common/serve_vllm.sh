@@ -136,6 +136,44 @@ if [ -s "$PATCHES" ]; then
 fi
 
 ARGS=("$@")
+resolve_dp_addr() {
+  "$PY" - "$1" <<'PY' 2>/dev/null || true
+import ipaddress, socket, sys, time
+h = sys.argv[1].strip().strip("[]")
+try:
+    ipaddress.ip_address(h); print(h); raise SystemExit(0)
+except ValueError:
+    pass
+for _ in range(15):
+    try:
+        print(socket.getaddrinfo(h, None, type=socket.SOCK_STREAM)[0][4][0])
+        raise SystemExit(0)
+    except (OSError, IndexError):
+        time.sleep(1)
+PY
+}
+_dp_size=1
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+  case "${ARGS[i]}" in
+    --data-parallel-size | -dp)
+      ((i + 1 < ${#ARGS[@]})) && _dp_size="${ARGS[i + 1]}" ;;
+    --data-parallel-size=* | -dp=*)
+      _dp_size="${ARGS[i]#*=}" ;;
+    --data-parallel-address)
+      if ((i + 1 < ${#ARGS[@]})); then
+        _ip="$(resolve_dp_addr "${ARGS[i + 1]}")"
+        [ -n "$_ip" ] && ARGS[i + 1]="$_ip"
+      fi ;;
+    --data-parallel-address=*)
+      _ip="$(resolve_dp_addr "${ARGS[i]#*=}")"
+      [ -n "$_ip" ] && ARGS[i]="--data-parallel-address=$_ip" ;;
+  esac
+done
+if [ "${TPU_MULTIHOST_BACKEND:-}" = mp ] && [ -n "${TPU_HEAD_HOST:-}" ] \
+  && [[ "$_dp_size" =~ ^[0-9]+$ ]] && [ "$_dp_size" -gt 1 ]; then
+  _ip="$(resolve_dp_addr "$TPU_HEAD_HOST")"
+  [ -n "$_ip" ] && TPU_HEAD_HOST="$_ip"
+fi
 OWN_CONFIG=""
 for arg in "$@"; do
   case "$arg" in
