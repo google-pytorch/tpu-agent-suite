@@ -205,7 +205,7 @@ arm's slot before claiming the next.
 4. **Submit** with the claim's profile, then `set-job` as agent.md "serve" step 2:
 
    ```bash
-   {{runtime}} compute submit --package {{package_tag}} --profile <profile> --run-id <run_id> \
+   {{runtime}} compute submit --package {{package_tag}} --profile <profile> \
      --recipe {{script:accuracy-check/eval_recipe.sh}} --interpreter bash --image <arm image> \
      --input <out>/<arm>/vllm_server_cmd.txt:vllm_server_cmd.txt \
      --input <out>/<arm>/eval_cmd.txt:eval_cmd.txt \

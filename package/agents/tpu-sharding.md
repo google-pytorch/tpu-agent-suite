@@ -223,7 +223,7 @@ The `report_<N>.md` file expands on the `state.json` summary with in-depth techn
    - **Abandon Executor Agent**: Stop waiting on the hung subagent and discard any result it may still return.
    - **Reap Orphaned Jobs**: Cancel any active or orphaned compute jobs belonging to this run:
      ```bash
-     {{runtime}} compute job reap --run-id <run_id>
+     {{runtime}} compute job reap
      ```
    - **Update State**: Record `"status": "TIMEOUT"` and `"failure_reason": "Executor Hung - Cleaned Up"` in `<artifacts>/state.json` for that run.
    - **Notify User & Recover**: Inform the user that the Executor hung, physical job was cleaned up, and spawn a fresh subagent to resume the optimization cycle.

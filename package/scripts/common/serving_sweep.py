@@ -1507,6 +1507,8 @@ def load_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if hasattr(args, "run_id"):
+        args.run_id = args.run_id or tpu_slots.active_run_id()
     if args.command == "plan":
         try:
             plan = make_plan(args.client_args, args.max_model_len)

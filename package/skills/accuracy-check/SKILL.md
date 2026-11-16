@@ -72,7 +72,7 @@ Then submit:
   --input <work>/vllm_server_cmd.txt:vllm_server_cmd.txt \
   --input <work>/eval_cmd.txt:eval_cmd.txt \
   --output eval_out.tar.gz --output server.log \
-  --run-id <run_id> --name accuracy-check-<config> \
+  --name accuracy-check-<config> \
   -- SERVED_MODEL_NAME=<HF id> EVAL_TASKS=mmlu_pro EVAL_LIMIT=100
 JOB_ID=$({{runtime}} compute job list --run-id <run_id> --json --no-refresh \
   | python3 -c "import json,sys;print(next(r['job_id'] for r in json.load(sys.stdin) if r['job_name']=='accuracy-check-<config>'))")

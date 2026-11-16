@@ -53,15 +53,15 @@ exit 2 (the repo holds another image's base) `invalid_input`. Otherwise run one 
 that bundles the history, under a slot released on every exit:
 
 ```bash
-python3 {{script:common/tpu_slots.py}} claim --run-id <run_id> \
+python3 {{script:common/tpu_slots.py}} claim \
   --holder tpu-code-stack:probe --profile <profile>
 {{runtime}} compute submit --profile <profile> --image <image> \
   --recipe {{script:common/plugin_source.py}} --output plugin.bundle --output plugin.json \
-  --run-id <run_id> --name tpu-code-stack-plugin-probe -- probe --output plugin.bundle
-python3 {{script:common/tpu_slots.py}} set-job --run-id <run_id> --resource <resource> \
+  --name tpu-code-stack-plugin-probe -- probe --output plugin.bundle
+python3 {{script:common/tpu_slots.py}} set-job --resource <resource> \
   --holder tpu-code-stack:probe --job-id <job_id>
 {{runtime}} compute job wait --job-id <job_id> --until done
-python3 {{script:common/tpu_slots.py}} release --run-id <run_id> --resource <resource> \
+python3 {{script:common/tpu_slots.py}} release --resource <resource> \
   --holder tpu-code-stack:probe
 {{runtime}} compute job artifacts --job-id <job_id> --out-dir <work>/jobs/<job_id>
 python3 {{script:common/plugin_source.py}} base <repo> <work>/jobs/<job_id> --image <image>

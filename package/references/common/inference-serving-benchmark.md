@@ -475,7 +475,7 @@ How the sweep works:
     ```bash
     W=<bench_work>/sweep && mkdir -p "$W" && nohup python3 \
       {{script:common/serving_sweep.py}} run \
-      --runtime "{{runtime}}" --package {{package_tag}} --run-id <run_id> \
+      --runtime "{{runtime}}" --package {{package_tag}} \
       --name <deployment name> --port <port> --leader $JOB_ID \
       --recipe <the launch recipe, e.g. launch_vllm.sh> \
       --server-input <each --input of the server's submit> \
@@ -509,7 +509,7 @@ How the sweep works:
 
     ```bash
     python3 {{script:common/serving_sweep.py}} cleanup --runtime "{{runtime}}" \
-      --package {{package_tag}} --run-id <run_id> --out-dir "$W"
+      --package {{package_tag}} --out-dir "$W"
     ```
 
 4.  **Read** `$W/serving_bench/summary.json` as "Report" below says, beside

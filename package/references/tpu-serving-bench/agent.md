@@ -62,7 +62,7 @@ With `shapes`, keep only those `isl:osl` pairs in `--isl-osl`; a listed shape th
 the session's `parallel.json` if there is none and keeps every server on one kind, which its merged
 summary names in `shards[].hardware`. Every later arm passes that key, and the result returns it.
 Claim nothing to find the key. When `parallel.json` already lists more than one hardware key
-(`python3 {{script:common/tpu_slots.py}} show --run-id <run_id>`), return `invalid_input` naming
+(`python3 {{script:common/tpu_slots.py}} show`), return `invalid_input` naming
 them, since the caller must pick one. The session's slots are the ones its compute profiles declare, never measured: the
 first sweep writes `parallel.json` from them when there is none. A Job waiting in its Kueue queue is waiting, not `blocked`; no slot of the
 key in any profile is `blocked`.
@@ -106,7 +106,7 @@ arm's kept servers hold its slot until its own step 7.
    ```bash
    W=<out>/<arm>/sweep && mkdir -p "$W" && nohup python3 \
      {{script:common/serving_sweep.py}} run \
-     --runtime "{{runtime}}" --package {{package_tag}} --run-id <run_id> \
+     --runtime "{{runtime}}" --package {{package_tag}} \
      --name <label>-<arm> --port <port> --recipe <launch recipe> \
      --server-input {{script:common/serve_vllm.sh}}:serve_vllm.sh \
      --server-input <each other input> [--interpreter <interpreter>] \
@@ -150,7 +150,7 @@ arm's kept servers hold its slot until its own step 7.
 
    ```bash
    python3 {{script:common/serving_sweep.py}} cleanup --runtime "{{runtime}}" \
-     --package {{package_tag}} --run-id <run_id> --out-dir <out>/<arm>/sweep
+     --package {{package_tag}} --out-dir <out>/<arm>/sweep
    ```
 
 8. **Compare.** Per arm, one `cells` row per summary cell: `output_tokens_per_s`, `ttft_p50_ms`,
@@ -181,7 +181,7 @@ Per arm, one server left running:
 1. **Slot**, holder `tpu-serving-bench:<label>:<arm>`:
 
    ```bash
-   python3 {{script:common/tpu_slots.py}} claim --run-id <run_id> \
+   python3 {{script:common/tpu_slots.py}} claim \
      --holder tpu-serving-bench:<label>:<arm> --hardware <hardware> \
      --runtime "{{runtime}}" --package {{package_tag}}
    ```
@@ -191,14 +191,14 @@ Per arm, one server left running:
    and the applier:
 
    ```bash
-   {{runtime}} compute submit --package {{package_tag}} --profile <profile> --run-id <run_id> \
+   {{runtime}} compute submit --package {{package_tag}} --profile <profile> \
      --recipe <launch recipe> [--interpreter <interpreter>] --serve --image <arm image> \
      --input {{script:common/serve_vllm.sh}}:serve_vllm.sh --input <each other input> \
      [--input <patch>:<name> ... \
       --input {{script:common/vllm_patches/apply_vllm_patch.sh}}:apply_vllm_patch.sh \
       --input <out>/<arm>/vllm_patches.txt:vllm_patches.txt] [<submit flag> ...] \
      --name <label>-<arm>
-   python3 {{script:common/tpu_slots.py}} set-job --run-id <run_id> --resource <resource> \
+   python3 {{script:common/tpu_slots.py}} set-job --resource <resource> \
      --holder tpu-serving-bench:<label>:<arm> --job-id <job_id>
    {{runtime}} compute job wait --package {{package_tag}} --job-id <job_id> \
      --until "log:Application startup complete" \
@@ -238,7 +238,7 @@ Per server: with `sweep_dir`, run the sweep's `cleanup` there (bench step 7). Ot
 
 ```bash
 {{runtime}} compute job cancel --package {{package_tag}} --job-id <job_id>
-python3 {{script:common/tpu_slots.py}} release --run-id <run_id> --resource <resource> \
+python3 {{script:common/tpu_slots.py}} release --resource <resource> \
   --holder <holder>
 ```
 

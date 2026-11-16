@@ -85,7 +85,7 @@ next.
     yet, the claim writes it from the profiles:
 
     ```bash
-    python3 {{script:common/tpu_slots.py}} claim --run-id <run_id> \
+    python3 {{script:common/tpu_slots.py}} claim \
       --holder tpu-model-onboarding:<deployment name> --most-available \
       --runtime "{{runtime}}" --package {{package_tag}}
     ```
@@ -348,7 +348,7 @@ next.
     -   *Verification mode*: tear the deployment down now, via
         torch-inference-coder Task 5, and kill the port forward. If Step 0.1b
         claimed a slot, release it, also when the workflow ends early:
-        `python3 {{script:common/tpu_slots.py}} release --run-id <run_id>
+        `python3 {{script:common/tpu_slots.py}} release
         --resource <resource> --holder tpu-model-onboarding:<deployment name>`.
         Report the parity verdict, the verification result, and that the
         deployment was ended and the chips released. Do not hand back a

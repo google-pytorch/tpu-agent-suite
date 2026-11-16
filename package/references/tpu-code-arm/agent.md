@@ -44,7 +44,7 @@ its submit drops that `--input`. A candidate also ships the incumbent's `outputs
   --recipe <arm>/probes/<nn>-<side>/run.sh --interpreter bash \
   --input {{script:common/vllm_patches/apply_vllm_patch.sh}} --input <arm>/probes/<nn>-<side>/plugin.patch \
   --input <arm>/probes/<nn>-<side>/probe.py --output result.json --output outputs.pt \
-  --run-id <run_id> --name tpu-code-arm-<slug>-<nn>
+  --name tpu-code-arm-<slug>-<nn>
 ```
 
 Save `{{runtime}} compute job logs --job-id <job_id>` as `probes/<nn>-<side>/<job_id>.txt`.
@@ -54,11 +54,11 @@ Save `{{runtime}} compute job logs --job-id <job_id>` as `probes/<nn>-<side>/<jo
 holder would put every job on one slot.
 
 ```bash
-python3 {{script:common/tpu_slots.py}} claim --run-id <run_id> \
+python3 {{script:common/tpu_slots.py}} claim \
   --holder tpu-code-arm:<slug>:<nn> --hardware <target.hardware>
-python3 {{script:common/tpu_slots.py}} set-job --run-id <run_id> --resource <resource> \
+python3 {{script:common/tpu_slots.py}} set-job --resource <resource> \
   --holder tpu-code-arm:<slug>:<nn> --job-id $JOB_ID
-python3 {{script:common/tpu_slots.py}} release --run-id <run_id> --resource <resource> \
+python3 {{script:common/tpu_slots.py}} release --resource <resource> \
   --holder tpu-code-arm:<slug>:<nn>
 ```
 

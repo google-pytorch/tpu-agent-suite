@@ -250,10 +250,13 @@ class TestCli(SlotCase):
         with unittest.mock.patch.dict("os.environ",
                                       {"TPU_AGENT_SUITE_HOME": "/h"},
                                       clear=True):
-            self.assertEqual(tpu_slots.state_path("r1"),
-                             pathlib.Path("/h/runs/r1/parallel.json"))
-            with self.assertRaises(tpu_slots.NeedsInput):
-                tpu_slots.state_path(None)
+            self.assertEqual(
+                tpu_slots.state_path("20260101T000000Z-0123456789ab"),
+                pathlib.Path(
+                    "/h/runs/20260101T000000Z-0123456789ab/parallel.json"))
+            for bad in (None, "../../etc"):
+                with self.assertRaises(tpu_slots.NeedsInput):
+                    tpu_slots.state_path(bad)
         argv = ["claim", "--holder", "a", "--state", str(self.path)]
         with unittest.mock.patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(tpu_slots.main(argv), tpu_slots.EXIT_NEEDS_INPUT)
@@ -272,6 +275,24 @@ class TestCli(SlotCase):
         argv[2] = "b"
         with unittest.mock.patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(tpu_slots.main(argv), tpu_slots.EXIT_REFUSED)
+
+    def test_the_run_defaults_to_the_workspaces_active_run(self):
+        """Agents pass no --run-id, so none is copied by hand."""
+        root = pathlib.Path(self.tmp.name)
+        marker = root / ".tpu-agent-suite" / "current_run_id"
+        marker.parent.mkdir()
+        marker.write_text("20260101T000000Z-0123456789ab\n", encoding="utf-8")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(root)
+        with unittest.mock.patch.dict("os.environ",
+                                      {"TPU_AGENT_SUITE_HOME": str(root)},
+                                      clear=True), \
+                unittest.mock.patch.object(tpu_slots, "show",
+                                           return_value={}) as show, \
+                unittest.mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(tpu_slots.main(["show"]), tpu_slots.EXIT_OK)
+        show.assert_called_once_with(
+            root / "runs" / "20260101T000000Z-0123456789ab" / "parallel.json")
 
 
 if __name__ == "__main__":

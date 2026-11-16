@@ -719,7 +719,7 @@ here; do not dispatch again.
 
     ```bash
     {{runtime}} compute job list --run-id <run_id>
-    {{runtime}} compute job reap --run-id <run_id>
+    {{runtime}} compute job reap
     ```
 
     Skip the reap if `job list` is empty. Do not pass `--include-serving`:

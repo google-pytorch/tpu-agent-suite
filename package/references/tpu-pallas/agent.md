@@ -138,7 +138,7 @@ imports the plugin.
   --input {{script:common/vllm_patches/apply_vllm_patch.sh}} --input <campaign>/probes/<nn>-<slug>/plugin.patch \
   --input <campaign>/probes/<nn>-<slug>/probe.py --input <campaign>/probes/<nn>-<slug>/README.md \
   --input <incumbent file> --input <campaign>/variants/<name>.py --input <instruments> \
-  --output <result file> --run-id <run_id> --name tpu-pallas-<slug>-<nn>
+  --output <result file> --name tpu-pallas-<slug>-<nn>
 ```
 
 Save `{{runtime}} compute job logs --job-id <job_id>` as `probes/<nn>-<slug>/<job_id>.txt`.
@@ -148,11 +148,11 @@ Save `{{runtime}} compute job logs --job-id <job_id>` as `probes/<nn>-<slug>/<jo
 holder would put every job on one slot.
 
 ```bash
-python3 {{script:common/tpu_slots.py}} claim --run-id <run_id> \
+python3 {{script:common/tpu_slots.py}} claim \
   --holder tpu-pallas:<slug>:<nn> --hardware <target.hardware>
-python3 {{script:common/tpu_slots.py}} set-job --run-id <run_id> --resource <resource> \
+python3 {{script:common/tpu_slots.py}} set-job --resource <resource> \
   --holder tpu-pallas:<slug>:<nn> --job-id $JOB_ID
-python3 {{script:common/tpu_slots.py}} release --run-id <run_id> --resource <resource> \
+python3 {{script:common/tpu_slots.py}} release --resource <resource> \
   --holder tpu-pallas:<slug>:<nn>
 ```
 

@@ -50,12 +50,15 @@ The file is read under a shared lock and changed only under an exclusive one,
 and replaced whole, so concurrent claims from threads or processes neither
 double-book a slot nor leave a half-written file.
 
-    tpu_slots.py claim    --run-id R --holder H \\
+    tpu_slots.py claim    --holder H \\
         [--resource NAME | --profile P | --hardware KEY | --most-available] \\
         [--runtime "<runtime>" --package P]
-    tpu_slots.py set-job  --run-id R --resource NAME --holder H --job-id J
-    tpu_slots.py release  --run-id R --resource NAME [--holder H]
-    tpu_slots.py show     --run-id R
+    tpu_slots.py set-job  --resource NAME --holder H --job-id J
+    tpu_slots.py release  --resource NAME [--holder H]
+    tpu_slots.py show
+
+`--run-id R` is optional everywhere: without it the run is the one the
+session-start hook recorded for the workspace.
 
 Every command prints one JSON object. Exit codes: 0 done, 2 the session lacks
 what is asked for (no parallel.json, no TPU profile, an unknown slot), 3
@@ -71,6 +74,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import sys
@@ -106,10 +110,24 @@ def state_path(run_id: str | None, explicit: str | None = None) -> Path:
     if explicit or os.environ.get("VMBENCH_STATE"):
         return Path(explicit or os.environ["VMBENCH_STATE"])
     if not run_id:
-        raise NeedsInput("parallel.json belongs to a run: pass --run-id")
+        raise NeedsInput("parallel.json belongs to a run: pass --run-id, or"
+                         " run this inside a workspace with an active run")
+    # The framework's run-id format, so neither the flag nor the marker can
+    # point outside runs/.
+    if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}", run_id):
+        raise NeedsInput(f"invalid run id {run_id!r}")
     home = os.environ.get("TPU_AGENT_SUITE_HOME", "").strip()
     root = Path(home) if home else Path.home() / ".tpu-agent-suite"
     return root / "runs" / run_id / "parallel.json"
+
+
+def active_run_id() -> str | None:
+    """The run the session-start hook recorded for this workspace, if any."""
+    for directory in (Path.cwd(), *Path.cwd().parents):
+        marker = directory / ".tpu-agent-suite" / "current_run_id"
+        if marker.is_file():
+            return marker.read_text(encoding="utf-8").strip() or None
+    return None
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -536,6 +554,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    args.run_id = args.run_id or active_run_id()
     try:
         path = state_path(args.run_id, args.state)
         if args.command == "claim":

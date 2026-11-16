@@ -67,7 +67,7 @@ Pass that same `run_id` verbatim when you delegate to any subagent.
     -   **Generate Batch Recipe**: Format the configuration payload into a launch script `<artifacts>/<N>/recipe_<N>.<ext>` defining the workload execution commands, where `<ext>` matches the language you wrote it in (`.sh` or `.py`). Backends pick the runner from that extension: `bash` for `.sh`, the configured interpreter otherwise.
     -   **Submit Workload**:
         ```bash
-        JOB_ID=$({{runtime}} compute submit --recipe <artifacts>/<N>/recipe_<N>.<ext> --run-id <run_id>)
+        JOB_ID=$({{runtime}} compute submit --recipe <artifacts>/<N>/recipe_<N>.<ext>)
         ```
     -   **Register Active Job ID**: Write the `JOB_ID` into `<artifacts>/<N>/report_<N>.md` (setting `Job ID: <JOB_ID>`) as soon as the job is submitted.
     -   **Monitor & Poll Status**:

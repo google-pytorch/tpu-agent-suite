@@ -86,7 +86,7 @@ To make your existing AGY Agent compatible with the framework, restructure it to
      {{runtime}} compute job artifacts --job-id $JOB_ID [--out-dir <dir>]  # each --output lands at {{runs}}/<run_id>/artifacts/<job_id>/<remote> (or <dir>/<remote>)
      {{runtime}} compute job list [--run-id <run_id>] [--no-refresh]  # --no-refresh: recorded status, no backend calls
      {{runtime}} compute job cancel --job-id $JOB_ID
-     {{runtime}} compute job reap --run-id <run_id> [--include-serving]  # --serve jobs survive a plain reap
+     {{runtime}} compute job reap [--include-serving]  # --serve jobs survive a plain reap
      ```
 
    * **Port forwarding**:
