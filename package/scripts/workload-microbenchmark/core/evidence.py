@@ -30,6 +30,8 @@ Written by `cli.py collect` next to the job's result.json. Contents:
   offload             SparseCore offload threshold the pod ran with; every profiled collective
                       with its size and which side of the threshold it falls on, twin and served
   pb                  rank-0 .xplane.pb path
+  patches             the vllm_torchtpu patch stack the job applied (forward-cmd --patch), each
+                      patch's sha256 and applier exit code, and the outcome
 """
 
 from __future__ import annotations
@@ -59,6 +61,34 @@ def _find_one(job_dir: str, pattern: str) -> str | None:
         glob.glob(os.path.join(job_dir, "outputs", "**", pattern),
                   recursive=True))
     return hits[-1] if hits else None
+
+
+WHAT = "evidence for REPORT.md (data only; the agent writes the report)"
+#: the line a forward-cmd recipe prints after each `apply_vllm_patch.sh`
+_PATCH_LINE = re.compile(r"WMB_PATCH name=(\S+) sha256=(\w+) exit=(-?\d+)\s*$")
+
+
+def patches(job_dir: str) -> dict:
+    """The patch stack from the marker lines in the job's fetched log (`<job>.log`). Applier
+    exit 4 is "patch does not apply" (base mismatch); 2 and 3 are infrastructure failures."""
+    stack = []
+    for path in sorted(glob.glob(os.path.join(job_dir, "*.log"))):
+        for line in open(path, errors="replace"):
+            if "WMB_PATCH" not in line:
+                continue
+            m = _PATCH_LINE.search(line)
+            if m:
+                stack.append({
+                    "name": m.group(1),
+                    "sha256": m.group(2),
+                    "exit": int(m.group(3))
+                })
+    rc = next((p["exit"] for p in stack if p["exit"]), 0)
+    outcome = None if not stack else {
+        0: "applied",
+        4: "patch does not apply"
+    }.get(rc, "infrastructure failure")
+    return {"stack": stack, "exit": rc, "outcome": outcome}
 
 
 def fetch_rank0(job_dir: str) -> str | None:
@@ -225,7 +255,7 @@ def build(job_dir: str, plan_path: str) -> dict[str, Any]:
     lay = layers(plan, plan_path)
     return {
         "_what":
-        "evidence for REPORT.md (data only; the agent writes the report)",
+        WHAT,
         "job_id":
         os.path.basename(job_dir.rstrip("/")),
         "result":
@@ -264,4 +294,6 @@ def build(job_dir: str, plan_path: str) -> dict[str, Any]:
         xprof_categories(os.path.dirname(res)),
         "offload":
         offload(r.get("effective_env") or [], steps, twin_world, real_world),
+        "patches":
+        patches(job_dir),
     }

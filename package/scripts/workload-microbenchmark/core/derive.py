@@ -152,16 +152,29 @@ def server_env(env: dict) -> dict:
     }
 
 
-def load_model(model_dir: str):
-    path = os.path.join(model_path(model_dir), "model.py")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"{path} missing: onboard the model first "
-                                f"(`cli.py onboard {model_dir} --job <id>`)")
-    spec = importlib.util.spec_from_file_location(f"wmb_model_{model_dir}",
-                                                  path)
+def _import(name: str, path: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def load_model(model_dir: str, ckpt: dict | None = None):
+    """`<MODEL_DIR>/model.py` from the first root that has it, else generic/model.py when it
+    classifies `ckpt` (the checkpoint config.json) as a standard decoder-only model."""
+    path = os.path.join(model_path(model_dir), "model.py")
+    if not os.path.exists(path):
+        msg = (f"{path} missing: onboard the model first "
+               f"(`cli.py onboard {model_dir} --job <id>`)")
+        generic_path = os.path.join(SCRIPTS, "generic", "model.py")
+        if os.path.exists(generic_path):  # not in builds that do not ship it
+            generic = _import("wmb_model_generic", generic_path)
+            why = generic.classify(ckpt) if ckpt is not None else []
+            if not why:
+                return generic
+            msg += f"; generic/model.py does not fit: {'; '.join(why)}"
+        raise FileNotFoundError(msg)
+    return _import(f"wmb_model_{model_dir}", path)
 
 
 def feasibility(f: Facts,
@@ -241,7 +254,7 @@ def derive(snap: dict[str, Any],
            overrides: dict[str, str] | None = None,
            twin_world: int = 8) -> dict[str, Any]:
     overrides = overrides or {}
-    mod = load_model(model_dir)
+    mod = load_model(model_dir, snap["checkpoint_config"])
     rec = snap["recipe"]
     source = deploy_from_args(rec["server_args"], rec["env"])
     log = snap.get("log") or {}

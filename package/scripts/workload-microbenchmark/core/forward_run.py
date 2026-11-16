@@ -623,7 +623,13 @@ def _prepare_sampling(r, rows: list, ids, verify: int, sampling: dict) -> dict:
         0, n, torch.zeros((preqs, 1), dtype=torch.float32))
     rec["image_returns_k_bound"] = len(probe) == 4
     rec["k_bound"] = int(probe[3]) if len(probe) == 4 else None
-    return {"md": md, "idx": idx, "rec": rec, "n": n}
+    return {
+        "md": md,
+        "idx": idx,
+        "rec": rec,
+        "n": n,
+        "greedy": bool(sampling.get("greedy"))
+    }
 
 
 def _sample_stage(r, hidden, plan, st: dict):
@@ -632,7 +638,9 @@ def _sample_stage(r, hidden, plan, st: dict):
     the target LM head on the sampled rows (`maybe_select_logits_hidden_states` /
     `compute_selected_logits`), then for an MTP verify step `_sample_spec_verify_chunk` (bonus
     token: `_build_padded_sampling_params` + Gumbel `sample_from_logits`; drafts: the rejection
-    sampler), else `_build_padded_sampling_params` + `sample_from_logits`. Not included: logprobs
+    sampler), else `_build_padded_sampling_params` + `sample_from_logits`; a greedy plan takes
+    the runner's all-greedy calls instead (`_greedy_sample`, `all_greedy` on the verify chunk).
+    Not included: logprobs
     (the job requested none), structured output, the mamba read-offset update after the verify.
     Returns the sampled token tensor (not synchronized)."""
     import torch
@@ -647,7 +655,9 @@ def _sample_stage(r, hidden, plan, st: dict):
     gen = r._get_sampling_generator()
     if st["md"] is not None:
         return r._sample_spec_verify_chunk(logits, st["md"], None, None, 0,
-                                           st["n"], False, gen)
+                                           st["n"], st["greedy"], gen)
+    if st["greedy"]:
+        return r._greedy_sample(logits)
     p = r._build_padded_sampling_params(0, st["n"], logits)
     kw = {"k_bound": p[3]} if len(p) == 4 else {}
     u = torch.rand_like(logits, generator=gen)
@@ -1458,7 +1468,18 @@ def run_plan(engine, plan: dict, scale: float, a, prof_dir: str,
     result["mix"] = _mix_rollup(plan, result["points"])
     if a.profile:
         t = time.time()
-        engine.start_profile()
+        if a.profile_options:
+            # vLLM's start_profile accepts only a file-name prefix, so options go
+            # straight to the plugin worker's profile() as TpuProfilerConfig options.
+            engine.collective_rpc("profile",
+                                  kwargs={
+                                      "is_start":
+                                      True,
+                                      "profiler_kwargs":
+                                      json.loads(a.profile_options)
+                                  })
+        else:
+            engine.start_profile()
         order = []
         # each step `--profile-iters` times, consecutively and under the same label: the cost
         # model pools same-label steps (one profile is one step; its per-layer noise is
@@ -1481,7 +1502,10 @@ def run_plan(engine, plan: dict, scale: float, a, prof_dir: str,
                     "sampling": bool(SAMPLING)
                 })
                 time.sleep(0.03)  # a visible gap between steps in the trace
-        engine.stop_profile()
+        if a.profile_options:
+            engine.collective_rpc("profile", kwargs={"is_start": False})
+        else:
+            engine.stop_profile()
         os.system(
             f"mkdir -p {a.out}/xprof && cp -a {prof_dir}/. {a.out}/xprof/")
         mark(f"profile window ({len(window)} steps) + merge", t)
@@ -1867,6 +1891,12 @@ def _image_source(out_dir: str, extra: list | None = None) -> dict:
 
 
 CACHE_DIR = "/tmp/wmb_cache"  # every compile cache inside one saved dir
+# libtpu flags that put the inside of Pallas/Mosaic custom calls in the trace: LLO
+# debug info, and runtime custom-call tracing (OpenXLA xprof custom_call_profiling).
+# They change the compile key and instrument every kernel, so only an unscored
+# capture sets them; with no custom calls they have nothing to instrument.
+KERNEL_TRACE_FLAGS = ("--xla_xprof_register_llo_debug_info=true",
+                      "--xla_xprof_enable_custom_call_tracing=true")
 
 
 def _run_env(twin: dict, cache_dir: str = CACHE_DIR) -> dict:
@@ -1919,6 +1949,17 @@ def main() -> int:
         "time the whole plan this many times in the same engine (report shows each)"
     )
     ap.add_argument("--profile", action="store_true")
+    ap.add_argument(
+        "--kernel-trace",
+        action="store_true",
+        help=
+        "an unscored capture of the inside of Pallas/Mosaic kernels: implies "
+        "--profile and appends KERNEL_TRACE_FLAGS to LIBTPU_INIT_ARGS")
+    ap.add_argument(
+        "--profile-options",
+        default="",
+        help="TpuProfilerConfig options as JSON, e.g. "
+        '\'{"tpu_enable_periodic_counter_sampling": true}\' (tpu7x and later)')
     ap.add_argument(
         "--profile-iters",
         type=int,
@@ -1991,6 +2032,12 @@ def main() -> int:
 
     cache_dir = CACHE_DIR
     os.environ.update(_run_env(twin, cache_dir))
+    if a.kernel_trace:
+        a.profile = True
+        have = os.environ.get("LIBTPU_INIT_ARGS", "").split()
+        os.environ["LIBTPU_INIT_ARGS"] = " ".join(
+            have + [f for f in KERNEL_TRACE_FLAGS if f not in have])
+        result["kernel_trace_flags"] = list(KERNEL_TRACE_FLAGS)
     if a.cache_in and os.environ.get("WMB_NODE_PREPPED") == "1":
         mark("compile cache restored per pod by --node-prep", time.time())
     elif a.cache_in:

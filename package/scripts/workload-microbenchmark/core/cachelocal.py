@@ -16,8 +16,9 @@
 A job saves its compile cache (`forward_run.py --save-cache`) to its output dir; after the job's
 files are fetched, `collect` / `cache-pull` file it here; `forward-cmd` hands the matching entry
 to the next job as an input, with `--cache-in`. The key hashes the image, the exact engine arguments (bucket included) and the
-plan's env (LIBTPU_INIT_ARGS / XLA_FLAGS change what is compiled), so two configs, shapes or
-envs never share an entry by accident. vLLM applies its own finer key
+plan's env (LIBTPU_INIT_ARGS / XLA_FLAGS change what is compiled) and the sha256 of each
+vllm_torchtpu patch applied on top of the image, so two configs, shapes, envs or patch stacks
+never share an entry by accident. vLLM applies its own finer key
 inside the tarball; this one only decides which tarball to hand over.
 """
 
@@ -36,28 +37,40 @@ def image_tag(image: str) -> str:
     return image.rsplit("/", 1)[-1].replace(":", "_")
 
 
-def key(image: str, engine_argv: list[str], env: dict | None = None) -> str:
+def key(image: str,
+        engine_argv: list[str],
+        env: dict | None = None,
+        patches: list[str] | None = None) -> str:
+    # an empty stack keeps the pre-patch key, so existing entries still hit
+    parts = [image, engine_argv, sorted((env or {}).items())]
     return hashlib.sha1(
-        json.dumps([image, engine_argv,
-                    sorted((env or {}).items())]).encode()).hexdigest()[:16]
+        json.dumps(parts + (
+            [list(patches)] if patches else [])).encode()).hexdigest()[:16]
 
 
 def entry_dir(image: str,
               engine_argv: list[str],
-              env: dict | None = None) -> str:
-    return os.path.join(ROOT, image_tag(image), key(image, engine_argv, env))
+              env: dict | None = None,
+              patches: list[str] | None = None) -> str:
+    return os.path.join(ROOT, image_tag(image),
+                        key(image, engine_argv, env, patches))
 
 
 def find(image: str,
          engine_argv: list[str],
-         env: dict | None = None) -> str | None:
-    d = entry_dir(image, engine_argv, env)
+         env: dict | None = None,
+         patches: list[str] | None = None) -> str | None:
+    d = entry_dir(image, engine_argv, env, patches)
     return d if os.path.isfile(os.path.join(d, "compile_cache.tgz")) else None
 
 
-def store(job_dir: str, image: str, plan_env: dict | None = None) -> str:
+def store(job_dir: str,
+          image: str,
+          plan_env: dict | None = None,
+          patches: list[str] | None = None) -> str:
     """File a fetched job's compile cache under its key (read from the job's result.json).
-    `plan_env` is for results written before forward_run recorded it: pass the plan's twin env."""
+    `plan_env` is for results written before forward_run recorded it: pass the plan's twin env.
+    `patches`: the sha256 of each patch the job applied, in order."""
     res = sorted(
         glob.glob(os.path.join(job_dir, "outputs", "**", "wmb", "forward",
                                "result.json"),
@@ -74,7 +87,7 @@ def store(job_dir: str, image: str, plan_env: dict | None = None) -> str:
         raise ValueError(
             "result.json has no plan_env (written before it was recorded): pass the "
             "plan with `cache-pull <job> --steps <plan>.steps.json`")
-    d = entry_dir(image, r["engine_argv"], env)
+    d = entry_dir(image, r["engine_argv"], env, patches)
     os.makedirs(d, exist_ok=True)
     shutil.copy2(tgz, os.path.join(d, "compile_cache.tgz"))
     json.dump(
@@ -82,6 +95,7 @@ def store(job_dir: str, image: str, plan_env: dict | None = None) -> str:
             "image": image,
             "engine_argv": r["engine_argv"],
             "plan_env": env,
+            "patches": patches or [],
             "from_job_dir": job_dir,
             "warm_boot_s": r.get("warm_boot_s"),
             "boot_s": r.get("boot_s")

@@ -31,8 +31,10 @@
   cli.py mix-rollup --plans <dir|top.steps.json> <job-id>... [--baseline <ids>]
                                                           the cost model: T_mix, spread; with --baseline the
                                                           speedup, class deltas, guardrails -> cost_model.json
-  cli.py forward-cmd --steps <f.steps.json> [--no-profile]   recipe + `compute submit` command for a
-                                                          plan (profile on by default)
+  cli.py forward-cmd --steps <f.steps.json> [--no-profile] [--kernel-trace] [--patch P]...
+                                                          recipe + `compute submit` command for a
+                                                          plan (profile on by default); --patch:
+                                                          vllm_torchtpu patches applied in order
   cli.py collect  <job-id> --steps <f.steps.json>        after `compute job artifacts`: cache, times,
                                                           profile split (from tpu-diagnostics's export),
                                                           evidence.json (the facts REPORT.md is written from)
@@ -48,6 +50,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -359,11 +362,28 @@ START_TIMEOUT_S = {start_timeout_s!r}
 os.makedirs("wmb_out", exist_ok=True)
 with open(os.path.join("wmb_out", "image.txt"), "w") as f:
     f.write(IMAGE + "\\n")
-rc = supervise(ARGS, os.path.join("wmb_out", "wmb", "forward"), START_TIMEOUT_S)
+{apply}rc = {guard}supervise(ARGS, os.path.join("wmb_out", "wmb", "forward"), START_TIMEOUT_S)
 with tarfile.open({out!r}, "w:gz", compresslevel=1) as t:
     t.add("wmb_out", arcname=".")
 sys.exit(rc)
 '''
+
+#: the recipe's patch step: applies the stack in order before forward_run imports vllm_torchtpu
+#: and prints the marker line `collect` reads (core/evidence.py) after each patch
+_APPLY = '''import subprocess
+PATCHES = {patches!r}
+env = dict(os.environ)
+env.setdefault("TPU_AGENT_SUITE_PYTHON", sys.executable)
+rc = 0
+for name, sha in PATCHES:
+    rc = subprocess.call(["bash", "apply_vllm_patch.sh", name], env=env)
+    print(f"WMB_PATCH name={{name}} sha256={{sha}} exit={{rc}}", flush=True)
+    if rc:
+        break
+'''
+
+APPLIER = os.path.join(os.path.dirname(SCRIPTS), "common", "vllm_patches",
+                       "apply_vllm_patch.sh")
 
 
 def _pin_digest(image: str) -> str:
@@ -452,13 +472,23 @@ def cmd_forward_cmd(a) -> int:
             f"\n#   source job ran {src}: the plan's engine args and env come from that job. Flags"
             " the new image lacks are translated or reported by forward_run (result.json 'compat')."
         ))
+    patches = [(os.path.abspath(p), os.path.basename(p),
+                hashlib.sha256(open(p, "rb").read()).hexdigest())
+               for p in a.patch or []]
+    if len({n for _, n, _ in patches}) < len(patches):
+        raise SystemExit("--patch: two patches share a file name")
+    hashes = [h for _, _, h in patches]
     argv_k = engine_argv(pl["twin"], "/tmp/wmb_model", pl["compile_buckets"],
                          "/tmp/wmb_xprof")
-    hit = cachelocal.find(image, argv_k, pl["twin"]["env"])
+    hit = cachelocal.find(image, argv_k, pl["twin"]["env"], hashes)
     is_immutable_tag = tag != image and not tag.endswith(":latest")
     if not hit and not a.interpreter and is_immutable_tag:
         # entries filed under an immutable tag before digests were pinned; never for a moving tag
-        hit = cachelocal.find(tag, argv_k, pl["twin"]["env"])
+        hit = cachelocal.find(tag, argv_k, pl["twin"]["env"], hashes)
+    if a.kernel_trace:
+        # A cached program was compiled without the trace flags: it would come out of
+        # the capture with no LLO data. Compile everything fresh.
+        hit = None
     if pl["twin"].get("multihost"):
         # mirror mode: the twin spans two hosts on one Ray cluster (forward_run --node-prep on
         # every host before `ray start`, then forward_run with the Ray executor on host 0). The
@@ -469,16 +499,20 @@ def cmd_forward_cmd(a) -> int:
             "one-host recipe and cannot run it; use a scaled plan (derive --mode scaled)",
             file=sys.stderr)
         return 2
-    args = (["--steps",
-             os.path.basename(a.steps), "--iters",
-             str(a.iters)] +
-            (["--repeats", str(a.repeats)] if a.repeats > 1 else []) +
-            (["--save-cache"] if a.resave or not hit else []) +
-            ([] if a.no_profile else ["--profile"] +
-             (["--profile-iters", str(a.profile_iters)]
-              if a.profile_iters > 1 else [])) +
-            (["--cache-in", "compile_cache_in.tgz"] if hit else []) +
-            ["--out", os.path.join("wmb_out", "wmb", "forward")])
+    args = (
+        ["--steps",
+         os.path.basename(a.steps), "--iters",
+         str(a.iters)] +
+        (["--repeats", str(a.repeats)] if a.repeats > 1 else []) +
+        # A kernel trace compiles instrumented programs: never save them as the cache.
+        (["--save-cache"] if
+         (a.resave or not hit) and not a.kernel_trace else []) +
+        ([] if a.no_profile and not a.kernel_trace else ["--profile"] +
+         (["--profile-iters", str(a.profile_iters)] if a.profile_iters > 1 else
+          [])) + (["--kernel-trace"] if a.kernel_trace else []) +
+        (["--profile-options", a.profile_options] if a.profile_options else [])
+        + (["--cache-in", "compile_cache_in.tgz"] if hit else []) +
+        ["--out", os.path.join("wmb_out", "wmb", "forward")])
     steps_path = os.path.abspath(a.steps)
     recipe = a.recipe or steps_path.replace(".steps.json", "") + ".recipe.py"
     # The start-up limit: the flag if given, else the plan's own vLLM ready timeout,
@@ -492,12 +526,21 @@ def cmd_forward_cmd(a) -> int:
         start_timeout_s = 45 * 60
     with open(recipe, "w") as f:
         f.write(
-            _RECIPE.format(plan=os.path.basename(a.steps),
-                           out=OUT_TGZ,
-                           image=image,
-                           args=args,
-                           start_timeout_s=start_timeout_s))
+            _RECIPE.format(
+                plan=os.path.basename(a.steps),
+                out=OUT_TGZ,
+                image=image,
+                args=args,
+                start_timeout_s=start_timeout_s,
+                apply=_APPLY.format(
+                    patches=[(n, h)
+                             for _, n, h in patches]) if patches else "",
+                guard="rc or " if patches else ""))
     inputs = [os.path.join(HERE, "forward_run.py"), steps_path]
+    if patches:
+        inputs += [APPLIER + ":apply_vllm_patch.sh"
+                   ] + [f"{p}:{n}" for p, n, _ in patches]
+        print("# patches, in order: " + ", ".join(n for _, n, _ in patches))
     if hit:
         inputs.append(
             os.path.join(hit, "compile_cache.tgz") + ":compile_cache_in.tgz")
@@ -528,7 +571,10 @@ def cmd_cache_pull(a) -> int:
             f"cannot read the image from {job_dir}/outputs/image.txt or "
             f"{job_dir}/recipe.yaml; pass --image")
     env = json.load(open(a.steps))["twin"]["env"] if a.steps else None
-    d = cachelocal.store(job_dir, image, env)
+    from core import evidence
+    d = cachelocal.store(
+        job_dir, image, env,
+        [p["sha256"] for p in evidence.patches(job_dir)["stack"]])
     print(f"image {image}")
     print(
         f"stored {os.path.join(d, 'compile_cache.tgz')} "
@@ -561,6 +607,27 @@ def cmd_collect(a) -> int:
     steps and layers with the served-model projection (core/xprof_steps.py)."""
     job_dir = os.path.join(jobdata.DEFAULT_ROOT, a.job)
     _unpack(job_dir)
+    from core import evidence
+    pt = evidence.patches(job_dir)
+    if pt["exit"]:
+        # the stack stopped before forward_run: the arm has no metric, only why
+        ep = os.path.join(job_dir, "outputs", "wmb", "forward",
+                          "evidence.json")
+        os.makedirs(os.path.dirname(ep), exist_ok=True)
+        json.dump(
+            {
+                "_what": evidence.WHAT,
+                "job_id": a.job,
+                "plan": os.path.abspath(a.steps) if a.steps else None,
+                "result": None,
+                "patches": pt
+            },
+            open(ep, "w"),
+            indent=1)
+        bad = next(p for p in pt["stack"] if p["exit"])
+        print(f"job {a.job}: {pt['outcome']}: {bad['name']} (applier exit "
+              f"{pt['exit']}); no metric\nevidence: {ep}")
+        return 0
     res = sorted(
         glob.glob(os.path.join(job_dir, "outputs", "**", "wmb", "forward",
                                "result.json"),
@@ -665,7 +732,6 @@ def cmd_collect(a) -> int:
                 file=sys.stderr)
     if a.steps:
         # facts only (numbers, shapes, ids, cross-checks); the agent writes REPORT.md from them
-        from core import evidence
         ev = evidence.build(job_dir, os.path.abspath(a.steps))
         ep = os.path.join(os.path.dirname(res[0]), "evidence.json")
         json.dump(ev, open(ep, "w"), indent=1)
@@ -719,12 +785,28 @@ def cmd_requests(a) -> int:
 def sampling_block(snap: dict,
                    mod,
                    want: bool | None,
-                   job_root: str | None = None) -> dict:
+                   job_root: str | None = None,
+                   greedy: bool = False) -> dict:
     """The plan's `sampling` block: the source job's sampling params and whether the twin step
     runs the sample stage. Params, first found: the snapshot (`sampling_defaults`, read from the
     server's startup log), the job's fetched server log, the model's `SAMPLING` (model.py). Run:
-    `want` if given (--sampling / --no-sampling), else on when the job sampled non-greedily
-    (temperature > 0). Unknown params: not run unless asked, and then refused."""
+    `want` if given (--sampling / --no-sampling), else on: serving runs the LM head and picks a
+    token every step, greedy or not. A greedy job runs the runner's argmax path. `greedy`
+    (--greedy) forces that path when the clients send temperature 0 but the server's defaults,
+    which the snapshot records, sample. Unknown params: not run unless asked, and then refused."""
+    if greedy:
+        if want is False:
+            raise SystemExit(
+                "--greedy runs the sample stage; drop --no-sampling")
+        return {
+            "run": True,
+            "temperature": 0.0,
+            "top_k": 0,
+            "top_p": 1.0,
+            "greedy": True,
+            "source": "--greedy",
+            "why": "--greedy: LM head + the runner's argmax every step"
+        }
     sd = snap.get("sampling_defaults")
     if sd is None and snap.get("job_id"):
         jd = os.path.join(job_root or jobdata.DEFAULT_ROOT, snap["job_id"])
@@ -745,10 +827,11 @@ def sampling_block(snap: dict,
             "SAMPLING)"
         }
     greedy = float(sd.get("temperature", 1.0) or 0.0) <= 1e-5
-    run = (not greedy) if want is None else bool(want)
+    run = True if want is None else bool(want)
     why = (
-        "--sampling" if want else "--no-sampling"
-        if want is False else "the source job sampled greedily" if greedy else
+        "--sampling" if want else "--no-sampling" if want is False else
+        "the source job sampled greedily: LM head + argmax (--no-sampling to leave it out)"
+        if greedy else
         "the source job sampled non-greedily (default on; --no-sampling to leave it out)"
     )
     return {
@@ -833,7 +916,8 @@ def cmd_points(a) -> int:
         f" --override {k}={v}" for k, v in sorted(ov.items())) \
         + (f" --top {a.top}" if a.top else "") + (" --mtp" if a.mtp else " --no-mtp" if d.spec_method else "") \
         + (" --combined" if a.combined else "") + "".join(f" --point {x}" for x in a.point or []) \
-        + (" --sampling" if a.sampling else " --no-sampling" if a.sampling is False else "")
+        + (" --sampling" if a.sampling else " --no-sampling" if a.sampling is False else "") \
+        + (" --greedy" if a.greedy else "")
     pl["_header"] = _header(cmd, cfg["_header"]["snapshot"])
     # self-contained: forward_run.py needs nothing else
     pl["sharding"] = {
@@ -856,7 +940,7 @@ def cmd_points(a) -> int:
                 f"--mtp: {cfg['model_dir']}/model.py declares no DRAFTER replay"
             )
         pl["twin"]["drafter"] = mod.DRAFTER
-    pl["sampling"] = sampling_block(snap, mod, a.sampling)
+    pl["sampling"] = sampling_block(snap, mod, a.sampling, greedy=a.greedy)
     sb = pl["sampling"]
     print(f"SAMPLING: {'run' if sb['run'] else 'not run'} -- {sb['why']}")
     # the image the job ran; forward-cmd runs whatever image the caller picks
@@ -1253,6 +1337,20 @@ def main() -> int:
         "compile results. Default: the plan's VLLM_ENGINE_READY_TIMEOUT_S if it "
         "sets one, otherwise 45 minutes.")
     fc.add_argument(
+        "--kernel-trace",
+        action="store_true",
+        help=
+        "an unscored capture of the inside of Pallas/Mosaic kernels (LLO debug "
+        "info + custom-call tracing; traces grow 6-12x, keep --profile-iters low). "
+        "Never for an A/B arm: it changes the compile key and instruments kernels"
+    )
+    fc.add_argument(
+        "--profile-options",
+        default="",
+        help="TpuProfilerConfig options as JSON for the profile window, e.g. "
+        '\'{"tpu_enable_periodic_counter_sampling": true}\' for hardware counters '
+        "(tpu7x and later)")
+    fc.add_argument(
         "--profile-iters",
         type=int,
         help="(default 1; 5 for a --top plan) "
@@ -1269,6 +1367,12 @@ def main() -> int:
         "--recipe",
         help="where to write the recipe (default: next to the plan, "
         "<plan>.recipe.py)")
+    fc.add_argument(
+        "--patch",
+        action="append",
+        help="a vllm_torchtpu patch (.patch or .py) the job applies with "
+        "apply_vllm_patch.sh before the model loads; repeat for a stack, applied "
+        "in the order given. Part of the local cache key")
     fc.add_argument(
         "--image",
         default="job",
@@ -1380,13 +1484,19 @@ def main() -> int:
         default=None,
         help=
         "run the serving step's sample stage (LM head + sampler + rejection "
-        "sampler) after every forward, with the job's sampling params. Default: "
-        "on when the source job sampled non-greedily")
+        "sampler) after every forward, with the job's sampling params. Default: on"
+    )
     pt.add_argument(
         "--no-sampling",
         dest="sampling",
         action="store_false",
         help="leave the sample stage out (plan `sampling.run` false)")
+    pt.add_argument(
+        "--greedy",
+        action="store_true",
+        help=
+        "run the sample stage as greedy decoding (LM head + the runner's argmax), "
+        "for clients that send temperature 0 whatever the server's defaults")
     pt.add_argument(
         "--last-chunks",
         action="store_true",

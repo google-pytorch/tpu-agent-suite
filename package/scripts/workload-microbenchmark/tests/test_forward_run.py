@@ -597,7 +597,9 @@ class Supervise(unittest.TestCase):
                                    out=cli.OUT_TGZ,
                                    image="img",
                                    args=["--no-such-flag"],
-                                   start_timeout_s=45 * 60))
+                                   start_timeout_s=45 * 60,
+                                   apply="",
+                                   guard=""))
         p = subprocess.run([sys.executable, recipe],
                            capture_output=True,
                            text=True,
@@ -627,6 +629,203 @@ class HarnessSalt(unittest.TestCase):
                 cachelocal.key("img", fr.engine_argv(tw, "/m", [16], "/p")))
         finally:
             fr.HARNESS_SALT = old
+
+
+IMG = "r/img@sha256:" + "0" * 64
+
+
+class PatchStack(unittest.TestCase):
+    """An arm is the pinned image plus an ordered vllm_torchtpu patch list (forward-cmd --patch)."""
+
+    def setUp(self):
+        import tempfile
+
+        from core import cachelocal
+        self.d = tempfile.mkdtemp()
+        self._root, cachelocal.ROOT = cachelocal.ROOT, os.path.join(
+            self.d, "xla")
+        self.plan = os.path.join(self.d, "p.steps.json")
+        json.dump(
+            {
+                "source_image": IMG,
+                "compile_buckets": [16],
+                "twin": {
+                    "hf_overrides": {},
+                    "server_args": {},
+                    "env": {}
+                }
+            }, open(self.plan, "w"))
+        self.patches = []
+        for n, body in (("b.patch", "b"), ("a.py", "a")):
+            self.patches.append(os.path.join(self.d, n))
+            open(self.patches[-1], "w").write(body)
+
+    def tearDown(self):
+        from core import cachelocal
+        cachelocal.ROOT = self._root
+
+    def _cmd(self, **kw):
+        import argparse
+        import contextlib
+        import io
+
+        from core import cli
+        kw.setdefault("kernel_trace", False)
+        kw.setdefault("profile_options", "")
+        kw.setdefault("interpreter", None)
+        kw.setdefault("engine_start_timeout", None)
+        a = argparse.Namespace(steps=self.plan,
+                               iters=None,
+                               repeats=None,
+                               profile_iters=None,
+                               no_profile=True,
+                               resave=False,
+                               compute="rt compute",
+                               recipe=None,
+                               image="job",
+                               **kw)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.cmd_forward_cmd(a), 0)
+        out = buf.getvalue().splitlines()
+        return out[-1], open(os.path.join(self.d, "p.recipe.py")).read(), out
+
+    def test_patches_ship_in_order_with_the_applier(self):
+        cmd, recipe, _ = self._cmd(patch=self.patches)
+        ins = [x.split(":", 1)[-1] for x in cmd.split(" --input ")[1:]]
+        ins[-1] = ins[-1].split(" ")[0]
+        self.assertEqual(ins[2:], ["apply_vllm_patch.sh", "b.patch", "a.py"])
+        self.assertIn(f"--image {IMG}", cmd)
+        # the stack is applied before supervise starts forward_run.py
+        self.assertLess(recipe.index("apply_vllm_patch.sh"),
+                        recipe.index("supervise(ARGS"))
+
+    def test_a_kernel_trace_profiles_and_never_saves_the_cache(self):
+        import unittest.mock
+
+        from core import cachelocal
+        hit = os.path.join(self.d, "hit")
+        os.makedirs(hit)
+        open(os.path.join(hit, "compile_cache.tgz"), "w").close()
+        with unittest.mock.patch.object(cachelocal, "find", return_value=hit):
+            self.assertIn("'--cache-in'", self._cmd(patch=None)[1])
+            _, recipe, _ = self._cmd(patch=None, kernel_trace=True)
+        self.assertIn("'--kernel-trace'", recipe)
+        self.assertIn("'--profile'", recipe)
+        # instrumented programs must not become the scored arms' compile cache, and a
+        # restored cache, compiled without the flags, would trace blank
+        self.assertNotIn("'--save-cache'", recipe)
+        self.assertNotIn("'--cache-in'", recipe)
+
+    def test_empty_patch_list_is_todays_command_and_recipe(self):
+        from core import cli
+        cmd, recipe, _ = self._cmd(patch=None)
+        self.assertEqual(self._cmd(patch=[])[:2], (cmd, recipe))
+        self.assertEqual(
+            cmd, f"rt compute submit --recipe {self.d}/p.recipe.py --image "
+            f"{IMG} --input {cli.HERE}/forward_run.py --input {self.plan} "
+            "--output wmb_out.tgz")
+        self.assertNotIn("apply_vllm_patch", recipe)
+
+    def _run_recipe(self, applier_rc: int):
+        import subprocess
+        import tarfile
+        _, recipe, _ = self._cmd(patch=self.patches)
+        job = os.path.join(self.d, f"job{applier_rc}")
+        os.makedirs(job)
+        open(os.path.join(job, "r.py"), "w").write(recipe)
+        open(os.path.join(job, "apply_vllm_patch.sh"),
+             "w").write(f"exit {applier_rc}\n")
+        open(os.path.join(job, "forward_run.py"),
+             "w").write("def supervise(args, out, timeout):\n"
+                        "    open('ran', 'w')\n"
+                        "    return 0\n")
+        for p in self.patches:
+            open(os.path.join(job, os.path.basename(p)), "w").write("x")
+        r = subprocess.run([sys.executable, "r.py"],
+                           cwd=job,
+                           capture_output=True,
+                           text=True)
+        with tarfile.open(os.path.join(job, "wmb_out.tgz")) as t:
+            self.assertIn("./image.txt", t.getnames())
+        return r, os.path.isfile(os.path.join(job, "ran"))
+
+    def test_job_applies_the_stack_then_runs_and_stops_on_a_failed_patch(self):
+        r, ran = self._run_recipe(0)
+        self.assertEqual((r.returncode, ran), (0, True))
+        self.assertEqual([
+            line.split()[1]
+            for line in r.stdout.splitlines() if line.startswith("WMB_PATCH")
+        ], ["name=b.patch", "name=a.py"])
+        r, ran = self._run_recipe(4)
+        self.assertEqual((r.returncode, ran), (4, False))
+        self.assertEqual(r.stdout.count("WMB_PATCH"), 1)
+        self.assertIn("exit=4", r.stdout)
+
+    def _collect(self, log: str) -> dict:
+        import argparse
+        import contextlib
+        import io
+
+        from core import cli, jobdata
+        root = os.path.join(self.d, "jobs")
+        os.makedirs(os.path.join(root, "j-1", "outputs"))
+        open(os.path.join(root, "j-1", "j-1.log"), "w").write(log)
+        old, jobdata.DEFAULT_ROOT = jobdata.DEFAULT_ROOT, root
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.cmd_collect(
+                    argparse.Namespace(job="j-1", steps=self.plan, image=None))
+        finally:
+            jobdata.DEFAULT_ROOT = old
+        return json.load(
+            open(
+                os.path.join(root, "j-1", "outputs", "wmb", "forward",
+                             "evidence.json")))
+
+    def test_collect_records_exit_4_as_does_not_apply_with_no_metric(self):
+        ev = self._collect("x\nWMB_PATCH name=b.patch sha256=ab exit=0\n"
+                           "WMB_PATCH name=a.py sha256=cd exit=4\n")
+        self.assertEqual(ev["patches"]["outcome"], "patch does not apply")
+        self.assertEqual(ev["patches"]["exit"], 4)
+        self.assertEqual([p["name"] for p in ev["patches"]["stack"]],
+                         ["b.patch", "a.py"])
+        self.assertIsNone(ev["result"])
+
+    def test_collect_records_exit_3_as_infrastructure_failure(self):
+        ev = self._collect("WMB_PATCH name=b.patch sha256=ab exit=3\n")
+        self.assertEqual(ev["patches"]["outcome"], "infrastructure failure")
+        self.assertEqual(ev["patches"]["exit"], 3)
+        self.assertIsNone(ev["result"])
+
+    def test_cache_key_includes_each_patch_hash(self):
+        from core import cachelocal
+        k = cachelocal.key
+        self.assertEqual(k("img", ["--a"], {}, []), k("img", ["--a"], {}))
+        self.assertEqual(k("img", ["--a"], {}, ["h1"]),
+                         k("img", ["--a"], {}, ["h1"]))
+        self.assertNotEqual(k("img", ["--a"], {}, ["h1"]),
+                            k("img", ["--a"], {}, ["h2"]))
+        # an entry filed for this stack hits; a changed patch body misses
+        _, _, out = self._cmd(patch=self.patches)
+        self.assertIn("# local cache: miss", "\n".join(out))
+        from core.forward_run import engine_argv
+        pl = json.load(open(self.plan))
+        argv = engine_argv(pl["twin"], "/tmp/wmb_model", [16],
+                           "/tmp/wmb_xprof")
+        import hashlib
+        hs = [
+            hashlib.sha256(open(p, "rb").read()).hexdigest()
+            for p in self.patches
+        ]
+        d = cachelocal.entry_dir(IMG, argv, {}, hs)
+        os.makedirs(d)
+        open(os.path.join(d, "compile_cache.tgz"), "w").write("")
+        _, _, out = self._cmd(patch=self.patches)
+        self.assertIn("# local cache: HIT", "\n".join(out))
+        open(self.patches[0], "w").write("changed")
+        _, _, out = self._cmd(patch=self.patches)
+        self.assertIn("# local cache: miss", "\n".join(out))
 
 
 try:

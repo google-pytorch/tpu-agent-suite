@@ -80,12 +80,18 @@ class SamplingStage(unittest.TestCase):
                            job_root="/nonexistent")
         self.assertEqual((b["run"], b["top_p"], b["source"]),
                          (True, 0.95, "model.py"))
-        # greedy job: off by default
+        # greedy job: on, so the LM head and argmax stay in every step
         g = sampling_block({"sampling_defaults": {
             "temperature": 0.0
         }}, NoM, None)
-        self.assertFalse(g["run"])
+        self.assertTrue(g["run"])
         self.assertTrue(g["greedy"])
+        # --greedy: clients at temperature 0 against a server whose defaults sample
+        g = sampling_block(snap, M, None, job_root="/nonexistent", greedy=True)
+        self.assertEqual((g["run"], g["greedy"], g["temperature"]),
+                         (True, True, 0.0))
+        with self.assertRaises(SystemExit):
+            sampling_block(snap, M, False, greedy=True)
         # unknown params: off, and --sampling is refused
         self.assertFalse(sampling_block({}, NoM, None)["run"])
         with self.assertRaises(SystemExit):
@@ -390,6 +396,10 @@ class SamplingGlue(unittest.TestCase):
             def _get_sampling_generator(self):
                 return torch.Generator()
 
+            def _greedy_sample(self, logits):
+                calls.append(("greedy", tuple(logits.shape)))
+                return torch.zeros(logits.shape[0], 1, dtype=torch.int64)
+
             def _sample_spec_verify_chunk(self, logits, md, grammar, sched, a,
                                           b, greedy, gen):
                 calls.append(
@@ -476,6 +486,28 @@ class SamplingGlue(unittest.TestCase):
                 self.assertEqual(next(c for c in calls if c[0] == "sample"),
                                  ("sample",
                                   (8, 1000), False, 64 if kb else None))
+        # greedy plan: the LM head, then the runner's argmax, never the top-k/top-p sampler
+        greedy = {
+            "run": True,
+            "temperature": 0.0,
+            "top_k": 0,
+            "top_p": 1.0,
+            "greedy": True
+        }
+        with mock.patch.dict(sys.modules, self._fake_tr()):
+            r, calls = self._runner(False, spec=False)
+            st = fr._prepare_sampling(r, [[1, 50], [1, 60]],
+                                      torch.arange(2, dtype=torch.int32), 1,
+                                      greedy)
+            del calls[:]
+            fr._sample_stage(r, torch.zeros(4, 16), None, st)
+            self.assertEqual([c[0] for c in calls], ["logits", "greedy"])
+            r, calls = self._runner(False, spec=True)
+            st = fr._prepare_sampling(r, [[4, 100]],
+                                      torch.arange(4, dtype=torch.int32), 4,
+                                      greedy)
+            fr._sample_stage(r, torch.zeros(4, 16), None, st)
+            self.assertTrue(next(c for c in calls if c[0] == "verify")[4])
         # top_k disabled (0 / -1) is stored as the vocab size, as vLLM's InputBatch does
         with mock.patch.dict(sys.modules, self._fake_tr()):
             r, _ = self._runner(False, spec=False)
