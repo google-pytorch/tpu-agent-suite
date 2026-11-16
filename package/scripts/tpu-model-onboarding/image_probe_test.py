@@ -382,6 +382,33 @@ class PluginLegacyCallsTest(unittest.TestCase):
         with patch:
             self.assertEqual(image_probe.plugin_legacy_calls(), [])
 
+    def test_comments_and_strings_are_not_calls(self):
+        _, patch = self._plugin({
+            "__init__.py":
+            "",
+            "ops/attention.py":
+            ('"""pltpu.repeat is not in jax; use jnp.repeat."""\n'
+             "# pltpu.repeat is not in JAX, so call jnp.repeat instead.\n"
+             "x = jnp.repeat(y, 2, axis=0)  # was pltpu.repeat\n"
+             "msg = 'pltpu.repeat'\n"
+             "z = pltpu.repeat_like(y)\n"),
+        })
+        with patch:
+            self.assertEqual(image_probe.plugin_legacy_calls(), [])
+
+    def test_call_after_a_comment_naming_it(self):
+        package, patch = self._plugin({
+            "__init__.py":
+            "",
+            "ops/attention.py": ("# pltpu.repeat is not in JAX\n"
+                                 "x = pltpu.repeat(y, 2, axis=0)\n"),
+        })
+        with patch:
+            calls = image_probe.plugin_legacy_calls()
+        self.assertEqual(calls, [
+            f"pltpu.repeat in {os.path.join(package, 'ops', 'attention.py')}:2"
+        ])
+
     def test_plugin_absent(self):
         with mock.patch.object(image_probe.importlib.util,
                                "find_spec",

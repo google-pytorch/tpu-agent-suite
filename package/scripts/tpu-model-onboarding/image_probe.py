@@ -40,6 +40,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tokenize
 
 # Distributions a torch_tpu onboarding depends on, by the name pip knows.
 DISTRIBUTIONS = (
@@ -120,9 +121,11 @@ BROKEN_STACKS = ({
 }, )
 
 # Calls an older vllm_torchtpu makes into jax APIs that no longer exist, as
-# (pattern, name). Whatever its version says, a plugin whose source makes one
-# fails at the call: vision models do not serve.
-LEGACY_PLUGIN_CALLS = ((re.compile(r"\bpltpu\.repeat\b"), "pltpu.repeat"), )
+# dotted names. Whatever its version says, a plugin whose code makes one fails
+# at the call: vision models do not serve. Only code counts: a comment or
+# string that names the call, as a newer plugin's note on its removal does,
+# is not a call.
+LEGACY_PLUGIN_CALLS = ("pltpu.repeat", )
 
 # How long `pip check` may take; it reads metadata and imports nothing.
 PIP_CHECK_TIMEOUT_SEC = 120
@@ -492,8 +495,9 @@ def vllm_patches(versions: dict[str, str],
 
 
 def plugin_legacy_calls() -> list[str]:
-    """Where the installed vllm_torchtpu's source makes a LEGACY_PLUGIN_CALLS
+    """Where the installed vllm_torchtpu's code makes a LEGACY_PLUGIN_CALLS
     call, as "<name> in <file>:<line>"; empty when it makes none or is absent.
+    A comment or string that names the call does not count.
 
     The package is found by spec, not imported, so an editable install is read
     where it lives.
@@ -510,16 +514,41 @@ def plugin_legacy_calls() -> list[str]:
                 if not name.endswith(".py"):
                     continue
                 path = os.path.join(folder, name)
-                try:
-                    with open(path, encoding="utf-8", errors="replace") as f:
-                        lines = f.readlines()
-                except OSError:
-                    continue
-                for number, line in enumerate(lines, 1):
-                    for pattern, call in LEGACY_PLUGIN_CALLS:
-                        if pattern.search(line):
-                            found.append(f"{call} in {path}:{number}")
+                for call, number in _code_calls(path, LEGACY_PLUGIN_CALLS):
+                    found.append(f"{call} in {path}:{number}")
     return found
+
+
+def _code_calls(path: str, calls: tuple[str, ...]) -> list[tuple[str, int]]:
+    """Each of `calls` (dotted names) that `path` makes in code, as (call,
+    line). Comments and strings, docstrings included, are not code; a file
+    that cannot be read or tokenized makes none.
+    """
+    wanted = {tuple(_dotted_tokens(call)): call for call in calls}
+    longest = max((len(key) for key in wanted), default=0)
+    try:
+        with open(path, "rb") as f:
+            tokens = [
+                token for token in tokenize.tokenize(f.readline)
+                if token.type in (tokenize.NAME, tokenize.OP)
+            ]
+    except (OSError, SyntaxError, tokenize.TokenError):
+        return []
+    found = []
+    for start in range(len(tokens)):
+        for size in range(1, longest + 1):
+            window = tuple(t.string for t in tokens[start:start + size])
+            if window in wanted:
+                found.append((wanted[window], tokens[start].start[0]))
+    return found
+
+
+def _dotted_tokens(call: str) -> list[str]:
+    """`call`'s tokens: "pltpu.repeat" is pltpu, ., repeat."""
+    parts = []
+    for name in call.split("."):
+        parts += [name, "."]
+    return parts[:-1]
 
 
 def vllm_timeout_envs(names: tuple[str, ...] = VLLM_TIMEOUT_ENVS) -> dict:
