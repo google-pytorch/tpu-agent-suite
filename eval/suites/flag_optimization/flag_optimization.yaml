@@ -1,0 +1,327 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+# Flag optimization: tune MaxText pre-training throughput on a TPU7x slice
+# ==============================================================================
+# Each case asks the agent to make one MaxText pre-training job faster by
+# changing only the performance knobs its task unlocks. The task itself (model,
+# slice, batch, knobs, baseline) is an entry of assets/flagopt/tasks.json,
+# selected by FLAGOPT_TASK; `flagopt` and the verifier read it from the image.
+# prompt_vars fill assets/instruction.md and must match instruction_vars.py.
+# See README.md.
+suite_name: flag-optimization
+
+# ==============================================================================
+# 1. ENVIRONMENT: one image for every case
+# ==============================================================================
+environment:
+  # The MaxText image the TPU Jobs run, so `flagopt aot` compiles against the
+  # same MaxText / JAX / libtpu on CPU.
+  base_image: us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training@sha256:14bc49e3db94320b19a2df984853d289d4fb2352a5a48ce7ef8d0d6488016071
+  apt_packages:
+    - git
+    - less
+    - nodejs
+    - npm
+    - openssh-client
+    - procps
+    - unzip
+  # Staged into the workspace, then moved to a root-owned /opt/flagopt by
+  # install_flagopt.sh (setup scripts run after the workspace is copied in).
+  workspace_files:
+    - "assets/flagopt:.flagopt"
+  setup_scripts:
+    - assets/install_flagopt.sh
+  cpus: 8
+  memory_mb: 65536
+  storage_mb: 102400
+  build_timeout_sec: 1800
+  env_vars:
+    FLAGOPT_RUNS_DIR: /workspace/runs
+    HF_HUB_DISABLE_TELEMETRY: "1"
+
+# ==============================================================================
+# 2. EVALUATION
+# ==============================================================================
+evaluation:
+  # reward = throughput_improvement (speedup - 1, uncapped; 0 for an invalid,
+  # failed, gate-failing or slower config). The other criteria are reported in
+  # reward.json with weight 0. They all read one cached measurement
+  # (measure.py), which launches the TPU Jobs through the trial's kube-gate.
+  reward_aggregation: weighted_sum
+  verifier_env:
+    VERIFY_WEIGHTS: checkpoint
+    LOSS_RTOL: "0.001"
+    GRAD_NORM_RTOL: "0.05"
+    # The agent's home is /root, so keep its user site-packages out of the
+    # verifier's Python.
+    PYTHONNOUSERSITE: "1"
+  script_verifiers:
+    - name: throughput_improvement
+      script: eval/verifiers/flag_optimization/throughput_improvement.py
+      deps:
+        - eval/verifiers/flag_optimization/measure.py
+      weight: 1.0
+    - name: config_valid
+      script: eval/verifiers/flag_optimization/config_valid.py
+      deps:
+        - eval/verifiers/flag_optimization/measure.py
+      weight: 0.0
+    - name: candidate_ran
+      script: eval/verifiers/flag_optimization/candidate_ran.py
+      deps:
+        - eval/verifiers/flag_optimization/measure.py
+      weight: 0.0
+    - name: accuracy_gate
+      script: eval/verifiers/flag_optimization/accuracy_gate.py
+      deps:
+        - eval/verifiers/flag_optimization/measure.py
+      weight: 0.0
+    - name: infra_error
+      script: eval/verifiers/flag_optimization/infra_error.py
+      deps:
+        - eval/verifiers/flag_optimization/measure.py
+      weight: 0.0
+  # Baselines recorded with record_baseline.py, as baselines/<task>.json.
+  verifier_files:
+    - "assets/baselines:baselines"
+
+  cases:
+    - name: flagopt-gemma4-31b-v7x-2x2x2-sharding
+      description: "Tune the sharding mesh (DP / FSDP / TP) of Gemma 4 31B pre-training on TPU7x 2x2x2"
+      prompt_file: assets/instruction.md
+      prompt_vars:
+        model: "Gemma 4 31B"
+        slice: "TPU7x (Ironwood) `2x2x2`"
+        scope: "- the device mesh: data (DP), fully-sharded data (FSDP) and tensor (TP) parallelism degrees"
+        budget: "6 hours"
+        note: ""
+        maxtext_model: "gemma4-31b"
+        hf_repo: "google/gemma-4-31B-it"
+        batch: "16 sequences x 4096 tokens"
+        precision: "bf16 activations, fp32 weights, bf16 gradients"
+        topology: "2x2x2"
+        knobs: "- Sharding: `ici_data_parallelism`, `ici_fsdp_parallelism`, `ici_tensor_parallelism`"
+        rules: "XLA flags are not tunable here: leave `xla_flags` empty."
+      timeout_sec: 21600.0
+      verifier_timeout_sec: 9000.0
+      environment:
+        env_vars:
+          FLAGOPT_TASK: flagopt-gemma4-31b-v7x-2x2x2-sharding
+      verifier_env:
+        FLAGOPT_TASK: flagopt-gemma4-31b-v7x-2x2x2-sharding
+        VERIFY_DEADLINE_SEC: "8400"
+      metadata:
+        difficulty: hard
+        gke_cluster: bodaborg-tpu7x-nap
+
+    - name: flagopt-gemma4-31b-v7x-2x2x2-sharding-remat
+      description: "Tune sharding (DP / FSDP / TP) and rematerialization of Gemma 4 31B pre-training on TPU7x 2x2x2"
+      prompt_file: assets/instruction.md
+      prompt_vars:
+        model: "Gemma 4 31B"
+        slice: "TPU7x (Ironwood) `2x2x2`"
+        scope: |-
+          - the device mesh: data (DP), fully-sharded data (FSDP) and tensor (TP) parallelism degrees
+          - activation rematerialization (remat policy, or a custom per-tensor remat / device / host-offload plan)
+        budget: "6 hours"
+        note: ""
+        maxtext_model: "gemma4-31b"
+        hf_repo: "google/gemma-4-31B-it"
+        batch: "16 sequences x 4096 tokens"
+        precision: "bf16 activations, fp32 weights, bf16 gradients"
+        topology: "2x2x2"
+        knobs: |-
+          - Sharding: `ici_data_parallelism`, `ici_fsdp_parallelism`, `ici_tensor_parallelism`
+          - Rematerialization: `remat_policy`, `decoder_layer_input`, `context`, `mlpwi`, `mlpwi_0`, `mlpwi_1`, `mlpwo`, `query_proj`, `key_proj`, `value_proj`, `qkv_proj`, `out_proj`
+        rules: |-
+          - The per-tensor remat knobs only take effect with `remat_policy=custom`.
+
+          XLA flags are not tunable here: leave `xla_flags` empty.
+      timeout_sec: 21600.0
+      verifier_timeout_sec: 9000.0
+      environment:
+        env_vars:
+          FLAGOPT_TASK: flagopt-gemma4-31b-v7x-2x2x2-sharding-remat
+      verifier_env:
+        FLAGOPT_TASK: flagopt-gemma4-31b-v7x-2x2x2-sharding-remat
+        VERIFY_DEADLINE_SEC: "8400"
+      metadata:
+        difficulty: hard
+        gke_cluster: bodaborg-tpu7x-nap
+
+    - name: flagopt-gemma4-31b-v7x-2x2x2-full-stack
+      description: "Tune sharding, remat, XLA flags, MaxText flags and kernel hyperparameters of Gemma 4 31B pre-training on TPU7x 2x2x2"
+      prompt_file: assets/instruction.md
+      prompt_vars:
+        model: "Gemma 4 31B"
+        slice: "TPU7x (Ironwood) `2x2x2`"
+        scope: |-
+          - the device mesh: data (DP), fully-sharded data (FSDP) and tensor (TP) parallelism degrees
+          - activation rematerialization (remat policy, or a custom per-tensor remat / device / host-offload plan)
+          - XLA / libtpu compiler flags (`LIBTPU_INIT_ARGS`)
+          - MaxText framework flags (embedding / vocab tiling, host offload of optimizer state or parameters, gradient accumulation with the global batch held constant, and MoE dispatch options where they apply)
+          - kernel hyperparameters (splash-attention block sizes, layouts and backward kernel; grouped-matmul tile sizes for MoE models)
+        budget: "6 hours"
+        note: ""
+        maxtext_model: "gemma4-31b"
+        hf_repo: "google/gemma-4-31B-it"
+        batch: "16 sequences x 4096 tokens"
+        precision: "bf16 activations, fp32 weights, bf16 gradients"
+        topology: "2x2x2"
+        knobs: |-
+          - Sharding: `ici_data_parallelism`, `ici_fsdp_parallelism`, `ici_tensor_parallelism`
+          - Rematerialization: `remat_policy`, `decoder_layer_input`, `context`, `mlpwi`, `mlpwi_0`, `mlpwi_1`, `mlpwo`, `query_proj`, `key_proj`, `value_proj`, `qkv_proj`, `out_proj`
+          - MaxText framework flags: `use_iota_embed`, `allow_split_physical_axes`, `num_vocab_tiling`, `optimizer_memory_host_offload`, `parameter_memory_host_offload`, `gradient_accumulation_steps`, `per_device_batch_size`
+          - Kernel hyperparameters: `use_tokamax_splash`, `sa_use_fused_bwd_kernel`, `sa_block_q`, `sa_block_kv`, `sa_block_kv_compute`, `sa_block_q_dkv`, `sa_block_kv_dkv`, `sa_block_kv_dkv_compute`, `sa_block_q_dq`, `sa_block_kv_dq`, `sa_q_layout`, `sa_k_layout`, `sa_v_layout`
+        rules: |-
+          - When you change `per_device_batch_size` or `gradient_accumulation_steps`, their product must stay 1 so the global batch is unchanged.
+          - The per-tensor remat knobs only take effect with `remat_policy=custom`.
+
+          Each entry of `xla_flags` is one `--xla_...=value` (or `--libtpu_...`/`--megascale_...`) flag, passed to the TPU runtime as `LIBTPU_INIT_ARGS`. Debug / dump / SDC-checker / CPU / GPU flags are rejected. Note: on TPU7x, `--xla_tpu_enable_async_collective_fusion=true` (continuation fusion) is not supported and fails the compile.
+      timeout_sec: 21600.0
+      verifier_timeout_sec: 9000.0
+      environment:
+        env_vars:
+          FLAGOPT_TASK: flagopt-gemma4-31b-v7x-2x2x2-full-stack
+      verifier_env:
+        FLAGOPT_TASK: flagopt-gemma4-31b-v7x-2x2x2-full-stack
+        VERIFY_DEADLINE_SEC: "8400"
+      metadata:
+        difficulty: hard
+        gke_cluster: bodaborg-tpu7x-nap
+
+    - name: flagopt-qwen3-5-397b-a17b-v7x-4x4x4-all
+      description: "Tune every performance knob of Qwen 3.5 397B-A17B (MoE) pre-training on TPU7x 4x4x4 in 3 hours"
+      prompt_file: assets/instruction.md
+      prompt_vars:
+        model: "Qwen 3.5 397B-A17B"
+        slice: "TPU7x (Ironwood) `4x4x4`"
+        scope: |-
+          - sharding (DP, FSDP, FSDP-transpose, TP, TP-sequence, CP, EP)
+          - activation rematerialization (remat policy, or a custom per-tensor remat / device / host-offload plan)
+          - XLA / libtpu compiler flags (`LIBTPU_INIT_ARGS`)
+          - MaxText framework flags (embedding / vocab tiling, host offload of optimizer state or parameters, gradient accumulation with the global batch held constant, and MoE dispatch options where they apply)
+          - kernel hyperparameters (splash-attention block sizes, layouts and backward kernel; grouped-matmul tile sizes for MoE models)
+        budget: "3 hours"
+        note: ""
+        maxtext_model: "qwen3.5-397b-a17b"
+        hf_repo: "Qwen/Qwen3.5-397B-A17B"
+        batch: "256 sequences x 4096 tokens"
+        precision: "bf16 activations, bf16 weights, bf16 gradients"
+        topology: "4x4x4"
+        knobs: |-
+          - Sharding: `ici_data_parallelism`, `ici_fsdp_parallelism`, `ici_fsdp_transpose_parallelism`, `ici_tensor_parallelism`, `ici_tensor_sequence_parallelism`, `ici_context_parallelism`, `ici_expert_parallelism`
+          - Rematerialization: `remat_policy`, `decoder_layer_input`, `context`, `mlpwi`, `mlpwi_0`, `mlpwi_1`, `mlpwo`, `query_proj`, `key_proj`, `value_proj`, `qkv_proj`, `out_proj`
+          - MaxText framework flags: `use_iota_embed`, `allow_split_physical_axes`, `num_vocab_tiling`, `optimizer_memory_host_offload`, `parameter_memory_host_offload`, `gradient_accumulation_steps`, `per_device_batch_size`, `use_tokamax_gmm`, `use_ring_of_experts`, `moe_fsdp_use_two_stage_all_gather`
+          - Kernel hyperparameters: `use_tokamax_splash`, `sa_use_fused_bwd_kernel`, `sa_block_q`, `sa_block_kv`, `sa_block_kv_compute`, `sa_block_q_dkv`, `sa_block_kv_dkv`, `sa_block_kv_dkv_compute`, `sa_block_q_dq`, `sa_block_kv_dq`, `sa_q_layout`, `sa_k_layout`, `sa_v_layout`, `wi_tile_fwd_batch_seq`, `wi_tile_fwd_embed_dim`, `wi_tile_fwd_mlp_dim`, `wi_tile_dlhs_batch_seq`, `wi_tile_dlhs_embed_dim`, `wi_tile_dlhs_mlp_dim`, `wi_tile_drhs_batch_seq`, `wi_tile_drhs_embed_dim`, `wi_tile_drhs_mlp_dim`, `wo_tile_fwd_batch_seq`, `wo_tile_fwd_embed_dim`, `wo_tile_fwd_mlp_dim`, `wo_tile_dlhs_batch_seq`, `wo_tile_dlhs_embed_dim`, `wo_tile_dlhs_mlp_dim`, `wo_tile_drhs_batch_seq`, `wo_tile_drhs_embed_dim`, `wo_tile_drhs_mlp_dim`
+        rules: |-
+          - When you change `per_device_batch_size` or `gradient_accumulation_steps`, their product must stay 2 so the global batch is unchanged.
+          - The per-tensor remat knobs only take effect with `remat_policy=custom`.
+
+          Each entry of `xla_flags` is one `--xla_...=value` (or `--libtpu_...`/`--megascale_...`) flag, passed to the TPU runtime as `LIBTPU_INIT_ARGS`. Debug / dump / SDC-checker / CPU / GPU flags are rejected. Note: on TPU7x, `--xla_tpu_enable_async_collective_fusion=true` (continuation fusion) is not supported and fails the compile.
+      timeout_sec: 10800.0
+      verifier_timeout_sec: 14400.0
+      environment:
+        env_vars:
+          FLAGOPT_TASK: flagopt-qwen3-5-397b-a17b-v7x-4x4x4-all
+      verifier_env:
+        FLAGOPT_TASK: flagopt-qwen3-5-397b-a17b-v7x-4x4x4-all
+        VERIFY_DEADLINE_SEC: "13800"
+      metadata:
+        difficulty: hard
+        gke_cluster: bodaborg-tpu7x-nap
+
+    - name: flagopt-deepseek-v3-671b-v7x-4x4x4-all
+      description: "Tune every performance knob of DeepSeek-V3 671B (MoE) pre-training on TPU7x 4x4x4"
+      prompt_file: assets/instruction.md
+      prompt_vars:
+        model: "DeepSeek-V3 671B"
+        slice: "TPU7x (Ironwood) `4x4x4`"
+        scope: |-
+          - sharding (DP, FSDP, FSDP-transpose, TP, TP-sequence, CP, EP)
+          - activation rematerialization (remat policy, or a custom per-tensor remat / device / host-offload plan)
+          - XLA / libtpu compiler flags (`LIBTPU_INIT_ARGS`)
+          - MaxText framework flags (embedding / vocab tiling, host offload of optimizer state or parameters, gradient accumulation with the global batch held constant, and MoE dispatch options where they apply)
+          - kernel hyperparameters (splash-attention block sizes, layouts and backward kernel; grouped-matmul tile sizes for MoE models)
+        budget: "6 hours"
+        note: ""
+        maxtext_model: "deepseek3-671b"
+        hf_repo: "deepseek-ai/DeepSeek-V3"
+        batch: "128 sequences x 4096 tokens"
+        precision: "bf16 activations, bf16 weights, bf16 gradients"
+        topology: "4x4x4"
+        knobs: |-
+          - Sharding: `ici_data_parallelism`, `ici_fsdp_parallelism`, `ici_fsdp_transpose_parallelism`, `ici_tensor_parallelism`, `ici_tensor_sequence_parallelism`, `ici_context_parallelism`, `ici_expert_parallelism`
+          - Rematerialization: `remat_policy`, `decoder_layer_input`, `context`, `mlpwi`, `mlpwi_0`, `mlpwi_1`, `mlpwo`, `query_proj`, `key_proj`, `value_proj`, `qkv_proj`, `out_proj`, `mla_q`, `mla_kv`, `attention_out`
+          - MaxText framework flags: `use_iota_embed`, `allow_split_physical_axes`, `num_vocab_tiling`, `optimizer_memory_host_offload`, `parameter_memory_host_offload`, `gradient_accumulation_steps`, `per_device_batch_size`, `use_tokamax_gmm`, `use_ring_of_experts`, `moe_fsdp_use_two_stage_all_gather`
+          - Kernel hyperparameters: `use_tokamax_splash`, `sa_use_fused_bwd_kernel`, `sa_block_q`, `sa_block_kv`, `sa_block_kv_compute`, `sa_block_q_dkv`, `sa_block_kv_dkv`, `sa_block_kv_dkv_compute`, `sa_block_q_dq`, `sa_block_kv_dq`, `sa_q_layout`, `sa_k_layout`, `sa_v_layout`, `wi_tile_fwd_batch_seq`, `wi_tile_fwd_embed_dim`, `wi_tile_fwd_mlp_dim`, `wi_tile_dlhs_batch_seq`, `wi_tile_dlhs_embed_dim`, `wi_tile_dlhs_mlp_dim`, `wi_tile_drhs_batch_seq`, `wi_tile_drhs_embed_dim`, `wi_tile_drhs_mlp_dim`, `wo_tile_fwd_batch_seq`, `wo_tile_fwd_embed_dim`, `wo_tile_fwd_mlp_dim`, `wo_tile_dlhs_batch_seq`, `wo_tile_dlhs_embed_dim`, `wo_tile_dlhs_mlp_dim`, `wo_tile_drhs_batch_seq`, `wo_tile_drhs_embed_dim`, `wo_tile_drhs_mlp_dim`
+        rules: |-
+          - When you change `per_device_batch_size` or `gradient_accumulation_steps`, their product must stay 1 so the global batch is unchanged.
+          - The per-tensor remat knobs only take effect with `remat_policy=custom`.
+
+          Each entry of `xla_flags` is one `--xla_...=value` (or `--libtpu_...`/`--megascale_...`) flag, passed to the TPU runtime as `LIBTPU_INIT_ARGS`. Debug / dump / SDC-checker / CPU / GPU flags are rejected. Note: on TPU7x, `--xla_tpu_enable_async_collective_fusion=true` (continuation fusion) is not supported and fails the compile.
+      timeout_sec: 21600.0
+      verifier_timeout_sec: 14400.0
+      environment:
+        env_vars:
+          FLAGOPT_TASK: flagopt-deepseek-v3-671b-v7x-4x4x4-all
+      verifier_env:
+        FLAGOPT_TASK: flagopt-deepseek-v3-671b-v7x-4x4x4-all
+        VERIFY_DEADLINE_SEC: "13800"
+      metadata:
+        difficulty: hard
+        gke_cluster: bodaborg-tpu7x-nap
+
+    - name: flagopt-deepseek-v3-671b-v7x-8x8x8-all
+      description: "Tune every performance knob of DeepSeek-V3 671B (MoE) pre-training on TPU7x 8x8x8 in 3 hours"
+      prompt_file: assets/instruction.md
+      prompt_vars:
+        model: "DeepSeek-V3 671B"
+        slice: "TPU7x (Ironwood) `8x8x8`"
+        scope: |-
+          - sharding (DP, FSDP, FSDP-transpose, TP, TP-sequence, CP, EP)
+          - activation rematerialization (remat policy, or a custom per-tensor remat / device / host-offload plan)
+          - XLA / libtpu compiler flags (`LIBTPU_INIT_ARGS`)
+          - MaxText framework flags (embedding / vocab tiling, host offload of optimizer state or parameters, gradient accumulation with the global batch held constant, and MoE dispatch options where they apply)
+          - kernel hyperparameters (splash-attention block sizes, layouts and backward kernel; grouped-matmul tile sizes for MoE models)
+        budget: "3 hours"
+        note: "\n\nNote: Pure FSDP over all 1024 devices does not compile for DeepSeek-V3 (some MLA weight dimensions are not divisible by 1024), so the default configuration is DP=2 x FSDP=512, the nearest valid MaxText-default-style mesh."
+        maxtext_model: "deepseek3-671b"
+        hf_repo: "deepseek-ai/DeepSeek-V3"
+        batch: "1024 sequences x 4096 tokens"
+        precision: "bf16 activations, bf16 weights, bf16 gradients"
+        topology: "8x8x8"
+        knobs: |-
+          - Sharding: `ici_data_parallelism`, `ici_fsdp_parallelism`, `ici_fsdp_transpose_parallelism`, `ici_tensor_parallelism`, `ici_tensor_sequence_parallelism`, `ici_context_parallelism`, `ici_expert_parallelism`
+          - Rematerialization: `remat_policy`, `decoder_layer_input`, `context`, `mlpwi`, `mlpwi_0`, `mlpwi_1`, `mlpwo`, `query_proj`, `key_proj`, `value_proj`, `qkv_proj`, `out_proj`, `mla_q`, `mla_kv`, `attention_out`
+          - MaxText framework flags: `use_iota_embed`, `allow_split_physical_axes`, `num_vocab_tiling`, `optimizer_memory_host_offload`, `parameter_memory_host_offload`, `gradient_accumulation_steps`, `per_device_batch_size`, `use_tokamax_gmm`, `use_ring_of_experts`, `moe_fsdp_use_two_stage_all_gather`
+          - Kernel hyperparameters: `use_tokamax_splash`, `sa_use_fused_bwd_kernel`, `sa_block_q`, `sa_block_kv`, `sa_block_kv_compute`, `sa_block_q_dkv`, `sa_block_kv_dkv`, `sa_block_kv_dkv_compute`, `sa_block_q_dq`, `sa_block_kv_dq`, `sa_q_layout`, `sa_k_layout`, `sa_v_layout`, `wi_tile_fwd_batch_seq`, `wi_tile_fwd_embed_dim`, `wi_tile_fwd_mlp_dim`, `wi_tile_dlhs_batch_seq`, `wi_tile_dlhs_embed_dim`, `wi_tile_dlhs_mlp_dim`, `wi_tile_drhs_batch_seq`, `wi_tile_drhs_embed_dim`, `wi_tile_drhs_mlp_dim`, `wo_tile_fwd_batch_seq`, `wo_tile_fwd_embed_dim`, `wo_tile_fwd_mlp_dim`, `wo_tile_dlhs_batch_seq`, `wo_tile_dlhs_embed_dim`, `wo_tile_dlhs_mlp_dim`, `wo_tile_drhs_batch_seq`, `wo_tile_drhs_embed_dim`, `wo_tile_drhs_mlp_dim`
+        rules: |-
+          - When you change `per_device_batch_size` or `gradient_accumulation_steps`, their product must stay 1 so the global batch is unchanged.
+          - The per-tensor remat knobs only take effect with `remat_policy=custom`.
+
+          Each entry of `xla_flags` is one `--xla_...=value` (or `--libtpu_...`/`--megascale_...`) flag, passed to the TPU runtime as `LIBTPU_INIT_ARGS`. Debug / dump / SDC-checker / CPU / GPU flags are rejected. Note: on TPU7x, `--xla_tpu_enable_async_collective_fusion=true` (continuation fusion) is not supported and fails the compile.
+      timeout_sec: 10800.0
+      verifier_timeout_sec: 14400.0
+      environment:
+        env_vars:
+          FLAGOPT_TASK: flagopt-deepseek-v3-671b-v7x-8x8x8-all
+      verifier_env:
+        FLAGOPT_TASK: flagopt-deepseek-v3-671b-v7x-8x8x8-all
+        VERIFY_DEADLINE_SEC: "13800"
+      metadata:
+        difficulty: hard
+        gke_cluster: bodaborg-tpu7x-nap

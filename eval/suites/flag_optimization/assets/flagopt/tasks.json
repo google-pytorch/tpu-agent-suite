@@ -1,0 +1,752 @@
+{
+  "maxtext": {
+    "version": "0.2.6",
+    "tag": "maxtext-v0.2.6",
+    "commit": "77f09eb867eee6cac58fc211375bba6606767272",
+    "image": "us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training@sha256:14bc49e3db94320b19a2df984853d289d4fb2352a5a48ce7ef8d0d6488016071",
+    "entrypoint": "maxtext.trainers.pre_train.train",
+    "base_config": "src/maxtext/configs/base.yml",
+    "workdir": "/deps",
+    "source_in_container": "/opt/maxtext"
+  },
+  "measurement": {
+    "steps": 26,
+    "warmup_steps": 5,
+    "gate_steps": 15,
+    "loss_rtol": 0.001,
+    "grad_norm_rtol": 0.05,
+    "max_step_time_cv": 0.1,
+    "weights": "checkpoint",
+    "queue_timeout_sec": 3600,
+    "run_timeout_sec": 5400,
+    "job_deadline_sec": 7200
+  },
+  "cluster": {
+    "project": "cloud-tpu-shared-capacity",
+    "location": "us-central1",
+    "cluster": "bodaborg-tpu7x-nap",
+    "namespace": "priority-dev",
+    "queue": "default",
+    "priority": "medium",
+    "declared_duration_minutes": "120",
+    "accelerator": "tpu7x",
+    "image": "us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training@sha256:14bc49e3db94320b19a2df984853d289d4fb2352a5a48ce7ef8d0d6488016071",
+    "gcs_scratch": ""
+  },
+  "xla_flags": {
+    "max_flags": 96,
+    "denied_substrings": ["dump", "sdc_", "_cpu_", "_gpu_", "debug", "xla_force_host"],
+    "denied_flags": []
+  },
+  "fixed": {
+    "max_target_length": 4096,
+    "dtype": "bfloat16",
+    "grad_dtype": "bfloat16",
+    "opt_type": "adamw",
+    "learning_rate": 3e-05,
+    "learning_rate_schedule_steps": 1000,
+    "warmup_steps_fraction": 0.0,
+    "adam_b1": 0.9,
+    "adam_b2": 0.95,
+    "adam_weight_decay": 0.1,
+    "gradient_clipping_threshold": 1.0,
+    "dataset_type": "synthetic",
+    "enable_checkpointing": false,
+    "enable_dropout": false,
+    "init_weights_seed": 0,
+    "data_shuffle_seed": 0,
+    "attention": "flash",
+    "scan_layers": true,
+    "use_multimodal": false,
+    "enable_tensorboard": false,
+    "gcs_metrics": false,
+    "save_config_to_gcs": false,
+    "log_period": 1000,
+    "ici_sequence_parallelism": 1,
+    "ici_pipeline_parallelism": 1,
+    "ici_autoregressive_parallelism": 1
+  },
+  "locked_fixed": {"remat": ["remat_policy"], "framework": ["per_device_batch_size", "gradient_accumulation_steps"]},
+  "constraints": [],
+  "knob_groups": ["sharding", "remat", "framework", "kernel"],
+  "topologies": {
+    "4x4x4": {
+      "accelerator_display": "TPU7x (Ironwood)",
+      "generation": "tpu7x",
+      "topology": "4x4x4",
+      "chips": 64,
+      "hosts": 16,
+      "chips_per_host": 4,
+      "devices_per_chip": 2,
+      "num_devices": 128,
+      "hbm_gib_per_device": 96,
+      "aot_topology": "tpu7x-128"
+    },
+    "8x8x8": {
+      "accelerator_display": "TPU7x (Ironwood)",
+      "generation": "tpu7x",
+      "topology": "8x8x8",
+      "chips": 512,
+      "hosts": 128,
+      "chips_per_host": 4,
+      "devices_per_chip": 2,
+      "num_devices": 1024,
+      "hbm_gib_per_device": 96,
+      "aot_topology": "tpu7x-1024"
+    },
+    "2x2x2": {
+      "accelerator_display": "TPU7x (Ironwood)",
+      "generation": "tpu7x",
+      "topology": "2x2x2",
+      "chips": 8,
+      "hosts": 2,
+      "chips_per_host": 4,
+      "devices_per_chip": 2,
+      "num_devices": 16,
+      "hbm_gib_per_device": 96,
+      "aot_topology": "tpu7x-16"
+    }
+  },
+  "models": {
+    "deepseek3-671b": {
+      "info": {
+        "maxtext_model_name": "deepseek3-671b",
+        "display": "DeepSeek-V3 671B (MLA attention + 256-expert MoE, 37B active)",
+        "hf_repo": "deepseek-ai/DeepSeek-V3",
+        "hf_revision": "e815299b0bcbac849fa540c768ef21845365c9eb",
+        "params_b": 671.0,
+        "arch": "moe",
+        "safetensors_bytes": 684489845504,
+        "facts": "61 layers (first 3 dense, 58 MoE), d_model 7168, MLA (q_lora_rank 1536, kv_lora_rank 512, 128 heads), 256 routed experts (top-8, sigmoid router) + 1 shared expert, expert MLP dim 2048, vocab 129280. The HF checkpoint is FP8 (block-scaled); MaxText dequantizes it on load to the task's weight dtype.",
+        "ckpt_uri_default": "gs://agent-suite-models/ckpt/hf/deepseek-ai/DeepSeek-V3/"
+      },
+      "fixed": {
+        "model_name": "deepseek3-671b",
+        "weight_dtype": "bfloat16",
+        "megablox": true,
+        "sparse_matmul": true,
+        "capacity_factor": -1.0
+      },
+      "exclude_knobs": [],
+      "baseline": {
+        "ici_data_parallelism": 1,
+        "ici_fsdp_parallelism": 1,
+        "remat_policy": "full",
+        "ici_fsdp_transpose_parallelism": 1,
+        "ici_tensor_parallelism": 1,
+        "ici_tensor_sequence_parallelism": 1,
+        "ici_context_parallelism": 1,
+        "ici_expert_parallelism": 1,
+        "decoder_layer_input": "device",
+        "context": "remat",
+        "mlpwi": "remat",
+        "mlpwi_0": "remat",
+        "mlpwi_1": "remat",
+        "mlpwo": "remat",
+        "query_proj": "remat",
+        "key_proj": "remat",
+        "value_proj": "remat",
+        "qkv_proj": "remat",
+        "out_proj": "remat",
+        "mla_q": "remat",
+        "mla_kv": "remat",
+        "attention_out": "remat",
+        "use_iota_embed": false,
+        "allow_split_physical_axes": false,
+        "num_vocab_tiling": 1,
+        "optimizer_memory_host_offload": false,
+        "parameter_memory_host_offload": false,
+        "use_tokamax_gmm": false,
+        "use_ring_of_experts": false,
+        "moe_fsdp_use_two_stage_all_gather": false,
+        "use_tokamax_splash": false,
+        "sa_use_fused_bwd_kernel": false,
+        "sa_block_q": 512,
+        "sa_block_kv": 512,
+        "sa_block_kv_compute": 512,
+        "sa_block_q_dkv": 512,
+        "sa_block_kv_dkv": 512,
+        "sa_block_kv_dkv_compute": 512,
+        "sa_block_q_dq": 512,
+        "sa_block_kv_dq": 512,
+        "sa_q_layout": "HEAD_DIM_MINOR",
+        "sa_k_layout": "HEAD_DIM_MINOR",
+        "sa_v_layout": "HEAD_DIM_MINOR",
+        "wi_tile_fwd_batch_seq": 512,
+        "wi_tile_fwd_embed_dim": 1024,
+        "wi_tile_fwd_mlp_dim": 1024,
+        "wi_tile_dlhs_batch_seq": 512,
+        "wi_tile_dlhs_embed_dim": 1024,
+        "wi_tile_dlhs_mlp_dim": 1024,
+        "wi_tile_drhs_batch_seq": 512,
+        "wi_tile_drhs_embed_dim": 1024,
+        "wi_tile_drhs_mlp_dim": 1024,
+        "wo_tile_fwd_batch_seq": 512,
+        "wo_tile_fwd_embed_dim": 1024,
+        "wo_tile_fwd_mlp_dim": 1024,
+        "wo_tile_dlhs_batch_seq": 512,
+        "wo_tile_dlhs_embed_dim": 1024,
+        "wo_tile_dlhs_mlp_dim": 1024,
+        "wo_tile_drhs_batch_seq": 512,
+        "wo_tile_drhs_embed_dim": 1024,
+        "wo_tile_drhs_mlp_dim": 1024
+      }
+    },
+    "gemma4-31b": {
+      "info": {
+        "maxtext_model_name": "gemma4-31b",
+        "display": "Gemma 4 31B (dense, hybrid sliding-window + global attention, 60 layers)",
+        "hf_repo": "google/gemma-4-31B-it",
+        "hf_revision": "842da3794eaa0b77d5f08bae87a17459d91ff475",
+        "params_b": 31.3,
+        "arch": "dense",
+        "safetensors_bytes": 62546177752,
+        "facts": "60 layers, d_model 5376, 32 query heads, 16 local KV heads (head_dim 256), 4 global KV heads (head_dim 512), sliding window 1024, MLP dim 21504 (GeGLU), vocab 262144, tied embeddings.",
+        "ckpt_uri_default": "gs://agent-suite-models/ckpt/hf/google/gemma-4-31B-it/"
+      },
+      "fixed": {
+        "model_name": "gemma4-31b",
+        "weight_dtype": "float32",
+        "ici_fsdp_transpose_parallelism": 1,
+        "ici_context_parallelism": 1,
+        "ici_tensor_sequence_parallelism": 1,
+        "ici_expert_parallelism": 1
+      },
+      "exclude_knobs": ["ici_fsdp_transpose_parallelism", "ici_tensor_sequence_parallelism", "ici_context_parallelism", "ici_expert_parallelism", "mla_q", "mla_kv", "attention_out", "use_tokamax_gmm", "use_ring_of_experts", "moe_fsdp_use_two_stage_all_gather", "wi_tile_fwd_batch_seq", "wi_tile_fwd_embed_dim", "wi_tile_fwd_mlp_dim", "wi_tile_dlhs_batch_seq", "wi_tile_dlhs_embed_dim", "wi_tile_dlhs_mlp_dim", "wi_tile_drhs_batch_seq", "wi_tile_drhs_embed_dim", "wi_tile_drhs_mlp_dim", "wo_tile_fwd_batch_seq", "wo_tile_fwd_embed_dim", "wo_tile_fwd_mlp_dim", "wo_tile_dlhs_batch_seq", "wo_tile_dlhs_embed_dim", "wo_tile_dlhs_mlp_dim", "wo_tile_drhs_batch_seq", "wo_tile_drhs_embed_dim", "wo_tile_drhs_mlp_dim"],
+      "baseline": {
+        "ici_data_parallelism": 1,
+        "ici_fsdp_parallelism": 1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "full",
+        "decoder_layer_input": "device",
+        "context": "remat",
+        "mlpwi": "remat",
+        "mlpwi_0": "remat",
+        "mlpwi_1": "remat",
+        "mlpwo": "remat",
+        "query_proj": "remat",
+        "key_proj": "remat",
+        "value_proj": "remat",
+        "qkv_proj": "remat",
+        "out_proj": "remat",
+        "use_iota_embed": false,
+        "allow_split_physical_axes": false,
+        "num_vocab_tiling": 1,
+        "optimizer_memory_host_offload": false,
+        "parameter_memory_host_offload": false,
+        "use_tokamax_splash": false,
+        "sa_use_fused_bwd_kernel": false,
+        "sa_block_q": 512,
+        "sa_block_kv": 512,
+        "sa_block_kv_compute": 512,
+        "sa_block_q_dkv": 512,
+        "sa_block_kv_dkv": 512,
+        "sa_block_kv_dkv_compute": 512,
+        "sa_block_q_dq": 512,
+        "sa_block_kv_dq": 512,
+        "sa_q_layout": "HEAD_DIM_MINOR",
+        "sa_k_layout": "HEAD_DIM_MINOR",
+        "sa_v_layout": "HEAD_DIM_MINOR"
+      }
+    },
+    "qwen3.5-397b-a17b": {
+      "info": {
+        "maxtext_model_name": "qwen3.5-397b-a17b",
+        "display": "Qwen 3.5 397B-A17B (hybrid Gated DeltaNet + full attention, 512-expert MoE, 17B active)",
+        "hf_repo": "Qwen/Qwen3.5-397B-A17B",
+        "hf_revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+        "params_b": 397.0,
+        "arch": "moe",
+        "safetensors_bytes": 806795857888,
+        "facts": "60 layers (45 Gated DeltaNet + 15 full GQA), d_model 4096, 32 query / 2 KV heads (head_dim 256), 512 routed experts (top-10) + 1 shared expert, expert MLP dim 1024, vocab 248320.",
+        "ckpt_uri_default": "gs://agent-suite-models/ckpt/hf/Qwen/Qwen3.5-397B-A17B/"
+      },
+      "fixed": {
+        "model_name": "qwen3.5-397b-a17b",
+        "weight_dtype": "bfloat16",
+        "megablox": true,
+        "sparse_matmul": true,
+        "capacity_factor": -1.0
+      },
+      "exclude_knobs": ["mla_q", "mla_kv", "attention_out"],
+      "baseline": {
+        "ici_fsdp_parallelism": 1,
+        "remat_policy": "full",
+        "ici_data_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": 1,
+        "ici_tensor_parallelism": 1,
+        "ici_tensor_sequence_parallelism": 1,
+        "ici_context_parallelism": 1,
+        "ici_expert_parallelism": 1,
+        "decoder_layer_input": "device",
+        "context": "remat",
+        "mlpwi": "remat",
+        "mlpwi_0": "remat",
+        "mlpwi_1": "remat",
+        "mlpwo": "remat",
+        "query_proj": "remat",
+        "key_proj": "remat",
+        "value_proj": "remat",
+        "qkv_proj": "remat",
+        "out_proj": "remat",
+        "use_iota_embed": false,
+        "allow_split_physical_axes": false,
+        "num_vocab_tiling": 1,
+        "optimizer_memory_host_offload": false,
+        "parameter_memory_host_offload": false,
+        "use_tokamax_gmm": false,
+        "use_ring_of_experts": false,
+        "moe_fsdp_use_two_stage_all_gather": false,
+        "use_tokamax_splash": false,
+        "sa_use_fused_bwd_kernel": false,
+        "sa_block_q": 512,
+        "sa_block_kv": 512,
+        "sa_block_kv_compute": 512,
+        "sa_block_q_dkv": 512,
+        "sa_block_kv_dkv": 512,
+        "sa_block_kv_dkv_compute": 512,
+        "sa_block_q_dq": 512,
+        "sa_block_kv_dq": 512,
+        "sa_q_layout": "HEAD_DIM_MINOR",
+        "sa_k_layout": "HEAD_DIM_MINOR",
+        "sa_v_layout": "HEAD_DIM_MINOR",
+        "wi_tile_fwd_batch_seq": 512,
+        "wi_tile_fwd_embed_dim": 1024,
+        "wi_tile_fwd_mlp_dim": 1024,
+        "wi_tile_dlhs_batch_seq": 512,
+        "wi_tile_dlhs_embed_dim": 1024,
+        "wi_tile_dlhs_mlp_dim": 1024,
+        "wi_tile_drhs_batch_seq": 512,
+        "wi_tile_drhs_embed_dim": 1024,
+        "wi_tile_drhs_mlp_dim": 1024,
+        "wo_tile_fwd_batch_seq": 512,
+        "wo_tile_fwd_embed_dim": 1024,
+        "wo_tile_fwd_mlp_dim": 1024,
+        "wo_tile_dlhs_batch_seq": 512,
+        "wo_tile_dlhs_embed_dim": 1024,
+        "wo_tile_dlhs_mlp_dim": 1024,
+        "wo_tile_drhs_batch_seq": 512,
+        "wo_tile_drhs_embed_dim": 1024,
+        "wo_tile_drhs_mlp_dim": 1024
+      }
+    }
+  },
+  "knobs": {
+    "ici_data_parallelism": {
+      "type": "int",
+      "choices": "powers_of_two_up_to_num_devices",
+      "help": "pure data parallelism (DP): replicas of params/optimizer state",
+      "group": "sharding"
+    },
+    "ici_fsdp_parallelism": {
+      "type": "int",
+      "choices": "powers_of_two_up_to_num_devices",
+      "help": "fully-sharded data parallelism (FSDP / ZeRO-3) over ICI",
+      "group": "sharding"
+    },
+    "ici_fsdp_transpose_parallelism": {
+      "type": "int",
+      "choices": "powers_of_two_up_to_num_devices",
+      "help": "second FSDP axis sharding the other weight dimension",
+      "group": "sharding"
+    },
+    "ici_tensor_parallelism": {
+      "type": "int",
+      "choices": "powers_of_two_up_to_num_devices",
+      "help": "tensor (model) parallelism (TP) over heads / MLP dim",
+      "group": "sharding"
+    },
+    "ici_tensor_sequence_parallelism": {
+      "type": "int",
+      "choices": "powers_of_two_up_to_num_devices",
+      "help": "TP with sequence-sharded activations between blocks",
+      "group": "sharding"
+    },
+    "ici_context_parallelism": {
+      "type": "int",
+      "choices": "powers_of_two_up_to_num_devices",
+      "help": "context parallelism (CP): shard the sequence through attention",
+      "group": "sharding"
+    },
+    "ici_expert_parallelism": {
+      "type": "int",
+      "choices": "powers_of_two_up_to_num_devices",
+      "help": "expert parallelism (EP): shard MoE experts (all-to-all dispatch)",
+      "group": "sharding"
+    },
+    "remat_policy": {
+      "type": "enum",
+      "choices": ["full", "minimal", "minimal_flash", "minimal_with_context", "save_dot_with_context_except_mlp", "save_dot_except_mlpwi", "save_dot_except_mlp", "save_qkv_proj", "save_out_proj", "qkv_proj_offloaded", "minimal_offloaded", "custom", "none"],
+      "group": "remat",
+      "help": "activation rematerialization policy; per-tensor knobs below apply only with 'custom'"
+    },
+    "decoder_layer_input": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'decoder_layer_input' on device, offload it to host, or recompute it"
+    },
+    "context": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'context' on device, offload it to host, or recompute it"
+    },
+    "mlpwi": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'mlpwi' on device, offload it to host, or recompute it"
+    },
+    "mlpwi_0": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'mlpwi_0' on device, offload it to host, or recompute it"
+    },
+    "mlpwi_1": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'mlpwi_1' on device, offload it to host, or recompute it"
+    },
+    "mlpwo": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'mlpwo' on device, offload it to host, or recompute it"
+    },
+    "query_proj": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'query_proj' on device, offload it to host, or recompute it"
+    },
+    "key_proj": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'key_proj' on device, offload it to host, or recompute it"
+    },
+    "value_proj": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'value_proj' on device, offload it to host, or recompute it"
+    },
+    "qkv_proj": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'qkv_proj' on device, offload it to host, or recompute it"
+    },
+    "out_proj": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'out_proj' on device, offload it to host, or recompute it"
+    },
+    "mla_q": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'mla_q' on device, offload it to host, or recompute it"
+    },
+    "mla_kv": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'mla_kv' on device, offload it to host, or recompute it"
+    },
+    "attention_out": {
+      "type": "enum",
+      "choices": ["remat", "device", "offload"],
+      "group": "remat",
+      "help": "remat_policy=custom: keep 'attention_out' on device, offload it to host, or recompute it"
+    },
+    "use_iota_embed": {"type": "bool", "group": "framework", "help": "iota-based embedding lookup"},
+    "allow_split_physical_axes": {"type": "bool", "group": "framework", "help": "let the mesh split physical torus axes"},
+    "num_vocab_tiling": {
+      "type": "int",
+      "choices": [1, 2, 4, 8, 16],
+      "group": "framework",
+      "help": "tile the logits/cross-entropy computation over the vocab to save memory"
+    },
+    "optimizer_memory_host_offload": {"type": "bool", "group": "framework", "help": "keep optimizer state in host memory"},
+    "parameter_memory_host_offload": {"type": "bool", "group": "framework", "help": "keep parameters in host memory"},
+    "gradient_accumulation_steps": {
+      "type": "int",
+      "choices": [1, 2, 4, 8],
+      "group": "framework",
+      "help": "micro-batches per step; per_device_batch_size * this must stay constant"
+    },
+    "per_device_batch_size": {
+      "type": "float",
+      "choices": "per_device_batch_size_fractions",
+      "group": "framework",
+      "help": "micro-batch per device; per_device_batch_size * gradient_accumulation_steps is fixed"
+    },
+    "use_tokamax_gmm": {"type": "bool", "group": "framework", "help": "Tokamax grouped-matmul kernels for MoE"},
+    "use_ring_of_experts": {
+      "type": "bool",
+      "group": "framework",
+      "help": "ring-of-experts dispatch for expert parallelism"
+    },
+    "moe_fsdp_use_two_stage_all_gather": {
+      "type": "bool",
+      "group": "framework",
+      "help": "two all-gathers for MoE weights sharded on fsdp and fsdp_transpose"
+    },
+    "use_tokamax_splash": {"type": "bool", "group": "kernel", "help": "Tokamax splash-attention implementation"},
+    "sa_use_fused_bwd_kernel": {"type": "bool", "group": "kernel", "help": "fused dq/dkv splash backward kernel"},
+    "sa_block_q": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_block_kv": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_block_kv_compute": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_block_q_dkv": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_block_kv_dkv": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_block_kv_dkv_compute": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_block_q_dq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_block_kv_dq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "splash attention block size"
+    },
+    "sa_q_layout": {
+      "type": "enum",
+      "choices": ["HEAD_DIM_MINOR", "SEQ_MINOR"],
+      "group": "kernel",
+      "help": "splash attention operand layout"
+    },
+    "sa_k_layout": {
+      "type": "enum",
+      "choices": ["HEAD_DIM_MINOR", "SEQ_MINOR"],
+      "group": "kernel",
+      "help": "splash attention operand layout"
+    },
+    "sa_v_layout": {
+      "type": "enum",
+      "choices": ["HEAD_DIM_MINOR", "SEQ_MINOR"],
+      "group": "kernel",
+      "help": "splash attention operand layout"
+    },
+    "wi_tile_fwd_batch_seq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi fwd batch_seq)"
+    },
+    "wi_tile_fwd_embed_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi fwd embed_dim)"
+    },
+    "wi_tile_fwd_mlp_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi fwd mlp_dim)"
+    },
+    "wi_tile_dlhs_batch_seq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi dlhs batch_seq)"
+    },
+    "wi_tile_dlhs_embed_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi dlhs embed_dim)"
+    },
+    "wi_tile_dlhs_mlp_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi dlhs mlp_dim)"
+    },
+    "wi_tile_drhs_batch_seq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi drhs batch_seq)"
+    },
+    "wi_tile_drhs_embed_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi drhs embed_dim)"
+    },
+    "wi_tile_drhs_mlp_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wi drhs mlp_dim)"
+    },
+    "wo_tile_fwd_batch_seq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo fwd batch_seq)"
+    },
+    "wo_tile_fwd_embed_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo fwd embed_dim)"
+    },
+    "wo_tile_fwd_mlp_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo fwd mlp_dim)"
+    },
+    "wo_tile_dlhs_batch_seq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo dlhs batch_seq)"
+    },
+    "wo_tile_dlhs_embed_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo dlhs embed_dim)"
+    },
+    "wo_tile_dlhs_mlp_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo dlhs mlp_dim)"
+    },
+    "wo_tile_drhs_batch_seq": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo drhs batch_seq)"
+    },
+    "wo_tile_drhs_embed_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo drhs embed_dim)"
+    },
+    "wo_tile_drhs_mlp_dim": {
+      "type": "int",
+      "choices": [128, 256, 512, 1024, 2048, 4096],
+      "group": "kernel",
+      "help": "megablox GMM tile (wo drhs mlp_dim)"
+    }
+  },
+  "tasks": {
+    "flagopt-deepseek-v3-671b-v7x-4x4x4-all": {
+      "title": "Tune every performance knob of DeepSeek-V3 671B (MoE) pre-training on TPU7x 4x4x4",
+      "doc_row": 6,
+      "model": "deepseek3-671b",
+      "topology": "4x4x4",
+      "per_device_batch_size": 1,
+      "gradient_accumulation_steps": 1,
+      "groups": ["all"],
+      "mesh": {"ici_fsdp_parallelism": 128},
+      "time_budget_sec": 21600,
+      "verifier_timeout_sec": 14400
+    },
+    "flagopt-deepseek-v3-671b-v7x-8x8x8-all": {
+      "title": "Tune every performance knob of DeepSeek-V3 671B (MoE) pre-training on TPU7x 8x8x8 in 3 hours",
+      "doc_row": 7,
+      "model": "deepseek3-671b",
+      "topology": "8x8x8",
+      "per_device_batch_size": 1,
+      "gradient_accumulation_steps": 1,
+      "groups": ["all"],
+      "mesh": {"ici_data_parallelism": 2, "ici_fsdp_parallelism": 512},
+      "time_budget_sec": 10800,
+      "verifier_timeout_sec": 14400,
+      "notes": "Pure FSDP over all 1024 devices does not compile for DeepSeek-V3 (some MLA weight dimensions are not divisible by 1024), so the default configuration is DP=2 x FSDP=512, the nearest valid MaxText-default-style mesh."
+    },
+    "flagopt-gemma4-31b-v7x-2x2x2-full-stack": {
+      "title": "Tune sharding, remat, XLA flags, MaxText flags and kernel hyperparameters of Gemma 4 31B pre-training on TPU7x 2x2x2",
+      "doc_row": 3,
+      "model": "gemma4-31b",
+      "topology": "2x2x2",
+      "per_device_batch_size": 1,
+      "gradient_accumulation_steps": 1,
+      "groups": ["sharding", "remat", "xla", "framework", "kernel"],
+      "mesh": {"ici_fsdp_parallelism": 4, "ici_tensor_parallelism": 4},
+      "time_budget_sec": 21600,
+      "verifier_timeout_sec": 9000
+    },
+    "flagopt-gemma4-31b-v7x-2x2x2-sharding": {
+      "title": "Tune the sharding mesh (DP / FSDP / TP) of Gemma 4 31B pre-training on TPU7x 2x2x2",
+      "doc_row": 1,
+      "model": "gemma4-31b",
+      "topology": "2x2x2",
+      "per_device_batch_size": 1,
+      "gradient_accumulation_steps": 1,
+      "groups": ["sharding"],
+      "mesh": {"ici_fsdp_parallelism": 4, "ici_tensor_parallelism": 4},
+      "time_budget_sec": 21600,
+      "verifier_timeout_sec": 9000
+    },
+    "flagopt-gemma4-31b-v7x-2x2x2-sharding-remat": {
+      "title": "Tune sharding (DP / FSDP / TP) and rematerialization of Gemma 4 31B pre-training on TPU7x 2x2x2",
+      "doc_row": 2,
+      "model": "gemma4-31b",
+      "topology": "2x2x2",
+      "per_device_batch_size": 1,
+      "gradient_accumulation_steps": 1,
+      "groups": ["sharding", "remat"],
+      "mesh": {"ici_fsdp_parallelism": 4, "ici_tensor_parallelism": 4},
+      "time_budget_sec": 21600,
+      "verifier_timeout_sec": 9000
+    },
+    "flagopt-qwen3-5-397b-a17b-v7x-4x4x4-all": {
+      "title": "Tune every performance knob of Qwen 3.5 397B-A17B (MoE) pre-training on TPU7x 4x4x4 in 3 hours",
+      "doc_row": 5,
+      "model": "qwen3.5-397b-a17b",
+      "topology": "4x4x4",
+      "per_device_batch_size": 2,
+      "gradient_accumulation_steps": 1,
+      "groups": ["all"],
+      "mesh": {"ici_fsdp_parallelism": 128},
+      "time_budget_sec": 10800,
+      "verifier_timeout_sec": 14400
+    }
+  }
+}
