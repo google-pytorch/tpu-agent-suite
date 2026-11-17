@@ -285,6 +285,33 @@ class TestPackageRequirements(helpers.CompilerTestCase):
         self.assertIn("requirements-client.txt lists extra-host", warnings[0])
         self.assertIn("requirements-tpu.txt lists extra-tpu", warnings[1])
 
+    def test_filter_requirements_strips_comments_and_keeps_declared_packages(
+            self):
+        """Filtered requirements omit maintainer comments so none misattach."""
+        source = ("# File header comment.\n\n"
+                  "--extra-index-url https://example.com/simple\n"
+                  "torch>=2.11.0\n"
+                  "# libtpu note without blank lines.\n"
+                  "libtpu>=0.0.44\n"
+                  "jax>=0.10.2\n"
+                  "transformers>=4.40.0\n\n"
+                  "# Unused FastAPI server block.\n"
+                  "fastapi>=0.100.0\n"
+                  "ml_dtypes>=0.5.0\n")
+        filtered = dist_assets.filter_requirements_content(
+            source, {"torch", "transformers", "ml-dtypes"})
+        self.assertEqual(
+            filtered,
+            "--extra-index-url https://example.com/simple\n"
+            "torch>=2.11.0\n"
+            "transformers>=4.40.0\n"
+            "ml_dtypes>=0.5.0\n",
+        )
+        self.assertEqual(
+            dist_assets.filter_requirements_content(source, set()),
+            "# No dependencies required for this distribution.\n",
+        )
+
     def test_a_frontmatter_dependency_is_a_bare_name(self):
         pkg_dir = self._create_valid_package()
         (pkg_dir / "requirements-client.txt").write_text("pydantic>=2.0.0\n",

@@ -62,14 +62,14 @@ All `make` targets run from the repository root. `make help` lists them.
 
 ```bash
 make verify   # gate: manifest schema, delegation graph, referenced files, knowledge base index/log
-make test     # framework unit tests + package translation parity tests
-make lint     # advisory content checks on instruction prose (links, legacy paths, delegation)
+make test     # framework, package (translation parity), and tpu-knowledge-base unit tests
+make lint     # content lint checks on instruction prose and scripts (enforced in CI + PR annotations)
 make build    # compile dist/<harness>/tpu-agent-suite for all four harnesses
 ```
 
 What each one catches:
 
-- **`verify`** is the merge gate. It validates `package.release.json` against the
+- **`verify`** is the structural merge gate. It validates `package.release.json` against the
   schema, checks that every referenced instruction/schema/script/reference
   exists, enforces the delegation rules (no cycles, at most 3 levels below a
   released skill, every agent reachable), and runs `validate-kb`. A *released
@@ -77,12 +77,14 @@ What each one catches:
   names for a build; those are the roots the compiler starts from. It also runs the
   four lint checks that are decidable (`instruction-links`, `reference-links`,
   `environment-contract`, `workspace-config-paths`).
-- **`test`** runs `make test-framework` and `make test-package`. The package
-  tests include one translation parity suite per harness; if you change a
-  translator or an agent's frontmatter, these are what break.
-- **`lint`** reports everything else. Several checks are heuristics, so it is
-  advisory (kept out of required status checks), but CI posts its findings as
-  PR annotations and you are expected to clear the real ones.
+- **`test`** runs `make test-framework`, `make test-package`, and
+  `make test-knowledge-base`. The package tests include one translation parity
+  suite per harness; if you change a translator or an agent's frontmatter, these
+  are what break.
+- **`lint`** checks instruction and script content rules not covered by `verify`.
+  Findings exit non-zero (enforced in CI and surfaced as inline PR annotations),
+  while informational `WARNING:` lines for unreachable files or undeclared
+  catalog entries do not fail the check.
 - **`build`** is what `dist/` and the evaluation staging consume.
 
 `make test-all` additionally runs the companion `*_test.py` suites next to

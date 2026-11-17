@@ -714,6 +714,25 @@ class TestInstaller(_TranslatedInstallerTestCase):
             self.assertTrue(directory.is_dir(), directory)
         self.assertFalse((home / ".claude" / "agents").exists())
 
+    def test_summarize_installation_aggregates_managed_blocks_per_file(self):
+        """Multiple memory blocks merged into one file print a single summary line."""
+        dest = self.temp_dir / "ws"
+        build = {"harness": "claude-code", "source": "pkg", "version": "1.0.0"}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            installer.summarize_installation(
+                dest,
+                build,
+                "project",
+                memory_merges=[{
+                    "path": "CLAUDE.md"
+                }, {
+                    "path": "CLAUDE.md"
+                }],
+            )
+        self.assertIn(f"  Added 2 managed blocks to {dest / 'CLAUDE.md'}.",
+                      out.getvalue())
+        self.assertNotIn("Added a managed block", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

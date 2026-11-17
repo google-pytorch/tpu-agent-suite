@@ -237,32 +237,24 @@ def extract_requirement_names(requirements_text: str) -> set[str]:
 
 def filter_requirements_content(source_text: str,
                                 allowed_names: set[str]) -> str:
-    """Filter requirements lines by package name, preserving comments and header."""
-    canonical_allowed = {
-        canonical_pkg_name(name)
-        for name in allowed_names if name.strip()
-    }
-    output_lines: list[str] = []
-    has_requirements = False
-    for line in source_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            if output_lines and output_lines[-1] != "":
-                output_lines.append("")
-            continue
-        if stripped.startswith("#") or stripped.startswith("-"):
-            output_lines.append(line)
-            continue
-        pkg_name = canonical_pkg_name(stripped)
-        if pkg_name in canonical_allowed:
-            output_lines.append(line)
-            has_requirements = True
+    """Filter requirements lines by package name, stripping maintainer comments."""
+    allowed = {canonical_pkg_name(n) for n in allowed_names if n.strip()}
+    out: list[str] = []
+    has_kept = False
 
-    while output_lines and output_lines[-1] == "":
-        output_lines.pop()
-    if not output_lines or not has_requirements:
+    for line in source_text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("-"):
+            out.append(line)
+        elif canonical_pkg_name(s) in allowed:
+            out.append(line)
+            has_kept = True
+
+    if not has_kept:
         return "# No dependencies required for this distribution.\n"
-    return "\n".join(output_lines) + "\n"
+    return "\n".join(out) + "\n"
 
 
 def undeclared_catalog_entries(package_dir: Path,

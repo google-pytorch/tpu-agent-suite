@@ -64,6 +64,7 @@ You can find more example prompts in the [`eval/datasets/`](https://github.com/g
 | You want to... | Routed to | Example |
 | :--- | :--- | :--- |
 | Run a HuggingFace PyTorch model on TPU, benchmark it, or serve it | `tpu-model-onboarding` | *"Onboard Qwen/Qwen3.8-27B to run as a vLLM inference server on Cloud TPU using the torch_tpu backend. Send it a test completion request, then benchmark it and report TTFT, ITL and throughput in a table."* |
+| Serve, sweep-benchmark, accuracy-gate, or stop multi-arm vLLM servers on `gke_job` | `tpu-serving-bench` | *"Benchmark this patched vLLM image against the baseline image on Qwen/Qwen3-32B across concurrency levels and check the MMLU-Pro accuracy gate."* |
 | Optimize a custom Pallas TPU kernel | `tpu-kernel-development` | *"Optimize this custom Pallas flash-attention kernel for TPU v5e and run a self-refinement benchmark loop."* |
 | Analyze an XProf profile, or capture one | `tpu-diagnostics` | *"Analyze the XProf profile at /path/to/profile and identify memory bottlenecks and TPU compute utilization."* |
 | Get a cited fact about TPU hardware or runtimes | `tpu-knowledge-base` | *"How much HBM does a TPU v6e chip have? Cite the source."* |
@@ -185,21 +186,27 @@ version, the models used, your host OS, and your `environment.json`.
 
 ### Where it goes
 
-To the bucket **you** chose (`trajectory.params.bucket`), under:
+To the destination **you** chose (`trajectory.params.sink`):
 
-```
-gs://<your-bucket>/tpu-agent-trajectories/<user-id>/<hostname>/<timestamp>-<session-id-prefix>/
-    manifest.json     # readable without downloading the bundle
-    bundle.tar.gz     # transcripts and artifacts
-```
+- **Google Cloud Storage (`gcs`, default)**: Uploaded to the bucket you control (`trajectory.params.bucket`), under:
 
-`<session-id-prefix>` is the first eight characters of the session id; the
-full id is in `manifest.json`.
+  ```
+  gs://<your-bucket>/tpu-agent-trajectories/<user-id>/<hostname>/<timestamp>-<session-id-prefix>/
+      manifest.json     # readable without downloading the bundle
+      bundle.tar.gz     # transcripts and artifacts
+  ```
 
-Nothing is sent to Google. Sharing is off until you turn it on: the first
-time you export, the agent asks whether and where to share, and saves your
-answer. If you decline, nothing is exported, and it doesn't ask again unless
-you ask it to share. See
+  `<session-id-prefix>` is the first eight characters of the session id; the
+  full id is in `manifest.json`. Nothing is sent to Google: the bundle goes only
+  to the bucket you control.
+- **Harbor Hub (`harbor`)**: Uploaded as a browsable ATIF trajectory job (shared
+  with `trajectory_share_org` if configured, or kept private when blank). Requires
+  the optional `harbor` CLI and package in your host environment
+  (`pip install harbor==0.23.0` and `harbor auth login`).
+
+Sharing is off until you turn it on: the first time you export, the agent asks
+whether and where to share, and saves your answer. If you decline, nothing is
+exported, and it doesn't ask again unless you ask it to share. See
 [install.md](install.md#3-environment-configuration) for the settings.
 
 ### Two things it will ask you about
@@ -212,7 +219,7 @@ you ask it to share. See
   says so and saves nothing.
 
 The bundle is not redacted. It contains your transcripts and artifacts
-verbatim, which is why it goes only to a bucket you control.
+verbatim, so only enable sharing to a bucket or Harbor organization you trust.
 
 ---
 

@@ -44,7 +44,8 @@ questions with a citation.
 | --- | --- | --- |
 | tpu-model-onboarding | The onboarding workflow: check the hardware, find candidate models, run preflight checks, benchmark or deploy, and report. | Follows a fixed checklist. Each step's details live in a reference. |
 | tpu-unwiring | Replaces CUDA-only code in a model with native PyTorch, and proves the patch works by running it. | Patches, runs and fixes until the model runs. |
-| tpu-kernel-development | Converts one computation into a fast Pallas kernel. | A loop with a fixed iteration budget, keeping its state in a file. |
+| tpu-serving-bench | Serves, sweep-benchmarks, accuracy-checks (MMLU-Pro), and stops multi-arm vLLM servers on `gke_job`. | Runs deterministic arm sweeps and delegates server trace capture to `tpu-diagnostics`. |
+| tpu-kernel-development | Converts one computation into a fast Pallas kernel. | Coordinates `analyze-cuda-reference` and `kernel-worker` over a fixed iteration budget, keeping state on disk. |
 | tpu-diagnostics | Captures and reads XProf traces. | Returns exactly the metrics requested. |
 | tpu-knowledge-base | Answers a factual question with a citation. | Looks the question up in an index of public sources, fetches one page, and returns its URL. |
 

@@ -80,12 +80,15 @@ host_dependencies:
   - pyyaml
 tpu_dependencies:
   - diffusers
+  - fastapi
   - google-cloud-storage
   - pandas
+  - pydantic
   - pytest
   - torch
   - tpu-info
   - transformers
+  - uvicorn
 ---
 
 # TorchTPU Onboarding Workflow

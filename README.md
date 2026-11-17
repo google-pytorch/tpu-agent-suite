@@ -8,6 +8,8 @@ This repository builds and distributes **TPU agent suite packages**: declarative
 
 ## Releases
 
+Follow **[`docs/install.md`](docs/install.md)** to install a pre-compiled archive in under 5 minutes:
+
 - **Stable Releases (Recommended)**: Google periodically cuts verified, pre-compiled harness archives in **[GitHub Releases](https://github.com/google-pytorch/tpu-agent-suite/releases)**. End users should download and install from the [latest release](https://github.com/google-pytorch/tpu-agent-suite/releases/latest) rather than building from `main`.
 - **Development (`main` Branch)**: The `main` branch tracks active ongoing development and may include unreleased or evolving changes between stable releases.
 
@@ -118,9 +120,9 @@ For the full list of configs, credentials, and the interactive sandbox, see [`ev
 All code contributions, tests, and agent packages live in this repository. Every pull request runs the following CI checks:
 
 - **`make verify`**: manifest, delegation graph, schema, and knowledge base checks.
-- **`make test`**: framework and package test suites (translation parity per harness).
+- **`make test`**: framework, package, and knowledge-base test suites (translation parity per harness).
 - **`make build`**: distributions for all harnesses compile cleanly.
-- **`make lint`**: advisory content checks, reported as annotations.
+- **`make lint`**: content lint checks enforced in CI and reported as PR annotations.
 - **pre-commit**: formatting and static checks (`.pre-commit-config.yaml`).
 
 Local setup for these checks, and the short path for common contributions, is in [`docs/developing.md`](docs/developing.md). Note that external contributions are not being accepted at this time (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).

@@ -902,8 +902,15 @@ def summarize_installation(
 
     print(f"Installed {build['source']} {build['version']} for"
           f" {display} ({scope} scope) into {destination}.")
+    merge_counts: dict[Path, int] = {}
     for merge in memory_merges:
-        print(f"  Added a managed block to {destination / merge['path']}.")
+        target = destination / merge["path"]
+        merge_counts[target] = merge_counts.get(target, 0) + 1
+    for target, count in merge_counts.items():
+        if count == 1:
+            print(f"  Added a managed block to {target}.")
+        else:
+            print(f"  Added {count} managed blocks to {target}.")
 
     # Claude Code and Codex installs pre-authorize ~/.tpu-agent-suite through
     # their harness config; harnesses without a config writer need a one-time
