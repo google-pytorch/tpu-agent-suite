@@ -34,6 +34,7 @@ eval/datasets/**/environment/.nexus-tpu-digest
 # Harness state written while running agents from this directory, never a
 # source file.
 .claude/
+.worktrees/
 
 # Staged evaluation packages for Harbor agents
 .eval_staging/
