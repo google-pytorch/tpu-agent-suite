@@ -3477,6 +3477,438 @@ class TestRunSuiteOption(unittest.TestCase):
                 (env_art / "sub" / "trace.xplane.pb").read_bytes(), b"xplane")
 
 
+class TestRunSuiteAndSitecustomizeProvenance(unittest.TestCase):
+    """Tests for suite verifier routing, env clearing, and upload-time provenance."""
+
+    def test_suite_resolution_reads_verifier_family_across_forms(self) -> None:
+        from types import SimpleNamespace
+
+        # Suffixless built-in suite path
+        kb_path = _RUN_MOD._resolve_suite_spec_path(
+            "knowledgebase/tpu_knowledge_qa")
+        self.assertIsNotNone(kb_path)
+        self.assertEqual(kb_path.name, "tpu_knowledge_qa.yaml")
+        info_kb = _RUN_MOD._resolve_and_check_run_verifier(
+            args=SimpleNamespace(
+                suite="knowledgebase/tpu_knowledge_qa",
+                dataset=None,
+                verifier_family=None,
+                verifier_version=None,
+            ),
+            config={},
+            harbor_args=[],
+            tasks=[],
+        )
+        self.assertIsNotNone(info_kb)
+        self.assertEqual(info_kb["verifier_family"], "knowledgebase")
+
+        # Recursive suite directory
+        cset_dir = _RUN_MOD._resolve_suite_spec_path("cset")
+        self.assertIsNotNone(cset_dir)
+        self.assertTrue(cset_dir.is_dir())
+        info_cset = _RUN_MOD._resolve_and_check_run_verifier(
+            args=SimpleNamespace(
+                suite="cset",
+                dataset=None,
+                verifier_family=None,
+                verifier_version=None,
+            ),
+            config={},
+            harbor_args=[],
+            tasks=[],
+        )
+        self.assertIsNotNone(info_cset)
+        self.assertEqual(info_cset["verifier_family"], "cset")
+
+        # Explicit YAML verifier_family overrides filename heuristics
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neutral_yaml = root / "custom_neutral_name.yaml"
+            neutral_yaml.write_text(
+                'version: "1.0"\n'
+                "name: neutral-name\n"
+                "verifier_family: onboarding_routing\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _RUN_MOD._read_suite_verifier_family(str(neutral_yaml)),
+                "onboarding_routing",
+            )
+            info_yaml = _RUN_MOD._resolve_and_check_run_verifier(
+                args=SimpleNamespace(
+                    suite=str(neutral_yaml),
+                    dataset=None,
+                    verifier_family=None,
+                    verifier_version=None,
+                ),
+                config={},
+                harbor_args=[],
+                tasks=[],
+            )
+            self.assertIsNotNone(info_yaml)
+            self.assertEqual(info_yaml["verifier_family"],
+                             "onboarding_routing")
+
+            suite_dir = root / "custom_suite_dir" / "sub"
+            suite_dir.mkdir(parents=True)
+            (suite_dir / "nested.yaml").write_text(
+                "verifier_family: jaxbench\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _RUN_MOD._read_suite_verifier_family(
+                    str(root / "custom_suite_dir")),
+                "jaxbench",
+            )
+
+    def test_collect_task_search_roots_extracts_datasets_and_tasks(
+        self, ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            ds_root = root / "custom_dataset"
+            cfg_task = root / "standalone_tasks" / "t1"
+            suite_root = root / "compiled_suite"
+            for d in (ds_root, cfg_task, suite_root):
+                d.mkdir(parents=True)
+
+            roots = _RUN_MOD._collect_task_search_roots(
+                config={
+                    "datasets": [{
+                        "path": str(ds_root)
+                    }],
+                    "tasks": [{
+                        "path": str(cfg_task)
+                    }],
+                },
+                target_suite_dir=suite_root,
+            )
+            resolved_roots = [p.resolve() for p in roots]
+            self.assertIn(ds_root, resolved_roots)
+            self.assertIn(cfg_task.parent, resolved_roots)
+            self.assertIn(suite_root, resolved_roots)
+
+    def test_harbor_env_exports_and_clears_verifier_provenance_vars(
+        self, ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg_file = tmp_path / "cfg.yaml"
+            cfg_file.write_text("agents:\n  - name: antigravity\n",
+                                encoding="utf-8")
+            task_dir = tmp_path / "xprof-attention"
+            task_dir.mkdir()
+            (task_dir / "task.toml").write_text("", encoding="utf-8")
+
+            captured_envs: list[dict[str, str]] = []
+
+            def fake_subproc_run(cmd, *args, **kwargs):
+                if (isinstance(cmd, list) and len(cmd) > 1
+                        and Path(cmd[0]).name == "harbor" and cmd[1] == "run"):
+                    captured_envs.append(dict(kwargs.get("env") or {}))
+                res = MagicMock()
+                res.returncode = 0
+                res.stdout = "deadbeef\n"
+                res.stderr = ""
+                return res
+
+            for scenario_idx, resolved_vinfo in enumerate((
+                {
+                    "verifier_family": "xprof",
+                    "verifier_version": "v2",
+                    "verifier_commit": "deadbeef",
+                    "verifier_digest": "sha256:1234",
+                    "registry_inputs_sha256": "abcd",
+                },
+                    None,
+            )):
+                job_name_fixed = f"test_env_prov_{scenario_idx}_20261115"
+                job_dir_path = _RUN_MOD.REPO_ROOT / "jobs" / job_name_fixed
+                try:
+                    with (
+                            patch(
+                                "sys.argv",
+                                [
+                                    "run.py",
+                                    "-c",
+                                    str(cfg_file),
+                                    "-t",
+                                    str(task_dir),
+                                    "--no-upload",
+                                    "--no-report",
+                                ],
+                            ),
+                            patch.dict(
+                                os.environ,
+                                {
+                                    "EVAL_VERIFIER_FAMILY": "stale_family",
+                                    "EVAL_VERIFIER_VERSION": "v999",
+                                    "EVAL_VERIFIER_COMMIT": "stale_commit",
+                                    "EVAL_TASK_SEARCH_ROOTS": "/stale/root",
+                                },
+                                clear=False,
+                            ),
+                            patch.object(_RUN_MOD, "check_dependencies"),
+                            patch.object(_RUN_MOD, "setup_host_auth"),
+                            patch.object(_RUN_MOD,
+                                         "generate_job_name",
+                                         return_value=job_name_fixed),
+                            patch.object(
+                                _RUN_MOD,
+                                "_resolve_and_check_run_verifier",
+                                return_value=resolved_vinfo,
+                            ),
+                            patch("subprocess.run",
+                                  side_effect=fake_subproc_run),
+                    ):
+                        with self.assertRaises(SystemExit) as ctx:
+                            _RUN_MOD.main()
+                        self.assertEqual(ctx.exception.code, 0)
+                finally:
+                    shutil.rmtree(job_dir_path, ignore_errors=True)
+
+            self.assertEqual(len(captured_envs), 2)
+            env_set, env_cleared = captured_envs
+            self.assertEqual(env_set.get("EVAL_VERIFIER_FAMILY"), "xprof")
+            self.assertEqual(env_set.get("EVAL_VERIFIER_VERSION"), "v2")
+            self.assertEqual(env_set.get("EVAL_VERIFIER_COMMIT"), "deadbeef")
+            self.assertIn(str(task_dir.parent),
+                          env_set.get("EVAL_TASK_SEARCH_ROOTS", ""))
+
+            for cleared_key in (
+                    "EVAL_VERIFIER_FAMILY",
+                    "EVAL_VERIFIER_VERSION",
+                    "EVAL_VERIFIER_COMMIT",
+                    "EVAL_TASK_SEARCH_ROOTS",
+            ):
+                self.assertNotIn(cleared_key, env_cleared)
+
+    def test_sitecustomize_trial_provenance_runs_before_scrub_and_trial_end_event(
+        self, ) -> None:
+        import asyncio
+        from types import SimpleNamespace
+
+        from eval.adapter import sitecustomize
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job_dir = root / "my-job"
+            trial_dir = job_dir / "xprof-attention__t1"
+            tests_dir = root / "tasks" / "xprof-attention" / "tests"
+            (trial_dir / "jobs").mkdir(parents=True)
+            tests_dir.mkdir(parents=True)
+            (tests_dir / "test.sh").write_text("#!/bin/sh\necho ok\n",
+                                               encoding="utf-8")
+            (trial_dir / "jobs" / "huge.bin").write_bytes(b"0")
+            (trial_dir / "result.json").write_text(
+                json.dumps({
+                    "id": "t1",
+                    "task_name": "xprof-attention",
+                    "trial_name": "xprof-attention__t1",
+                }),
+                encoding="utf-8",
+            )
+
+            class TrialEvent:
+                START = "start"
+                END = "end"
+
+            observed: list[tuple[str, bool, str | None, bool, str | None,
+                                 bool]] = []
+
+            class DummyTrial:
+                paths = SimpleNamespace(trial_dir=trial_dir)
+                config = SimpleNamespace(
+                    trials_dir=job_dir,
+                    trial_name="xprof-attention__t1",
+                )
+                task = SimpleNamespace(paths=SimpleNamespace(
+                    tests_dir=tests_dir))
+
+                def _scrub_jobs_dir(self) -> None:
+                    res_doc = json.loads(
+                        (trial_dir /
+                         "result.json").read_text(encoding="utf-8"))
+                    meta_exists = (trial_dir / "verifier" /
+                                   "verifier_metadata.json").is_file()
+                    observed.append((
+                        "scrub",
+                        not (trial_dir / "jobs").exists(),
+                        res_doc.get("verifier_version"),
+                        meta_exists,
+                        res_doc.get("verifier_family"),
+                        False,
+                    ))
+                    shutil.rmtree(trial_dir / "jobs", ignore_errors=True)
+
+                async def _emit(self, event, *args, **kwargs) -> None:
+                    res_doc = json.loads(
+                        (trial_dir /
+                         "result.json").read_text(encoding="utf-8"))
+                    meta_exists = (trial_dir / "verifier" /
+                                   "verifier_metadata.json").is_file()
+                    observed.append((
+                        f"emit:{event}",
+                        not (trial_dir / "jobs").exists(),
+                        res_doc.get("verifier_version"),
+                        meta_exists,
+                        res_doc.get("verifier_family"),
+                        (trial_dir / "jobs").exists(),
+                    ))
+
+            sitecustomize._patch_trial_pre_emit_scrub(DummyTrial, TrialEvent)
+            sitecustomize._patch_trial_verifier_provenance(
+                DummyTrial, TrialEvent)
+
+            with patch.dict(
+                    os.environ,
+                {
+                    "EVAL_VERIFIER_FAMILY": "xprof",
+                    "EVAL_VERIFIER_VERSION": "v2",
+                    "EVAL_VERIFIER_COMMIT": "abc1234",
+                },
+                    clear=False,
+            ):
+                t = DummyTrial()
+                asyncio.run(t._emit(TrialEvent.START))
+                asyncio.run(t._emit(TrialEvent.END))
+
+            # Start event must NOT stamp or scrub
+            self.assertEqual(observed[0][0], "emit:start")
+            self.assertIsNone(observed[0][2])
+            self.assertFalse(observed[0][3])
+
+            # Scrub must run AFTER provenance stamp, BEFORE emit:end
+            self.assertEqual(observed[1][0], "scrub")
+            self.assertEqual(observed[1][2], "v2")
+            self.assertTrue(observed[1][3])
+            self.assertEqual(observed[1][4], "xprof")
+
+            # emit:end must see both provenance stamped and jobs scrubbed
+            self.assertEqual(observed[2][0], "emit:end")
+            self.assertTrue(observed[2][1])
+            self.assertEqual(observed[2][2], "v2")
+            self.assertTrue(observed[2][3])
+
+            # Provenance helper failure must remain fail-soft so END still fires
+            (trial_dir / "jobs").mkdir(exist_ok=True)
+            with (
+                    patch.dict(os.environ, {"EVAL_VERIFIER_FAMILY": "xprof"}),
+                    patch.object(
+                        sitecustomize,
+                        "_import_job_naming",
+                        side_effect=RuntimeError("boom"),
+                    ),
+            ):
+                asyncio.run(DummyTrial()._emit(TrialEvent.END))
+            self.assertEqual(observed[-1][0], "emit:end")
+
+    def test_sitecustomize_hub_upload_plugin_stamps_job_before_upload_job(
+        self, ) -> None:
+        import asyncio
+        from types import SimpleNamespace
+
+        from eval.adapter import sitecustomize
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            job_dir = tmp_path / "hub-job"
+            trial_dir = job_dir / "tpu-hello-world-xprof__1"
+            trial_dir.mkdir(parents=True)
+            tasks_root = tmp_path / "tasks"
+            task_tests = tasks_root / "tpu-hello-world-xprof" / "tests"
+            task_tests.mkdir(parents=True)
+            (task_tests / "test.sh").write_text("#!/bin/sh\necho ok\n",
+                                                encoding="utf-8")
+            (job_dir / "config.json").write_text(
+                json.dumps({"job_name": "hub-job"}),
+                encoding="utf-8",
+            )
+            (job_dir / "result.json").write_text(
+                json.dumps({"id": "hub-uuid-1"}),
+                encoding="utf-8",
+            )
+            (trial_dir / "result.json").write_text(
+                json.dumps({
+                    "id": "t-uuid-1",
+                    "trial_name": trial_dir.name,
+                    "task_name": "tpu-hello-world-xprof",
+                    "verifier_result": {
+                        "rewards": {
+                            "reward": 1.0
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            uploaded_snapshots: list[dict[str, Any]] = []
+
+            class DummyHubUploadPlugin:
+
+                def __init__(self, jdir: Path) -> None:
+                    self._job_dir = jdir
+
+                async def on_job_end(self, job_result, *args,
+                                     **kwargs) -> None:
+                    res_doc = json.loads(
+                        (self._job_dir /
+                         "result.json").read_text(encoding="utf-8"))
+                    meta_path = self._job_dir / "verifier_metadata.json"
+                    meta_doc = (json.loads(
+                        meta_path.read_text(
+                            encoding="utf-8")) if meta_path.is_file() else {})
+                    uploaded_snapshots.append({
+                        "job_result":
+                        res_doc,
+                        "job_meta":
+                        meta_doc,
+                        "trial_meta_exists":
+                        (trial_dir / "verifier" /
+                         "verifier_metadata.json").is_file(),
+                    })
+
+            sitecustomize._patch_hub_upload_plugin_provenance(
+                DummyHubUploadPlugin)
+
+            with patch.dict(
+                    os.environ,
+                {
+                    "EVAL_VERIFIER_FAMILY": "xprof",
+                    "EVAL_VERIFIER_VERSION": "v2",
+                    "EVAL_VERIFIER_COMMIT": "feedbeef",
+                    "EVAL_TASK_SEARCH_ROOTS": str(tasks_root),
+                },
+                    clear=False,
+            ):
+                asyncio.run(
+                    DummyHubUploadPlugin(job_dir).on_job_end(
+                        SimpleNamespace(stats={})))
+
+            self.assertEqual(len(uploaded_snapshots), 1)
+            snap = uploaded_snapshots[0]
+            self.assertEqual(snap["job_result"].get("verifier_family"),
+                             "xprof")
+            self.assertEqual(snap["job_result"].get("verifier_version"), "v2")
+            self.assertEqual(snap["job_result"].get("verifier_commit"),
+                             "feedbeef")
+            self.assertTrue(
+                str(snap["job_result"].get("verifier_digest",
+                                           "")).startswith("sha256:"))
+            self.assertTrue(snap["trial_meta_exists"])
+            self.assertEqual(snap["job_meta"].get("verifier_family"), "xprof")
+            self.assertEqual(snap["job_meta"].get("verifier_version"), "v2")
+            self.assertEqual(snap["job_meta"].get("verifier_commit"),
+                             "feedbeef")
+            self.assertTrue(
+                str(snap["job_meta"].get("verifier_digest",
+                                         "")).startswith("sha256:"))
+            scoring_inputs = snap["job_meta"].get("scoring_inputs") or {}
+            self.assertTrue(
+                str(scoring_inputs.get("tests_sha256",
+                                       "")).startswith("sha256:"))
+            self.assertIn("tests/test.sh",
+                          scoring_inputs.get("file_hashes") or {})
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -3523,3 +3955,95 @@ class TestNoSharedKnowledgeBaseCache(unittest.TestCase):
                 self.assertTrue(homes, "no agent in this config")
                 for home in homes:
                     self.assertEqual(home, "/root/.tpu-agent-suite")
+
+
+class TestRunVerifierFailSoftSafeguards(unittest.TestCase):
+
+    def test_implicit_verifier_resolution_fails_soft_when_registry_errors(
+            self) -> None:
+        args = _RUN_MOD.build_parser().parse_args(["-c", "dummy.yaml"])
+        with patch.object(
+                _RUN_MOD,
+                "resolve_verifier_info",
+                side_effect=FileNotFoundError("versions.yaml missing"),
+        ):
+            res = _RUN_MOD._resolve_and_check_run_verifier(
+                config={},
+                args=args,
+                harbor_args=[],
+                tasks=["some-task"],
+            )
+        self.assertIsNone(res)
+
+    def test_explicit_verifier_version_fails_fast_when_registry_errors(
+            self) -> None:
+        args = _RUN_MOD.build_parser().parse_args([
+            "-c",
+            "dummy.yaml",
+            "--verifier-version",
+            "v999",
+        ])
+        with patch.object(
+                _RUN_MOD,
+                "resolve_verifier_info",
+                side_effect=ValueError("invalid explicit version"),
+        ):
+            with self.assertRaises(ValueError):
+                _RUN_MOD._resolve_and_check_run_verifier(
+                    config={},
+                    args=args,
+                    harbor_args=[],
+                    tasks=["some-task"],
+                )
+
+    def test_explicit_unknown_family_fails_fast_and_version_warns(
+            self) -> None:
+        args_bad_fam = _RUN_MOD.build_parser().parse_args([
+            "-c",
+            "dummy.yaml",
+            "--verifier-family",
+            "nonexistent_family_xyz",
+        ])
+        with self.assertRaises(ValueError):
+            _RUN_MOD._resolve_and_check_run_verifier(
+                config={},
+                args=args_bad_fam,
+                harbor_args=[],
+                tasks=["eval/datasets/onboarding-routing/plain-tp-plan"],
+            )
+
+        args_ver_override = _RUN_MOD.build_parser().parse_args([
+            "-c",
+            "dummy.yaml",
+            "--verifier-version",
+            "v999",
+        ])
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            info = _RUN_MOD._resolve_and_check_run_verifier(
+                config={},
+                args=args_ver_override,
+                harbor_args=[],
+                tasks=["eval/datasets/onboarding-routing/plain-tp-plan"],
+            )
+        self.assertIsNotNone(info)
+        self.assertEqual(info["verifier_version"], "v999")
+        self.assertIn("differs from versions.yaml", err.getvalue())
+
+    def test_resolves_family_from_config_datasets_without_cli_tasks(
+            self) -> None:
+        args = _RUN_MOD.build_parser().parse_args(["-c", "dummy.yaml"])
+        info = _RUN_MOD._resolve_and_check_run_verifier(
+            config={
+                "datasets": [{
+                    "path": "eval/suites/cset/tpu_knowledge_qa"
+                }]
+            },
+            args=args,
+            harbor_args=[],
+            tasks=[],
+        )
+        self.assertIsNotNone(info)
+        self.assertEqual(info["verifier_family"], "cset")

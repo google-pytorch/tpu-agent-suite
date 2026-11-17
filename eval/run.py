@@ -39,6 +39,9 @@ import yaml
 from harbor.constants import HARBOR_VIEWER_JOBS_URL
 
 from eval.agents.installer_staging import collect_task_environment_answers
+from eval.job_naming import (check_version_drift, load_verifier_versions,
+                             resolve_verifier_family, resolve_verifier_info,
+                             stamp_job_verifier_provenance)
 from eval.mount_advisor import MountUpdates, SkillMountAdvisor
 from eval.staging import stage_composite_package
 from eval.utils import (RELEASE_MANIFEST, find_repo_root, harness_for_config,
@@ -2075,7 +2078,193 @@ def build_parser() -> argparse.ArgumentParser:
         help=
         "Heartbeat progress interval in seconds during evaluation (default: 30.0; 0 to disable).",
     )
+    parser.add_argument(
+        "--verifier-version",
+        type=str,
+        default=None,
+        help=
+        "Verifier version tag matching eval/verifiers/versions.yaml (defaults to active current version).",
+    )
+    parser.add_argument(
+        "--verifier-family",
+        type=str,
+        default=None,
+        help=
+        "Explicit verifier family override matching eval/verifiers/versions.yaml.",
+    )
     return parser
+
+
+def _is_verification_enabled(
+    config: dict[str, Any],
+    harbor_args: Sequence[str],
+) -> bool:
+    """Return False when grading/verification is explicitly disabled."""
+    verifier_cfg = config.get("verifier")
+    if isinstance(verifier_cfg, dict) and bool(verifier_cfg.get("disable")):
+        return False
+    for tok in harbor_args:
+        t = str(tok).strip()
+        if t in ("--disable-verification", "--no-verifier"):
+            return False
+        if t.startswith("--disable-verification="):
+            val = t.split("=", 1)[1].strip().lower()
+            if val in ("1", "true", "yes"):
+                return False
+    return True
+
+
+def _resolve_suite_spec_path(suite_spec: str) -> Path | None:
+    """Best-effort resolution of a CLI ``--suite`` argument to a file or directory."""
+    try:
+        return resolve_suite(suite_spec)
+    except Exception:
+        pass
+    for base in (Path(suite_spec), REPO_ROOT / suite_spec,
+                 SUITES_DIR / suite_spec):
+        for cand in (base, Path(f"{base}.yaml"), Path(f"{base}.yml")):
+            if cand.is_file() or cand.is_dir():
+                return cand.resolve()
+    return None
+
+
+def _read_suite_verifier_family(suite_spec: str) -> str | None:
+    """Read consistent ``verifier_family`` override from a suite file or directory."""
+    suite_path = _resolve_suite_spec_path(suite_spec)
+    if suite_path is None:
+        return None
+    yaml_files: list[Path] = (
+        [suite_path] if
+        (suite_path.is_file() and suite_path.suffix in (".yaml", ".yml")) else
+        sorted(p for p in suite_path.rglob("*")
+               if p.is_file() and p.suffix in (".yaml", ".yml")))
+    if not yaml_files:
+        return None
+    suite_fams: list[str | None] = []
+    for yp in yaml_files:
+        try:
+            raw_suite = yaml.safe_load(yp.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(raw_suite, dict):
+            continue
+        ev = raw_suite.get("evaluation") if isinstance(
+            raw_suite.get("evaluation"), dict) else {}
+        if not ev and "verifier_family" not in raw_suite:
+            continue
+        fam_val = ev.get("verifier_family") or raw_suite.get("verifier_family")
+        suite_fams.append(str(fam_val).strip() if fam_val else None)
+    non_empty = {f for f in suite_fams if f}
+    if len(non_empty) == 1 and len(suite_fams) == sum(
+            1 for f in suite_fams if f):
+        return next(iter(non_empty))
+    return None
+
+
+def _collect_task_search_roots(
+    config: dict[str, Any],
+    target_suite_dir: Path | None = None,
+) -> list[Path]:
+    """Collect task root directories for resolving per-trial ``tests/`` dirs."""
+    roots: list[Path] = []
+    if target_suite_dir:
+        roots.append(Path(target_suite_dir))
+    for ds_entry in config.get("datasets") or []:
+        if isinstance(ds_entry, dict) and ds_entry.get("path"):
+            ds_p = Path(str(ds_entry["path"]))
+            roots.append(ds_p if ds_p.is_absolute() else (REPO_ROOT / ds_p))
+    for t_entry in config.get("tasks") or []:
+        if isinstance(t_entry, dict) and t_entry.get("path"):
+            t_p = Path(str(t_entry["path"]))
+            abs_tp = t_p if t_p.is_absolute() else (REPO_ROOT / t_p)
+            roots.append(abs_tp.parent)
+    return list(dict.fromkeys(roots))
+
+
+def _resolve_and_check_run_verifier(
+    *,
+    config: dict[str, Any],
+    args: argparse.Namespace,
+    harbor_args: Sequence[str],
+    tasks: Sequence[str],
+) -> dict[str, Any] | None:
+    """Resolve shared verifier version/family and check versions.yaml drift."""
+    if not _is_verification_enabled(config, harbor_args):
+        print(
+            "==> [Verifier] Verification disabled; skipping version/digest stamping."
+        )
+        return None
+
+    requested_ver = getattr(args, "verifier_version", None)
+    requested_family = getattr(args, "verifier_family", None)
+    explicit_request = bool(requested_ver or requested_family)
+    target_hint = getattr(args, "suite", None) or getattr(
+        args, "dataset", None)
+    config_targets: list[str] = [str(t) for t in (tasks or ())]
+    for cfg_key in ("datasets", "tasks"):
+        for entry in config.get(cfg_key) or ():
+            if isinstance(entry, dict) and entry.get("path"):
+                config_targets.append(str(entry["path"]))
+
+    suite_explicit_family: str | None = None
+    if not requested_family and getattr(args, "suite", None):
+        suite_explicit_family = _read_suite_verifier_family(str(args.suite))
+
+    try:
+        v_family = resolve_verifier_family(
+            target=str(target_hint) if target_hint else None,
+            task_names=config_targets,
+            explicit_family=requested_family or suite_explicit_family,
+        )
+        v_info = resolve_verifier_info(
+            family=v_family,
+            version=requested_ver,
+            strict_family=bool(requested_family),
+        )
+    except Exception as exc:
+        if explicit_request:
+            raise
+        print(
+            f"Warning: Verifier version resolution unavailable ({exc}); "
+            "continuing evaluation without verifier version stamping.",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        registry = load_verifier_versions()
+        families = registry.get("families") if isinstance(
+            registry.get("families"), dict) else {}
+        fam_entry = families.get(v_info["verifier_family"]) or {}
+        if requested_ver and isinstance(fam_entry,
+                                        dict) and fam_entry.get("current"):
+            active_cur = str(fam_entry["current"])
+            if v_info["verifier_version"] != active_cur:
+                print(
+                    f"Warning: Specified --verifier-version '{v_info['verifier_version']}' "
+                    f"differs from versions.yaml current='{active_cur}' for family "
+                    f"'{v_info['verifier_family']}'.",
+                    file=sys.stderr,
+                )
+        for item in check_version_drift(family=v_info["verifier_family"]):
+            if item.get("drifted"):
+                print(
+                    f"Warning: Verifier scoring inputs drifted for family "
+                    f"'{v_info['verifier_family']}' ({item.get('current_version')}): "
+                    "live files differ from eval/verifiers/versions.yaml. "
+                    "Run `python -m eval.job_naming --refresh-versions` or bump version.",
+                    file=sys.stderr,
+                )
+                break
+    except Exception:
+        pass
+
+    sha_short = str(v_info.get("family_inputs_sha256") or "")[:19]
+    print(f"==> [Verifier] family={v_info['verifier_family']} "
+          f"version={v_info['verifier_version']} "
+          f"commit={v_info['verifier_commit']}" +
+          (f" inputs={sha_short}" if sha_short else ""))
+    return v_info
 
 
 def resolve_target_slug(config: dict[str, Any],
@@ -2525,6 +2714,12 @@ def main() -> None:
             eval_passed = False
             upload_succeeded = False
             trial_summaries: list[dict[str, Any]] = []
+            v_info = _resolve_and_check_run_verifier(
+                config=config,
+                args=args,
+                harbor_args=harbor_args,
+                tasks=tasks,
+            )
 
             with tempfile.TemporaryDirectory() as scratch_dir:
                 updates = stage_package_if_needed(config, config_path, subset)
@@ -2651,6 +2846,29 @@ def main() -> None:
                 if has_agy_adc:
                     harbor_env["AGY_ADC_AUTH"] = "true"
 
+                task_search_roots = _collect_task_search_roots(
+                    config, target_suite_dir)
+                if v_info is not None:
+                    harbor_env["EVAL_VERIFIER_FAMILY"] = str(
+                        v_info["verifier_family"])
+                    harbor_env["EVAL_VERIFIER_VERSION"] = str(
+                        v_info["verifier_version"])
+                    harbor_env["EVAL_VERIFIER_COMMIT"] = str(
+                        v_info["verifier_commit"])
+                    if task_search_roots:
+                        harbor_env["EVAL_TASK_SEARCH_ROOTS"] = os.pathsep.join(
+                            str(p) for p in task_search_roots)
+                    else:
+                        harbor_env.pop("EVAL_TASK_SEARCH_ROOTS", None)
+                else:
+                    for _env_key in (
+                            "EVAL_VERIFIER_FAMILY",
+                            "EVAL_VERIFIER_VERSION",
+                            "EVAL_VERIFIER_COMMIT",
+                            "EVAL_TASK_SEARCH_ROOTS",
+                    ):
+                        harbor_env.pop(_env_key, None)
+
                 interrupted = False
                 if args.stream_logs:
                     monitor = HarborJobMonitor(
@@ -2689,6 +2907,26 @@ def main() -> None:
 
                 if job_dir.is_dir():
                     print(f"==> Results in {job_dir}")
+                    if v_info is not None:
+                        explicit_verifier_flags = bool(
+                            getattr(args, "verifier_version", None)
+                            or getattr(args, "verifier_family", None))
+                        try:
+                            stamp_job_verifier_provenance(
+                                job_dir=job_dir,
+                                verifier_family=v_info["verifier_family"],
+                                verifier_version=v_info["verifier_version"],
+                                verifier_commit=v_info["verifier_commit"],
+                                task_search_roots=task_search_roots or None,
+                            )
+                        except Exception as exc:
+                            if explicit_verifier_flags:
+                                raise
+                            print(
+                                f"Warning: Failed to stamp verifier provenance ({exc}); "
+                                "preserving Harbor job results without provenance metadata.",
+                                file=sys.stderr,
+                            )
                     if args.upload:
                         has_uploadable_results = (
                             job_dir / "result.json").is_file() or any(

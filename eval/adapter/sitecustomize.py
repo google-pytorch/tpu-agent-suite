@@ -35,9 +35,12 @@ except ImportError:
     GKEEnvironment = None
 
 try:
+    from harbor.cli.plugins.harbor_hub import \
+        HarborHubUploadPlugin as _HarborHubUploadPlugin
     from harbor.trial.hooks import TrialEvent
     from harbor.trial.trial import Trial as _HarborTrial
 except ImportError:
+    _HarborHubUploadPlugin = None
     _HarborTrial = None
     TrialEvent = None
 
@@ -921,6 +924,127 @@ def _patch_trial_pre_emit_scrub(trial_cls: object,
 
 
 _patch_trial_pre_emit_scrub(_HarborTrial, TrialEvent)
+
+
+# ------------------------------------------------------------------------------
+# Trial & Job Verifier Provenance Adapter (Streaming Hub Upload)
+# ------------------------------------------------------------------------------
+# When Harbor streams per-trial archives on `TrialEvent.END` and packs the
+# final job tarball in `HarborHubUploadPlugin.on_job_end`, `eval/run.py` has
+# not regained control yet. Stamping provenance in-process right before
+# `_scrub_jobs_dir()` / `TrialEvent.END` and before `on_job_end()` ensures
+# streamed Hub archives include full `verifier_*` metadata and `scoring_inputs`.
+def _verifier_provenance_env(
+) -> tuple[str, str, str | None, list[Path] | None] | None:
+    family = os.environ.get("EVAL_VERIFIER_FAMILY", "").strip()
+    version = os.environ.get("EVAL_VERIFIER_VERSION", "").strip()
+    if not family or not version:
+        return None
+    commit = os.environ.get("EVAL_VERIFIER_COMMIT", "").strip() or None
+    raw_roots = os.environ.get("EVAL_TASK_SEARCH_ROOTS", "").strip()
+    roots = [Path(p) for p in raw_roots.split(os.pathsep) if p.strip()]
+    return family, version, commit, (roots or None)
+
+
+def _import_job_naming():
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.append(repo_root)
+    from eval import job_naming
+    return job_naming
+
+
+def _patch_trial_verifier_provenance(
+    trial_cls: object,
+    trial_event_cls: object,
+) -> None:
+    if (trial_cls is None or trial_event_cls is None
+            or getattr(trial_cls, "_eval_verifier_provenance_patched", False)
+            or not callable(getattr(trial_cls, "_emit", None))):
+        return
+    import logging as _logging
+
+    orig_trial_emit = trial_cls._emit
+
+    @functools.wraps(orig_trial_emit)
+    async def _provenance_trial_emit(self, event: object) -> None:
+        if event == trial_event_cls.END:
+            prov = _verifier_provenance_env()
+            if prov is not None:
+                family, version, commit, search_roots = prov
+                trial_cfg = getattr(self, "config", None)
+                trial_paths = getattr(self, "paths", None)
+                trial_dir = getattr(trial_paths, "trial_dir", None)
+                job_dir_hint = getattr(trial_cfg, "trials_dir", None)
+                if trial_dir is None and trial_cfg is not None:
+                    t_name = getattr(trial_cfg, "trial_name", None)
+                    if job_dir_hint is not None and t_name:
+                        trial_dir = Path(job_dir_hint) / str(t_name)
+                if trial_dir is not None:
+                    task_obj = getattr(self, "task", None)
+                    task_paths = getattr(task_obj, "paths", None)
+                    tests_dir = getattr(task_paths, "tests_dir", None)
+                    logger = getattr(self, "logger",
+                                     None) or _logging.getLogger(__name__)
+                    try:
+                        jn = _import_job_naming()
+                        jn.stamp_trial_verifier_provenance(
+                            Path(trial_dir),
+                            verifier_family=family,
+                            verifier_version=version,
+                            verifier_commit=commit,
+                            job_dir=(Path(job_dir_hint)
+                                     if job_dir_hint is not None else None),
+                            tests_dir=(Path(tests_dir) if tests_dir is not None
+                                       and Path(tests_dir).is_dir() else None),
+                            task_search_roots=search_roots,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[Trial-Provenance-Adapter] Failed to stamp trial"
+                            f" verifier provenance: {exc}")
+        await orig_trial_emit(self, event)
+
+    trial_cls._emit = _provenance_trial_emit
+    trial_cls._eval_verifier_provenance_patched = True
+
+
+def _patch_hub_upload_plugin_provenance(plugin_cls: object) -> None:
+    if (plugin_cls is None
+            or getattr(plugin_cls, "_eval_verifier_provenance_patched", False)
+            or not callable(getattr(plugin_cls, "on_job_end", None))):
+        return
+    import logging as _logging
+
+    orig_on_job_end = plugin_cls.on_job_end
+
+    @functools.wraps(orig_on_job_end)
+    async def _provenance_on_job_end(self, job_result: object) -> None:
+        prov = _verifier_provenance_env()
+        job_dir = getattr(self, "_job_dir", None)
+        if prov is not None and job_dir is not None:
+            family, version, commit, search_roots = prov
+            try:
+                jn = _import_job_naming()
+                jn.stamp_job_verifier_provenance(
+                    Path(job_dir),
+                    verifier_family=family,
+                    verifier_version=version,
+                    verifier_commit=commit,
+                    task_search_roots=search_roots,
+                )
+            except Exception as exc:
+                _logging.getLogger(__name__).warning(
+                    "[Job-Provenance-Adapter] Failed to stamp job verifier"
+                    f" provenance before Hub upload: {exc}")
+        await orig_on_job_end(self, job_result)
+
+    plugin_cls.on_job_end = _provenance_on_job_end
+    plugin_cls._eval_verifier_provenance_patched = True
+
+
+_patch_trial_verifier_provenance(_HarborTrial, TrialEvent)
+_patch_hub_upload_plugin_provenance(_HarborHubUploadPlugin)
 
 
 # ------------------------------------------------------------------------------

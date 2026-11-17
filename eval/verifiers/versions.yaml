@@ -1,0 +1,117 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Single source of truth for verifier version provenance and scoring-input
+# hashes. Checked in so evaluation runs deterministically track verifier
+# scripts, reward weights, and params.
+
+version: 1
+families:
+  default:
+    current: v1
+    description: Default Harbor task verifier baseline
+    source_paths:
+    - eval/datasets/ici-mesh-sharding/*/tests
+    - eval/datasets/nightly-close-gaps/*/tests
+    - eval/datasets/nightly-functional/*/tests
+    - eval/datasets/smart-hf-search/*/tests
+    - eval/datasets/smoke-check/*/tests
+    - eval/datasets/tpu-hello-world/*/tests
+    - eval/datasets/tpu-hello-world-cited/*/tests
+    - eval/datasets/tpu-hello-world-profiled/*/tests
+    - eval/datasets/tpu-query-understanding/*/tests
+    - eval/datasets/user-scope-install/*/tests
+    - '!eval/datasets/nightly-functional/jaxbench-*/tests'
+    - '!eval/datasets/smoke-check/knowledge-qa-csat006/tests'
+    - eval/verifiers/common
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:ceeb408646ba6fe506d9a2a54567f3e9c70457b2ca96fac5956094cee4d6192b
+  onboard:
+    current: v1
+    description: RewardKit verifiers for onboarding-only TPU serving tasks
+    source_paths:
+    - eval/datasets/hf-onboarding-torchtpu/*/tests
+    - eval/datasets/onboarding/*/tests
+    - eval/datasets/onboarding-frontier/*/tests
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:0a4e22aa78073ea33e04bb26defe18d4cc3ff190b743b8a52690a2ecadac14ca
+  onboard_hillclimb:
+    current: v1
+    description: RewardKit verifiers and speedup calculator for hillclimb serving
+      benchmarks
+    source_paths:
+    - eval/datasets/close-gaps-gates/*/tests
+    - eval/datasets/nightly-onboard-optimize/*/tests
+    - eval/datasets/tpu-inference-vllm/*/tests
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:eaef1e14c5aaeaf2b4a3fd9aa70f45de934868e6b4094cc1c307603384cd34aa
+  onboarding_routing:
+    current: v1
+    description: Verifiers for onboarding topology and TP/DP routing checks
+    source_paths:
+    - eval/datasets/onboarding-routing/*/tests
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:e61b2d77d5ac745f95bced88c0cfced1a24532643a944c13011edf6945b05ba3
+  cset:
+    current: v1
+    description: CSET benchmark suite LLM expectations
+    source_paths:
+    - eval/suites/cset
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:540597d66d0d6291f6a85c5f1a8c1e247fddb1b1444d1e99e0c0cc3108041020
+  jaxbench:
+    current: v1
+    description: JAXBench kernel optimization and subagent checks
+    source_paths:
+    - eval/datasets/kernel-set1/*/tests
+    - eval/datasets/nightly-functional/jaxbench-*/tests
+    - eval/suites/jaxbench
+    - eval/verifiers/common
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:4917f33ff69d13505dac2106623076a06ae527a08dc0756c1ea455799434f746
+  knowledgebase:
+    current: v1
+    description: TPU Knowledge QA rubric suite
+    source_paths:
+    - eval/datasets/smoke-check/knowledge-qa-csat006/tests
+    - eval/datasets/tpu-knowledge-base/*/tests
+    - eval/suites/knowledgebase
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:756f0ef41d8cede1fb2dda7085d908ba033a77827df24ae9940213687c9c87e1
+  xprof:
+    current: v1
+    description: XProf CLI trace analysis schema and rubric checks
+    source_paths:
+    - eval/datasets/tpu-hello-world-xprof/*/tests
+    - eval/datasets/xprof-attention/*/tests
+    - eval/suites/xprof
+    - eval/verifiers/xprof
+    history:
+      v1: initial
+    inputs_sha256:
+      v1: sha256:6e13e8967e6fdcdce7e3ac9850024a57d246cb9b66a54dd6234ef7a28d17b155

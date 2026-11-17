@@ -256,3 +256,15 @@ You can launch an interactive Claude Code session inside an isolated container w
    install_claude   # or install_agy, install_codex
    run_claude       # or run_agy, run_codex
    ```
+
+## Verifier Versioning
+
+Evaluation runs resolve verifier families and record version provenance from
+[`verifiers/versions.yaml`](verifiers/versions.yaml) into Harbor job/trial
+metadata.
+
+```bash
+# Check or bump verifier versions after editing verifier scripts or rubrics
+eval/.venv/bin/python -m eval.job_naming --check-verifier-versions
+eval/.venv/bin/python -m eval.job_naming --bump-version <family>
+```
