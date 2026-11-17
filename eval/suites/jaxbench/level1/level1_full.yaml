@@ -45,6 +45,9 @@ evaluation:
       verifier_params:
         agents:
           - "tpu-kernel-development"
+    - name: "schema_compliance"
+      script: "eval/verifiers/common/schema_compliance.py"
+      weight: 0.0
 
   cases:
     - name: "1p-flash-attention"

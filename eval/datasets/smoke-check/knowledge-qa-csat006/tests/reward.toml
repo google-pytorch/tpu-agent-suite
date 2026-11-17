@@ -15,5 +15,5 @@
 [[reward]]
 name = "reward"
 aggregation = "weighted_mean"
-# Scored on answer.json alone. A failure_report judge reads the trajectory,
-# and a run without one would fail the reward whatever the answer said.
+# Scored on answer.json and invoked_subagent; schema_compliance is reported only.
+weights = { schema_compliance = 0.0 }

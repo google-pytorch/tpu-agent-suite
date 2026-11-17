@@ -258,6 +258,35 @@ def _schema_verifiers_disabled() -> bool:
         os.environ.get(DISABLE_SCHEMA_VERIFIERS_ENV_VAR, "").strip())
 
 
+SCHEMA_CHECKS_FILENAME = "schema_checks.jsonl"
+
+
+def _record_schema_check(direction: str,
+                         subagent: str,
+                         errors: list[str],
+                         run_id: str | None = None) -> None:
+    """Append one schema validation outcome to the run's schema ledger (best-effort)."""
+    clean_run_id = run_id.strip() if isinstance(run_id, str) else ""
+    if (not clean_run_id or "/" in clean_run_id or "\\" in clean_run_id
+            or clean_run_id in (".", "..")):
+        return
+
+    record = {
+        "direction": direction,
+        "subagent": subagent,
+        "compliant": not errors,
+        "errors": list(errors),
+    }
+    try:
+        ledger = (paths.get_runs_root() / clean_run_id / "artifacts" /
+                  SCHEMA_CHECKS_FILENAME)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
 def builtin_validate_schema(
     package: str,
     workspace: Path,
@@ -270,6 +299,7 @@ def builtin_validate_schema(
 
     event_type = event_payload.get("event", "")
     subagent_name = str(event_payload.get("subagent") or "")
+    ctx_run_id = (event_payload.get("context") or {}).get("run_id")
 
     accepts_schema, produces_schema = _resolve_agent_contract(
         package, workspace, subagent_name)
@@ -285,7 +315,6 @@ def builtin_validate_schema(
         candidates = utils.extract_all_json_objects(prompt_val)
 
         routing_keys = {"subagent"}
-        ctx_run_id = event_payload.get("context", {}).get("run_id")
 
         if candidates:
             # Check candidates in reverse order: the last JSON that satisfies
@@ -307,9 +336,16 @@ def builtin_validate_schema(
                     val_errors = cand_errors
 
             if not matched:
+                _record_schema_check("accepts",
+                                     subagent_name,
+                                     val_errors,
+                                     run_id=ctx_run_id)
                 err_msg = _delegation_denial_reason(subagent_name, val_errors,
                                                     accepts_schema, ctx_run_id)
                 return {"decision": "deny", "reason": err_msg}
+            _record_schema_check("accepts",
+                                 subagent_name, [],
+                                 run_id=ctx_run_id)
         else:
             if "prompt" in args or "run_id" in args:
                 payload_to_validate = dict(args)
@@ -326,6 +362,10 @@ def builtin_validate_schema(
 
             val_errors = utils.validate_instance(payload_to_validate,
                                                  accepts_schema)
+            _record_schema_check("accepts",
+                                 subagent_name,
+                                 val_errors,
+                                 run_id=ctx_run_id)
             if val_errors:
                 err_msg = _delegation_denial_reason(subagent_name, val_errors,
                                                     accepts_schema, ctx_run_id)
@@ -338,6 +378,9 @@ def builtin_validate_schema(
         raw_out = event_payload.get("output")
         candidates = utils.extract_all_json_objects(raw_out)
         if not candidates:
+            _record_schema_check("produces",
+                                 subagent_name, ["no JSON object in output"],
+                                 run_id=ctx_run_id)
             err_msg = (
                 f"Subagent '{subagent_name}' output must be a valid JSON object conforming to its produces schema."
             )
@@ -356,12 +399,19 @@ def builtin_validate_schema(
         for cand in reversed(candidates):
             cand_errors = result_problems(produces_schema, cand)
             if not cand_errors:
+                _record_schema_check("produces",
+                                     subagent_name, [],
+                                     run_id=ctx_run_id)
                 return {"decision": "allow"}
             if not all_errors:
                 # Save the errors of the last candidate for reporting if none
                 # pass
                 all_errors = cand_errors
 
+        _record_schema_check("produces",
+                             subagent_name,
+                             all_errors,
+                             run_id=ctx_run_id)
         err_msg = (
             f"Subagent '{subagent_name}' output violated produces contract: " +
             "; ".join(all_errors))

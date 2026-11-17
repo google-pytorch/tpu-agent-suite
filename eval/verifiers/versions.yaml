@@ -19,7 +19,7 @@
 version: 1
 families:
   default:
-    current: v1
+    current: v2
     description: Default Harbor task verifier baseline
     source_paths:
     - eval/datasets/ici-mesh-sharding/*/tests
@@ -37,8 +37,10 @@ families:
     - eval/verifiers/common
     history:
       v1: initial
+      v2: 9edbed35e4000c62b6f0d350ff8cb723c1d4acb8
     inputs_sha256:
       v1: sha256:ceeb408646ba6fe506d9a2a54567f3e9c70457b2ca96fac5956094cee4d6192b
+      v2: sha256:1d84aba75349d1a002c9d328b8e02ef926907e06ef853853375838c5e4697026
   onboard:
     current: v1
     description: RewardKit verifiers for onboarding-only TPU serving tasks
@@ -51,7 +53,7 @@ families:
     inputs_sha256:
       v1: sha256:0a4e22aa78073ea33e04bb26defe18d4cc3ff190b743b8a52690a2ecadac14ca
   onboard_hillclimb:
-    current: v1
+    current: v2
     description: RewardKit verifiers and speedup calculator for hillclimb serving
       benchmarks
     source_paths:
@@ -60,8 +62,10 @@ families:
     - eval/datasets/tpu-inference-vllm/*/tests
     history:
       v1: initial
+      v2: 9edbed35e4000c62b6f0d350ff8cb723c1d4acb8
     inputs_sha256:
       v1: sha256:eaef1e14c5aaeaf2b4a3fd9aa70f45de934868e6b4094cc1c307603384cd34aa
+      v2: sha256:d2365197e1ab8fa701575d91f60bbbffb8ac4c224e45df82354b6be8efee4b1a
   onboarding_routing:
     current: v1
     description: Verifiers for onboarding topology and TP/DP routing checks
@@ -81,7 +85,7 @@ families:
     inputs_sha256:
       v1: sha256:540597d66d0d6291f6a85c5f1a8c1e247fddb1b1444d1e99e0c0cc3108041020
   jaxbench:
-    current: v1
+    current: v2
     description: JAXBench kernel optimization and subagent checks
     source_paths:
     - eval/datasets/kernel-set1/*/tests
@@ -90,10 +94,12 @@ families:
     - eval/verifiers/common
     history:
       v1: initial
+      v2: 9edbed35e4000c62b6f0d350ff8cb723c1d4acb8
     inputs_sha256:
       v1: sha256:4917f33ff69d13505dac2106623076a06ae527a08dc0756c1ea455799434f746
+      v2: sha256:04ce1cace4b9922864220e0a41b87642a9d16794540257631b79ca1466e2bf12
   knowledgebase:
-    current: v1
+    current: v2
     description: TPU Knowledge QA rubric suite
     source_paths:
     - eval/datasets/smoke-check/knowledge-qa-csat006/tests
@@ -101,8 +107,10 @@ families:
     - eval/suites/knowledgebase
     history:
       v1: initial
+      v2: 9edbed35e4000c62b6f0d350ff8cb723c1d4acb8
     inputs_sha256:
       v1: sha256:756f0ef41d8cede1fb2dda7085d908ba033a77827df24ae9940213687c9c87e1
+      v2: sha256:d4eeb5c03bb8a5d7999482551c2ef5b382c9ac654adef5e7f2b17aead4350078
   xprof:
     current: v1
     description: XProf CLI trace analysis schema and rubric checks

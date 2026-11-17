@@ -70,6 +70,7 @@ DEFAULT_VERIFIERS = [
     "regime_sweep",
     "execution_report",
     "invoked_subagent",
+    "schema_compliance",
 ]
 AVAILABLE_VERIFIERS = [
     "onboarding_success",
@@ -78,6 +79,7 @@ AVAILABLE_VERIFIERS = [
     "regime_sweep",
     "execution_report",
     "invoked_subagent",
+    "schema_compliance",
 ]
 
 
@@ -302,6 +304,7 @@ def stage_verifier_tests(
         "regime_sweep": 0.0,
         "execution_report": 0.0,
         "invoked_subagent": 0.0,
+        "schema_compliance": 0.0,
     }
 
     reward_toml_lines = [
@@ -314,10 +317,9 @@ def stage_verifier_tests(
 
     for v in verifiers:
         src = _VERIFIERS_DIR / v
+        dst = stage_dir / v
         if not src.exists():
             continue
-
-        dst = stage_dir / v
         shutil.copytree(src, dst, symlinks=False)
 
         judge_file = dst / "judge.toml"
@@ -401,6 +403,7 @@ def compute_reward_diff(original: Dict[str, Any],
             "baseline_benchmarks_reported",
             "baseline_reproduce_commands",
             "invoked_subagent",
+            "schema_compliance",
         ] + list(orig_copy.keys()) + list(new_copy.keys())))
     for k in all_keys:
         if k.endswith("_raw") or k.endswith("_gated"):
@@ -536,8 +539,11 @@ def regrade_trial(
         effective_verifiers = list(active_verifiers)
         if not trajectory_path:
             traj_verifiers = {
-                "onboarding_success", "cheating", "execution_report",
-                "efficiency", "invoked_subagent"
+                "onboarding_success",
+                "cheating",
+                "execution_report",
+                "efficiency",
+                "invoked_subagent",
             }
             effective_verifiers = [
                 v for v in effective_verifiers if v not in traj_verifiers
@@ -555,6 +561,9 @@ def regrade_trial(
 
         test_script = staged_tests / "test.sh"
         env = os.environ.copy()
+        env["LOGS_DIR"] = str(staged_logs.resolve())
+        env["TESTS_DIR"] = str(staged_tests.resolve())
+        env["TPU_AGENT_SUITE_HOME"] = str(temp_dir / "suite")
         if trajectory_path:
             env["ATIF_TRAJECTORY"] = str(trajectory_path.resolve())
             env["TRAJECTORY_PATH"] = str(trajectory_path.resolve())
@@ -641,6 +650,10 @@ def regrade_trial(
                                                           encoding="utf-8")
             (verifier_dir / "regrade.log").write_text(test_stdout,
                                                       encoding="utf-8")
+            sc_summary = staged_logs / "verifier" / "schema_compliance.json"
+            if sc_summary.is_file():
+                shutil.copy2(sc_summary,
+                             verifier_dir / "schema_compliance.json")
 
             # Also update trial result.json and parent job result.json
             trial_res_file = trial_dir / "result.json"

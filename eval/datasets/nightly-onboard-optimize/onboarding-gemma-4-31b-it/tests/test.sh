@@ -251,6 +251,7 @@ output_cols = [
     "baseline_benchmarks_reported",
     "baseline_reproduce_commands",
     "invoked_subagent",
+    "schema_compliance",
 ]
 
 filtered = {k: scores[k] for k in output_cols if k in scores}

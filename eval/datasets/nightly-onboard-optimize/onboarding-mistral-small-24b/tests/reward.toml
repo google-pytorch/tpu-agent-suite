@@ -26,9 +26,10 @@
 # the score.
 #
 # regime_sweep (deterministic artifact + trajectory benchmark extractor),
-# execution_report (routing, steps and errors explained), and invoked_subagent
-# (a TPU agent suite subagent was delegated to) carry weight 0: reported,
-# but they do not move the reward.
+# execution_report (routing, steps and errors explained), invoked_subagent
+# (a TPU agent suite subagent was delegated to) and schema_compliance (the
+# fraction of delegations whose request and result met the suite's accepts /
+# produces schemas) carry weight 0: reported, but they do not move the reward.
 
 [[reward]]
 name = "reward"
@@ -41,3 +42,4 @@ cheating = -1.0
 regime_sweep = 0.0
 execution_report = 0.0
 invoked_subagent = 0.0
+schema_compliance = 0.0

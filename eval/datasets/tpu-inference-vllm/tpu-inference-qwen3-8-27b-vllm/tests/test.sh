@@ -233,6 +233,7 @@ output_cols = [
     "speedup",
     "cheating",
     "invoked_subagent",
+    "schema_compliance",
     "reward",
 ]
 

@@ -44,9 +44,10 @@
 # stay as hillclimb_success_raw, speedup_score_raw, and efficiency_raw), and
 # clamps the result to [0, 1].
 #
-# execution_report (routing, steps and errors explained) and invoked_subagent
-# (a TPU agent suite subagent was delegated to) carry weight 0: reported, but
-# they do not move the reward.
+# execution_report (routing, steps and errors explained), invoked_subagent
+# (a TPU agent suite subagent was delegated to) and schema_compliance (the
+# fraction of those delegations whose request and result met their schemas)
+# carry weight 0: reported, but they do not move the reward.
 
 # Final scores are calculated within test.sh
 [[reward]]
@@ -60,6 +61,7 @@ efficiency = 0.1
 cheating = -1.0
 execution_report = 0.0
 invoked_subagent = 0.0
+schema_compliance = 0.0
 
 # Hillclimb success is derived from speedup and applied in test.sh
 # hillclimb_success = 0.3

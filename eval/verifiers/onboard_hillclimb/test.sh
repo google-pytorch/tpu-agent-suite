@@ -31,6 +31,7 @@
 #   speedup: The raw speedup ratio reported by the verifier judge (e.g., from TPUspeedometer), not yet clamped or scaled.
 #   cheating: A binary flag (0 or 1) set by the verifier judge when the agent exhibits cheating behavior. Nullifies the reward when 1.
 #   invoked_subagent: Returns 1 if a TPU agent suite subagent was invoked, 0 otherwise.
+#   schema_compliance: Fraction of TPU agent suite delegations whose request and result met their schemas.
 #   reward: The final reward, clamped to [0, 1]:
 #     reward = (w_onboarding * onboarding_success
 #               + w_hillclimb * hillclimb_success
@@ -233,6 +234,7 @@ output_cols = [
     "speedup",
     "cheating",
     "invoked_subagent",
+    "schema_compliance",
     "reward",
 ]
 
