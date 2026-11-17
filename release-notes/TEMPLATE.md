@@ -5,7 +5,7 @@ Copy this file to release-notes/vX.Y.Z.md (matching "version" in
 package/package.release.json) in the version-bump PR.
 
 These notes are published verbatim to the public
-google-pytorch/tpu-agent-suite Release after passing scripts/check_denylist.py.
+google-pytorch/tpu-agent-suite Release after passing .ci/check_denylist.py.
 Write for external users: no internal links, bug or CL numbers, LDAPs, or
 private repository/PR references.
 -->

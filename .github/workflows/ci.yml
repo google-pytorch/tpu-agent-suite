@@ -56,7 +56,6 @@ jobs:
               f.startsWith('framework/') ||
               f.startsWith('package/') ||
               f.startsWith('eval/') ||
-              f.startsWith('scripts/') ||
               f === 'Makefile' ||
               f === 'cicd-requirements.txt' ||
               f === '.coveragerc' ||
@@ -235,7 +234,7 @@ jobs:
           else
             DIFF_RANGE="HEAD~1...HEAD"
           fi
-          python3 scripts/check_denylist.py --diff "$DIFF_RANGE" --output-format github
+          python3 .ci/check_denylist.py --diff "$DIFF_RANGE" --output-format github
 
   # Gating job: single status check enforcing verify, test, build, coverage, lint, and denylist.
   ci-gate:

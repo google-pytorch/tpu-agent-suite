@@ -96,7 +96,7 @@ jobs:
           INTERNAL_DENYLIST_B64: ${{ secrets.INTERNAL_DENYLIST_B64 }}
         run: |
           if [ -f google/denylist.yaml ] || [ -n "${INTERNAL_DENYLIST_B64:-}" ]; then
-            python3 scripts/check_denylist.py --paths dist/ --output-format github
+            python3 .ci/check_denylist.py --paths dist/ --output-format github
           fi
 
       - name: Smoke test the claude-code archive

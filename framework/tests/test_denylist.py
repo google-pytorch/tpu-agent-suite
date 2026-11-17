@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for scripts/check_denylist.py."""
+"""Unit tests for .ci/check_denylist.py."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from unittest import mock
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPT_PATH = REPO_ROOT / "scripts" / "check_denylist.py"
+SCRIPT_PATH = REPO_ROOT / ".ci" / "check_denylist.py"
 
 _SPEC = importlib.util.spec_from_file_location("check_denylist", SCRIPT_PATH)
 assert _SPEC is not None and _SPEC.loader is not None

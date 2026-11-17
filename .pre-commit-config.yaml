@@ -131,7 +131,7 @@ repos:
     pass_filenames: false
   - id: check-denylist
     name: Check staged or pushed diff against internal denylist
-    entry: python3 scripts/check_denylist.py --staged
+    entry: python3 .ci/check_denylist.py --staged
     language: system
     always_run: true
     pass_filenames: false

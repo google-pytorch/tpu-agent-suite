@@ -38,7 +38,7 @@ pre-commit install
 and `commit-msg` hook types, so a plain `pre-commit install` sets up everything.
 Among other things the hooks add a `Signed-off-by:` trailer to each commit, run
 `ruff`/`yapf`/`isort`, fix markdown, validate the knowledge base, and run
-`scripts/check_denylist.py` on both `git commit` and `git push`. Under
+`.ci/check_denylist.py` on both `git commit` and `git push`. Under
 `framework/`, `google/drivers/` and `google/tests/`, `ruff` also enforces the
 docstring convention (its `D` rules, Google style): public functions, methods
 and classes carry a docstring whose first line is a one-sentence summary ending
@@ -149,14 +149,14 @@ Every pull request runs the following checks:
 | Gate | Runs | Required? |
 | :--- | :--- | :--- |
 | **Package & unit tests** | `make verify`, `make verify-experimental`, `make validate-kb KB_BASE=origin/<base>`, `make test`, `make test-eval`, `make build`, `compiler.py lint`, `make coverage`, `make coverage-diff` | yes (`coverage-diff` advisory) |
-| **Formatting & denylist** | The `pre-commit` hook set plus `scripts/check_denylist.py` on PR diffs and commit messages | yes |
+| **Formatting & denylist** | The `pre-commit` hook set plus `.ci/check_denylist.py` on PR diffs and commit messages | yes |
 | **Dataset naming** | Eval dataset and task folder naming (`^[a-z0-9-]+$`) | yes, when `eval/**` changes |
 | **Code owners** | Code-owner approval on protected onboarding, framework, documentation, and infrastructure paths | yes |
 | **Smoke evaluation** | The `smoke-check` Harbor evaluation when package, framework, or evaluation files change | reported |
 
 Release builds compile standalone per-harness archives without internal
 overlays, scan the compiled `dist/` and curated `release-notes/v<version>.md`
-(copied from `release-notes/TEMPLATE.md`) with `scripts/check_denylist.py`,
+(copied from `release-notes/TEMPLATE.md`) with `.ci/check_denylist.py`,
 smoke-test installing the `claude-code` archive in a clean workspace, and emit
 `SHA256SUMS`.
 
