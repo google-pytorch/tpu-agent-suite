@@ -26,7 +26,6 @@ import json
 import math
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 from framework import jsonio, paths, utils
@@ -139,18 +138,9 @@ def render(entries: list[dict[str, Any]], run_id: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _run_dir(run_id: str) -> Path:
-    """The run's directory, which the session created; never made here."""
-    directory = paths.get_run_root(run_id)
-    if not directory.is_dir():
-        raise Refused(f"run {run_id} has no directory at {directory}; use the "
-                      "run_id your session was given")
-    return directory
-
-
 def read(run_id: str) -> list[dict[str, Any]]:
     """The run's journal entries, oldest first."""
-    return jsonio.read_jsonl(_run_dir(run_id) / JOURNAL_FILE)
+    return jsonio.read_jsonl(paths.get_started_run_root(run_id) / JOURNAL_FILE)
 
 
 def write(run_id: str, **fields: Any) -> dict[str, Any] | None:
@@ -159,7 +149,7 @@ def write(run_id: str, **fields: Any) -> dict[str, Any] | None:
     The journal file itself is the lock, held while it is read, so two agents
     writing at once can't take the same id or interleave lines.
     """
-    directory = _run_dir(run_id)
+    directory = paths.get_started_run_root(run_id)
     with open(directory / JOURNAL_FILE, "a", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)  # Released when the file closes.
         entries = jsonio.read_jsonl(directory / JOURNAL_FILE)

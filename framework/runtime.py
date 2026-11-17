@@ -60,7 +60,7 @@ if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
 
 try:
-    from framework import (agent_contracts, compute, harnesses, journal,
+    from framework import (agent_contracts, compute, harnesses, items, journal,
                            jsonio, paths, run_state, study, trajectory, utils)
     from framework.hooks import actions, dispatch, events
 except Exception as _import_error:  # noqa: BLE001 - becomes the hook's failure
@@ -251,6 +251,9 @@ def build_runtime_parser() -> argparse.ArgumentParser:
 
     # journal
     journal.register_journal_parser(sub)
+
+    # items
+    items.register_items_parser(sub)
 
     # validate
     p_validate = sub.add_parser(
@@ -507,6 +510,9 @@ def main(argv: list[str] | None = None) -> int:
 
         elif cmd == "journal":
             journal.dispatch_journal_command(args)
+
+        elif cmd == "items":
+            items.dispatch_items_command(args)
 
         elif cmd == "trajectory":
             return handle_trajectory_cli(args)

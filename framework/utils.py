@@ -16,13 +16,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
+import fcntl
 import hashlib
 import json
+import os
 import pathlib
 import re
-from typing import Any, Sequence
+import threading
+from typing import Any, Iterator, Sequence
 
 from framework import errors, jsonio
 
@@ -563,6 +567,79 @@ def utc_now_iso() -> str:
     """Return the current UTC time as a Zulu-suffixed ISO-8601 timestamp."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
         "+00:00", "Z")
+
+
+def parse_iso_utc(value: Any) -> datetime.datetime | None:
+    """Parse an ISO-8601 timestamp (a trailing Z allowed) as an aware UTC time.
+
+    Returns None for anything that is not a non-empty, parseable string; a
+    naive time is taken as UTC.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCK_STATE = threading.local()
+
+
+@contextlib.contextmanager
+def path_lock(lock_path: pathlib.Path) -> Iterator[None]:
+    """Hold `lock_path` exclusively, across threads and processes.
+
+    A re-entrant thread lock plus an advisory `flock` on the file, so a
+    read-modify-write of one JSON document is safe between agent processes,
+    hook processes and threads within them, and a caller already holding the
+    lock can take it again without deadlocking.
+    """
+    lock_key = str(lock_path)
+    with _PATH_LOCKS_GUARD:
+        rlock = _PATH_LOCKS.setdefault(lock_key, threading.RLock())
+
+    held: dict[str,
+               tuple[int,
+                     int]] = getattr(_PATH_LOCK_STATE, "held", None) or {}
+    _PATH_LOCK_STATE.held = held
+
+    with rlock:
+        if lock_key in held:
+            fd, depth = held[lock_key]
+            held[lock_key] = (fd, depth + 1)
+            try:
+                yield
+            finally:
+                held[lock_key] = (fd, depth)
+            return
+
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            held[lock_key] = (fd, 1)
+            try:
+                yield
+            finally:
+                held.pop(lock_key, None)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 # The packages the TPU target needs; the compiler ships it with the runtime.

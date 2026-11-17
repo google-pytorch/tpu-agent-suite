@@ -23,12 +23,9 @@ from __future__ import annotations
 
 import contextlib
 import datetime
-import fcntl
-import json
 import os
 import pathlib
 import sys
-import threading
 from typing import Any, Iterator, Mapping
 from zoneinfo import ZoneInfo
 
@@ -92,10 +89,6 @@ BOTTLENECK_KINDS: tuple[str, ...] = (
 MAX_STUDY_ARMS = 16
 MAX_STUDY_AMENDMENTS = 10
 
-_THREAD_LOCKS_GUARD = threading.Lock()
-_THREAD_LOCKS: dict[str, threading.RLock] = {}
-_LOCK_STATE = threading.local()
-
 
 @contextlib.contextmanager
 def study_lock(study_id: str) -> Iterator[None]:
@@ -112,41 +105,8 @@ def study_lock(study_id: str) -> Iterator[None]:
         utils.validate_study_id(study_id)
         lock_path = paths.get_studies_root() / f".{study_id}.lock"
 
-    lock_key = str(lock_path)
-    with _THREAD_LOCKS_GUARD:
-        rlock = _THREAD_LOCKS.setdefault(lock_key, threading.RLock())
-
-    held: dict[str, tuple[int, int]] = getattr(_LOCK_STATE, "held", None) or {}
-    _LOCK_STATE.held = held
-
-    with rlock:
-        if lock_key in held:
-            fd, depth = held[lock_key]
-            held[lock_key] = (fd, depth + 1)
-            try:
-                yield
-            finally:
-                held[lock_key] = (fd, depth)
-            return
-
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            held[lock_key] = (fd, 1)
-            try:
-                yield
-            finally:
-                held.pop(lock_key, None)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
-        finally:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+    with utils.path_lock(lock_path):
+        yield
 
 
 def load_study_protocol_schema() -> dict[str, Any]:
@@ -308,28 +268,13 @@ STUDY_EVENTS = "events.jsonl"
 STUDY_JOURNAL = "journal.jsonl"
 
 
-def _append_jsonl(path: Path, record: dict[str, Any]) -> dict[str, Any]:
-    """Append one JSON record as a single line under an advisory file lock."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-            handle.flush()
-        finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-    return record
-
-
 def append_study_event(study_id: str, kind: str,
                        **fields: Any) -> dict[str, Any]:
     """Append a machine-authored lifecycle event to a study's event stream."""
     utils.validate_study_id(study_id)
     record = {"at": utc_now_iso(), "kind": kind, **fields}
-    return _append_jsonl(paths.get_study_root(study_id) / STUDY_EVENTS, record)
+    return jsonio.append_jsonl(
+        paths.get_study_root(study_id) / STUDY_EVENTS, record)
 
 
 def read_study_events(study_id: str, limit: int = 0) -> list[dict[str, Any]]:
@@ -344,7 +289,7 @@ def append_study_journal(study_id: str, entry: dict[str,
     """Archive an agent-authored entry, typically a row overflowing the study state."""
     utils.validate_study_id(study_id)
     record = {"at": utc_now_iso(), **entry}
-    return _append_jsonl(
+    return jsonio.append_jsonl(
         paths.get_study_root(study_id) / STUDY_JOURNAL, record)
 
 
@@ -1140,21 +1085,6 @@ def study_timestamp_iso(timezone_name: str | None = None) -> str:
         return utc_now_iso()
 
 
-def _parse_iso_timestamp(value: str) -> datetime.datetime | None:
-    if not value or not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    if normalized.endswith("Z"):
-        normalized = normalized[:-1] + "+00:00"
-    try:
-        dt = datetime.datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return dt
-    except ValueError:
-        return None
-
-
 def _expire_stale_in_flight_arms(
     arms: list[dict[str, Any]],
     claim_ttl_seconds: float,
@@ -1167,7 +1097,7 @@ def _expire_stale_in_flight_arms(
     for arm in arms:
         if arm.get("status") != "in_flight":
             continue
-        claimed_dt = _parse_iso_timestamp(str(arm.get("claimed_at", "")))
+        claimed_dt = utils.parse_iso_utc(str(arm.get("claimed_at", "")))
         if claimed_dt is None:
             continue
         age_s = (now -

@@ -38,6 +38,7 @@ the same path in the repository and in a build, and its imports have one form,
 | `framework/study.py` | The store and commands for long-running studies. |
 | `framework/journal.py` | The session journal: one experiment timeline per run. |
 | `framework/bg_ledger.py` | The per-agent ledger of background work and the idle gate: a subagent does not finish while a child or command it launched is still running. |
+| `framework/items.py` | The run's store of delegated work: what each agent was asked, who holds it, what came back and who waits on it. |
 | `framework/trajectory/` | The trajectory export. |
 | `framework/utils.py` | Shared helpers: schema validation and safe path handling. |
 | `framework/paths.py` | Locating the central store, runs, sessions, studies, and installed packages. |
@@ -74,7 +75,12 @@ frontmatter. The compiler adds them to every build.
 | Compute setup | `compute setup plan`, `apply`, `verify`; `config show`, `set`, `use` | agents, the session-start hook, headless installs |
 | Studies | `study start`, `status`, `notes`, `list` and others | agents |
 | Session journal | `journal add`, `show`, `render` | agents |
+| Work items | `items queue`, `claim`, `progress`, `answer`, `wait`, `dispatch` and others | agents |
 | Trajectory export | `trajectory export` | the user, through a skill |
+
+`items` has no `--run-id`: it always addresses the workspace's active run,
+from `.tpu-agent-suite/current_run_id`. The run has to exist: an id no session
+started is refused rather than quietly given a store of its own.
 
 ### Hooks
 
@@ -133,6 +139,10 @@ same session, it reuses the run it already created.
 - `journal` keeps the run's experiment journal, `journal.jsonl` and its
   rendering `experiment.md`, beside `artifacts/`. Every agent with a shell is
   told to use it by its generated contract.
+- `items` keeps the run's delegated work in `items/items.json` and one
+  `StateChange` record per write in `items/events.jsonl`, beside `artifacts/`.
+  Its lock is `~/.tpu-agent-suite/runs/.<run_id>.items.lock`, outside `items/`.
+  A write must come from the worker that claimed the item.
 
 ### Contract checks
 

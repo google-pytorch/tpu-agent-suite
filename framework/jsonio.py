@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pathlib
@@ -50,6 +51,22 @@ def load_json_or_empty(path: Path) -> dict[str, Any]:
         # load_json lets through.
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def append_jsonl(path: Path, record: dict[str, Any]) -> dict[str, Any]:
+    """Append one JSON record as a single line under an advisory file lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.flush()
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+    return record
 
 
 def read_jsonl(path: Path,

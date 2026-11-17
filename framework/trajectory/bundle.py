@@ -37,7 +37,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from framework import harnesses, journal, jsonio, utils
+from framework import harnesses, items, journal, jsonio, utils
 
 from .resolvers import (Cut, SessionBundle, TranscriptRef, file_size,
                         read_transcript, resolve_session)
@@ -244,7 +244,9 @@ def write_bundle(bundle: SessionBundle, run_root: Path | None,
         # Artifacts under the byte cap are bundled; oversized ones are dropped
         # and reported.
         if run_root is not None:
-            for name in (journal.JOURNAL_FILE, journal.RENDERED_FILE):
+            for name in (journal.JOURNAL_FILE, journal.RENDERED_FILE,
+                         f"items/{items.STORE_DOCUMENT}",
+                         f"items/{items.STORE_EVENTS}"):
                 path = run_root / name
                 if path.is_file():
                     tar.add(path, arcname=name)

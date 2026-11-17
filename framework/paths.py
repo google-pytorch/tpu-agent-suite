@@ -148,9 +148,44 @@ def get_run_root(run_id: str) -> Path:
     return get_runs_root() / run_id
 
 
+def get_started_run_root(run_id: str) -> Path:
+    """The run directory a session created; refused, never made, if absent.
+
+    Writing under an id no session started would build a second, silently
+    diverging set of run files.
+    """
+    root = get_run_root(run_id)
+    if not root.is_dir():
+        raise utils.TpuAgentSuiteError(
+            f"run {run_id} has no directory at {root}; use the run id your"
+            " session was given")
+    return root
+
+
 def get_run_artifacts_dir(run_id: str) -> Path:
     """Return the artifacts directory for `run_id` (~/.tpu-agent-suite/runs/<run_id>/artifacts/)."""
     return get_run_root(run_id) / "artifacts"
+
+
+def get_items_dir(run_id: str) -> Path:
+    """The delegation item store of a run (~/.tpu-agent-suite/runs/<id>/items/).
+
+    Items are the run's unit of delegated work: one run's agents queue,
+    claim and answer each other's requests in here, so the store belongs to
+    the run rather than to a session or a workspace. A subagent started from
+    another directory reaches the same store from the same run id.
+    """
+    return get_run_root(run_id) / "items"
+
+
+def get_items_lock(run_id: str) -> Path:
+    """The advisory lock guarding a run's item store.
+
+    A hidden regular file beside the run directory, not inside `items/`, so
+    taking the lock to create the store does not create it first.
+    """
+    utils.validate_run_id(run_id)
+    return get_runs_root() / f".{run_id}.items.lock"
 
 
 def get_studies_root() -> Path:

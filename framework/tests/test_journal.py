@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from framework import journal, paths, runtime
+from framework import journal, paths, runtime, utils
 
 RUN_ID = "20261014T170000Z-0123456789ab"
 
@@ -73,7 +73,8 @@ class JournalTest(unittest.TestCase):
 
     def test_refused_writes_say_what_is_missing(self):
         other = "20261014T170000Z-ffffffffffff"
-        with self.assertRaisesRegex(journal.Refused, "has no directory"):
+        with self.assertRaisesRegex(utils.TpuAgentSuiteError,
+                                    "has no directory"):
             journal.write(other, agent="a", kind="note", text="x")
         self.assertFalse(paths.get_run_root(other).exists())
 

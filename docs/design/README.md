@@ -118,6 +118,7 @@ The central directory, shared by every workspace:
 │   ├── run.json                   which package and session the run belongs to
 │   ├── journal.jsonl              the session journal: hypotheses, experiments, results, decisions
 │   ├── experiment.md              the journal rendered for people to read
+│   ├── items/                     delegated work: items.json, and events.jsonl with one record per write
 │   └── artifacts/                 everything the session's agents produced
 ├── runs/jobs/<job_id>/            the record and log of each compute job
 ├── studies/<study_id>/            one directory per study
