@@ -171,6 +171,33 @@ def validate_resource_tokens(
                 " to the frontmatter of a reference it reads")
 
 
+def delegation_nodes(
+    skills: Sequence[dict[str, Any]],
+    agents_by_name: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Every node of the delegation graph by name.
+
+    Agents first, then each skill no agent shares a name with: the merge the
+    build validates and the published graph enforces at runtime.
+    """
+    nodes: dict[str, dict[str, Any]] = dict(agents_by_name)
+    for skill in skills:
+        nodes.setdefault(skill["name"], skill)
+    return nodes
+
+
+def root_delegates(skills: Sequence[dict[str, Any]]) -> list[str]:
+    """What a request with no parent may go to: every skill's own delegates.
+
+    Skills are the roots the build walks, from their own `delegates` even
+    when an agent twin shares the name, so this is the graph's level 1.
+    """
+    return sorted(
+        {target
+         for skill in skills
+         for target in skill.get("delegates", [])})
+
+
 def validate_delegation_graph(
     skills: Sequence[dict[str, Any]],
     agents_by_name: dict[str, dict[str, Any]],
@@ -192,9 +219,7 @@ def validate_delegation_graph(
     """
     visited: set[str] = set()
     roots = list(skills)
-    nodes: dict[str, dict[str, Any]] = dict(agents_by_name)
-    for root in roots:
-        nodes.setdefault(root["name"], root)
+    nodes = delegation_nodes(roots, agents_by_name)
 
     def visit(agent_name: str, depth: int, path: tuple[str, ...]) -> None:
         if agent_name in path:

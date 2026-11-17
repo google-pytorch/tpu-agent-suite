@@ -149,6 +149,36 @@ def _resolve_agent_contract(
     return accepts_schema, produces_schema
 
 
+def delegation_graph(
+        package: str) -> tuple[dict[str, list[str]], list[str] | None, int]:
+    """The package's published delegation graph: edges, roots, depth cap.
+
+    `roots` is what a request with no parent may go to, or None if the build
+    did not publish it. An empty graph means none was published; callers
+    then skip the checks, so an older package still runs.
+    """
+    try:
+        package_root = paths.get_installed_package_root(package)
+    except TpuAgentSuiteError as exc:
+        print(f"runtime: delegation graph lookup skipped -- {exc}",
+              file=sys.stderr)
+        return {}, None, 0
+    build_file = package_root / "tpu-agent-suite-build.json"
+    try:
+        build = jsonio.load_json(build_file) if build_file.is_file() else {}
+    except Exception:
+        build = {}
+    block = (build.get("delegation") or {}) if isinstance(build, dict) else {}
+    edges = {
+        str(name): [str(target) for target in targets or []]
+        for name, targets in (block.get("graph") or {}).items()
+    }
+    roots = block.get("roots")
+    roots = [str(target)
+             for target in roots] if isinstance(roots, list) else None
+    return edges, roots, int(block.get("max_depth") or 0)
+
+
 def _delegate_routing_keys() -> set[str]:
     """Return delegation routing/metadata argument keys declared in `tool-mappings.json`."""
     keys: set[str] = set()
@@ -190,6 +220,36 @@ def _delegation_denial_reason(
         reason += ("\n\nExpected payload schema example:\n```json\n"
                    f"{json.dumps(example, indent=2)}\n```")
     return reason
+
+
+def result_problems(schema: dict[str, Any], result: Any) -> list[str]:
+    """Everything wrong with `result` against a `produces` schema.
+
+    The schema itself, a `completed` result with no artifact, and a status
+    missing the fields it requires: the rules `SubagentStop` enforces.
+    """
+    problems = list(utils.validate_instance(result, schema))
+    if "artifacts" in schema.get("properties", {}):
+        problems += check_completed_has_artifact(result)
+    return problems + check_status_payload(schema, result)
+
+
+def contract_problems(package: str, agent_name: str, payload: Any, *,
+                      result: bool) -> list[str]:
+    """Check a request (`accepts`) or a result (`produces`) for an agent.
+
+    Empty when schema verification is disabled or the agent has no such
+    contract, the same as the `validate-schema` builtin.
+    """
+    if _schema_verifiers_disabled():
+        return []
+    accepts, produces = _resolve_agent_contract(package, Path.cwd(),
+                                                agent_name)
+    schema = produces if result else accepts
+    if not schema:
+        return []
+    return (result_problems(schema, payload)
+            if result else utils.validate_instance(payload, schema))
 
 
 def _schema_verifiers_disabled() -> bool:
@@ -294,13 +354,7 @@ def builtin_validate_schema(
         # schema wins.
         all_errors: list[str] = []
         for cand in reversed(candidates):
-            val_errors = utils.validate_instance(cand, produces_schema)
-            artifact_errors = (check_completed_has_artifact(cand)
-                               if "artifacts" in produces_schema.get(
-                                   "properties", {}) else [])
-            payload_errors = check_status_payload(produces_schema, cand)
-            cand_errors = list(val_errors) + list(artifact_errors) + list(
-                payload_errors)
+            cand_errors = result_problems(produces_schema, cand)
             if not cand_errors:
                 return {"decision": "allow"}
             if not all_errors:

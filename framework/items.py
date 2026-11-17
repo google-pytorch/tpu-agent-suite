@@ -47,7 +47,7 @@ import re
 import time
 from typing import Any, Callable, Iterator
 
-from framework import jsonio, paths, utils
+from framework import agent_contracts, jsonio, paths, study, utils
 
 Path = paths.Path
 
@@ -189,7 +189,7 @@ def _state_change(
     the result slot a `progress` write filled, which a waiter on a part keys
     off.
     """
-    return jsonio.append_jsonl(
+    record = jsonio.append_jsonl(
         events_path(run_id), {
             "at": _now(),
             "event": "StateChange",
@@ -203,6 +203,27 @@ def _state_change(
             "depth": item.get("depth", 1),
             "detail": detail,
         })
+    _record_in_studies(run_id, record)
+    return record
+
+
+def _record_in_studies(run_id: str, record: dict[str, Any]) -> None:
+    """Mirror a state change into the timeline of every study on this run.
+
+    Queueing is a CLI write, not a harness event, so without this a study
+    stalled on a worker that never answered shows a gap with no cause.
+    Best-effort, like `record-event`: a logging failure must never fail a
+    delegation.
+    """
+    # `kind` and `at` are the study stream's own columns; the change's kind
+    # travels as `change`.
+    fields = {k: v for k, v in record.items() if k not in ("kind", "at")}
+    fields["change"] = record.get("kind", "")
+    try:
+        for study_id in study.studies_for_event(run_id):
+            study.append_study_event(study_id, "items", **fields)
+    except (utils.TpuAgentSuiteError, OSError):
+        pass
 
 
 def _require(document: dict[str, Any], item_id: str) -> dict[str, Any]:
@@ -373,15 +394,20 @@ def queue(
     priority: int = 0,
     requested_by: str = "",
     max_depth: int = 0,
+    package: str = "",
 ) -> dict[str, Any]:
     """Record a request for `to` and return the item, without blocking.
 
     `parent` is the item the request was made from; it sets the chain the
-    cycle and depth checks run against. The main agent always spawns the
-    worker.
+    cycle and depth checks run against, and names the requester. The main
+    agent always spawns the worker.
+
+    `package` is the build whose graph and contracts admit the request; with
+    none, or one built before the graph was published, those checks skip.
     """
     utils.validate_run_id(run_id)
-    if not to.strip():
+    to = to.strip()
+    if not to:
         raise ItemError("a request needs an agent to go to")
     refs = []
     for ref in after or []:
@@ -393,23 +419,42 @@ def queue(
         items = document.setdefault("items", {})
 
         depth = 1
+        requester = ""
         if parent:
             parent_item = _require(document, parent)
             depth = int(parent_item.get("depth") or 1) + 1
+            # The parent item says who is asking; a self-reported
+            # `--requested-by` could claim an edge the requester lacks.
+            requester = parent_item["to"]
             if to in _chain(document, parent):
                 raise ItemError(
                     f"{to} is already on this item's chain ({parent}); a"
                     " cycle. Answer the request that is already in flight"
                     " instead of queueing another")
+        graph, roots, graph_depth = (agent_contracts.delegation_graph(package)
+                                     if package else ({}, None, 0))
         # The tightest cap wins: an argument can add a limit, never lift the
-        # one stored for the run.
+        # one stored for the run or published by the package.
         caps = [
-            value for value in (max_depth, int(document.get("max_depth") or 0))
-            if value > 0
+            value for value in (max_depth, int(document.get("max_depth") or 0),
+                                graph_depth) if value > 0
         ]
         if caps and depth > min(caps):
             raise ItemError(f"logical depth would be {depth}; the cap is"
                             f" {min(caps)}")
+        # A requester outside the graph (a root skill, or a built-in) may
+        # reach only the roots; `--requested-by` is self-reported, so unused.
+        allowed = graph.get(requester, roots) if graph else None
+        if allowed is not None and to in graph and to not in allowed:
+            if requester in graph:
+                declared = ", ".join(sorted(allowed)) or "nothing"
+                raise ItemError(f"{requester} does not declare {to} in"
+                                f" delegates: it may request {declared}")
+            who = (f"{requester}, outside the package graph,"
+                   if requester else "a request with no --parent")
+            raise ItemError(f"no skill declares {to} in delegates, so {who}"
+                            " cannot go to it")
+        _check_contract(package, to, request, result=False)
         for ref in refs:
             # Raises for an unknown item: such a row could never run.
             ref_satisfied(document, ref)
@@ -440,6 +485,17 @@ def queue(
         save(run_id, document)
         _state_change(run_id, item, "queued", "")
         return item
+
+
+def _check_contract(package: str, to: str, payload: Any, *,
+                    result: bool) -> None:
+    """Refuse a request (`accepts`) or answer (`produces`) `to` would reject."""
+    problems = (agent_contracts.contract_problems(
+        package, to, payload, result=result) if package else [])
+    if problems:
+        side = "answer from" if result else "request to"
+        raise ItemError(f"{side} {to} violates its contract: " +
+                        "; ".join(problems))
 
 
 def _write_item(run_id: str,
@@ -599,11 +655,13 @@ def answer(run_id: str,
            item_id: str,
            *,
            response: Any,
-           owner: str = "") -> dict[str, Any]:
+           owner: str = "",
+           package: str = "") -> dict[str, Any]:
     """Close the item with its final result, which outranks any partial."""
 
     def change(document: dict[str, Any], item: dict[str,
                                                     Any]) -> dict[str, str]:
+        _check_contract(package, item["to"], response, result=True)
         item.update(status=STATUS_COMPLETED,
                     response=response,
                     blocked_on=[],
@@ -810,6 +868,22 @@ def watch(run_id: str,
         time.sleep(min(interval, remaining))
 
 
+def resolve_package(run_id: str) -> str:
+    """The package this run is admitted against, from its run document.
+
+    Deliberately not a flag: a caller that could name its own package could
+    name one whose graph permits it.
+    """
+    try:
+        document = jsonio.load_json_or_empty(
+            paths.get_run_root(run_id) / "run.json")
+    except (utils.TpuAgentSuiteError, OSError):
+        return ""
+    package = str(document.get("package") or "")
+    # `start-run`'s placeholder for a run with no package.
+    return "" if package == "no-package" else package
+
+
 def _earliest_lease(document: dict[str, Any]) -> datetime.datetime | None:
     """When the first claim in `document` expires, or None if none is held."""
     leases = [
@@ -917,7 +991,8 @@ def register_items_parser(sub: Any) -> None:
                          help="Higher goes first under the priority policy")
     p_queue.add_argument("--requested-by",
                          default="",
-                         help="Agent making the request")
+                         help="Agent making the request; recorded, not"
+                         " used for admission")
     p_queue.add_argument("--max-depth",
                          type=int,
                          default=0,
@@ -1008,6 +1083,7 @@ def register_items_parser(sub: Any) -> None:
 def dispatch_items_command(args: Any) -> None:
     """Run one `items` verb. Printing is the command's only output."""
     run_id = resolve_run_id()
+    package = resolve_package(run_id)
     action = args.items_action
     if action == "init":
         out: Any = init(run_id,
@@ -1022,7 +1098,8 @@ def dispatch_items_command(args: Any) -> None:
                     after=args.after,
                     priority=args.priority,
                     requested_by=args.requested_by,
-                    max_depth=args.max_depth)
+                    max_depth=args.max_depth,
+                    package=package)
     elif action == "claim":
         out = claim(run_id,
                     args.item,
@@ -1041,7 +1118,8 @@ def dispatch_items_command(args: Any) -> None:
         out = answer(run_id,
                      args.item,
                      response=_json_arg(args, "response", required=True),
-                     owner=args.owner)
+                     owner=args.owner,
+                     package=package)
     elif action == "fail":
         out = fail(run_id, args.item, reason=args.reason, owner=args.owner)
     elif action == "wait":

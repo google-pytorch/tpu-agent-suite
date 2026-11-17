@@ -28,7 +28,8 @@ from typing import Any, Callable, Sequence
 
 from framework import harnesses, jsonio, utils
 from framework.builder import (dist_assets, harness_rules, hook_config,
-                               package_loader, prompt_contracts)
+                               package_checks, package_loader,
+                               prompt_contracts)
 
 Path = pathlib.Path
 
@@ -419,12 +420,26 @@ def translate(
     dist_assets.copy_runtime_assets(package_dir, output, manifest, harness)
     dist_assets.emit_distribution_requirements(package_dir, output, manifest)
 
+    agents_by_name = package_loader.get_manifest_agent_map(manifest)
     contracts = {
         name: {
             "accepts": a.get("accepts", ""),
             "produces": a.get("produces", ""),
         }
-        for name, a in package_loader.get_manifest_agent_map(manifest).items()
+        for name, a in agents_by_name.items()
+    }
+
+    # The graph the build walked, published so `items queue` can admit a
+    # request against it at runtime; `roots` is what a parentless request
+    # may go to.
+    delegation = {
+        "graph": {
+            name: list(node.get("delegates", []))
+            for name, node in package_checks.delegation_nodes(
+                manifest.get("skills", []), agents_by_name).items()
+        },
+        "roots": package_checks.root_delegates(manifest.get("skills", [])),
+        "max_depth": package_checks.MAX_DELEGATION_DEPTH,
     }
 
     jsonio.write_json(
@@ -444,6 +459,8 @@ def translate(
             include_internal,
             "contracts":
             contracts,
+            "delegation":
+            delegation,
             "skill_allowed_tools":
             hook_config.hook_allowed_skill_tools(manifest, harness),
             "agent_tools": {

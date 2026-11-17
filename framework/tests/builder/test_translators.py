@@ -31,9 +31,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from framework import compiler, jsonio, utils
-from framework.builder import (harness_rules, hook_config, package_discovery,
-                               package_loader, prompt_contracts, translators,
-                               verify)
+from framework.builder import (harness_rules, hook_config, package_checks,
+                               package_discovery, package_loader,
+                               prompt_contracts, translators, verify)
 from framework.tests.builder import helpers
 
 Path = pathlib.Path
@@ -57,6 +57,36 @@ class TestHarnessTranslation(helpers.CompilerTestCase):
 
 class TestDelegationContract(helpers.CompilerTestCase):
     """How each harness is told to delegate, or that it cannot."""
+
+    def test_build_info_publishes_the_delegation_graph_and_its_cap(self):
+        """The graph the build walked is readable at runtime.
+
+        Admission checks a *request* against the same edges the build
+        checked the package against. Before this they survived only as
+        prompt text, and depth only as the harness's spawn limit.
+        """
+        pkg_dir = self._create_valid_package()
+        out = self.temp_dir / "dist_delegation_graph"
+        translators.translate(pkg_dir, "claude-code", out)
+        build_info = json.loads(
+            (out / "tpu-agent-suite-build.json").read_text(encoding="utf-8"))
+        delegation = build_info["delegation"]
+        self.assertEqual(delegation["max_depth"],
+                         package_checks.MAX_DELEGATION_DEPTH)
+        # Every agent and every skill is a node: a request with no parent
+        # comes from a skill, which is a root of the graph.
+        for skill in package_loader.load_package(pkg_dir).get("skills", []):
+            self.assertEqual(delegation["graph"][skill["name"]],
+                             list(skill.get("delegates", [])))
+        for agent in package_loader.load_package(pkg_dir).get("agents", []):
+            self.assertEqual(delegation["graph"][agent["name"]],
+                             list(agent.get("delegates", [])))
+        skills = package_loader.load_package(pkg_dir).get("skills", [])
+        self.assertEqual(
+            delegation["roots"],
+            sorted({d
+                    for skill in skills
+                    for d in skill.get("delegates", [])}))
 
     def test_unknown_harness_delegation_is_a_build_error(self):
         """A harness with no declared mechanism must fail the build.

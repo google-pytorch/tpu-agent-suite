@@ -31,7 +31,7 @@ import time
 import unittest
 from unittest import mock
 
-from framework import items, paths, runtime, utils
+from framework import items, jsonio, paths, runtime, study, utils
 
 Path = pathlib.Path
 
@@ -543,6 +543,161 @@ class CliTest(ItemStoreTestCase):
         code, out = self.cli("dispatch")
         self.assertEqual([(e["action"], e["item"]) for e in json.loads(out)],
                          [("decide", "I1")])
+
+
+class AdmissionTest(ItemStoreTestCase):
+    """`queue` and `answer` held to the package's published graph and schemas."""
+
+    PACKAGE = "probe-pkg@1.0.0"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = self.home / paths.PACKAGES_DIRNAME / self.PACKAGE
+        (self.root / "schemas").mkdir(parents=True)
+        jsonio.write_json(self.root / "schemas" / "gap.json", {
+            "type": "object",
+            "required": ["gap"],
+        })
+        jsonio.write_json(self.root / "schemas" / "result.json", {
+            "type": "object",
+            "properties": {
+                "artifacts": {
+                    "type": "array"
+                }
+            },
+        })
+        jsonio.write_json(
+            self.root / "tpu-agent-suite-build.json", {
+                "contracts": {
+                    "tpu-pallas": {
+                        "accepts": "schemas/gap.json",
+                        "produces": "schemas/result.json",
+                    },
+                },
+                "delegation": {
+                    "graph": {
+                        "tpu-agent": ["tpu-pallas", "tpu-critical-review"],
+                        "tpu-pallas": ["tpu-critical-review"],
+                        "tpu-critical-review": ["tpu-code-stack"],
+                        "tpu-code-stack": [],
+                    },
+                    "roots": ["tpu-critical-review", "tpu-pallas"],
+                    "max_depth": 3,
+                },
+            })
+
+    def admit(self, to: str, **kwargs) -> dict:
+        kwargs.setdefault("request", {"gap": "x"})
+        return items.queue(self.run_id, to=to, package=self.PACKAGE, **kwargs)
+
+    def test_a_request_is_held_to_its_real_requesters_edges(self) -> None:
+        review = self.admit("tpu-critical-review")
+        builtin = self.admit("general-purpose", request={})
+        refused = (
+            ("tpu-pallas", review["id"], "tpu-agent"),  # the parent wins
+            ("tpu-code-stack", "", "tpu-critical-review"),  # no parent: roots
+            (" tpu-code-stack", "", ""),  # a padded name is the same name
+            ("tpu-code-stack", builtin["id"], ""),  # a built-in is no hop
+        )
+        for to, parent, claimed in refused:
+            with self.subTest(to=to, parent=parent, requested_by=claimed):
+                with self.assertRaises(items.ItemError):
+                    self.admit(to,
+                               request={},
+                               parent=parent,
+                               requested_by=claimed)
+        self.admit("tpu-pallas", parent=builtin["id"])
+
+    def test_a_caller_cannot_raise_the_published_cap(self) -> None:
+        parent = self.admit("tpu-pallas")
+        review = self.admit("tpu-critical-review", parent=parent["id"])
+        stack = self.admit("tpu-code-stack", parent=review["id"])
+        with self.assertRaisesRegex(items.ItemError, "the cap is 3"):
+            self.admit("tpu-knowledge-base",
+                       request={},
+                       parent=stack["id"],
+                       max_depth=99)
+
+    def test_requests_and_answers_meet_the_callees_contract(self) -> None:
+        with self.assertRaisesRegex(items.ItemError, "request to tpu-pallas"):
+            self.admit("tpu-pallas", request={"wrong": 1})
+        self.admit("tpu-pallas")
+        items.claim(self.run_id, "I1", owner="w1")
+        # The SubagentStop rules, not just the schema.
+        with self.assertRaisesRegex(items.ItemError, "at least one artifact"):
+            items.answer(self.run_id,
+                         "I1",
+                         response={
+                             "status": "completed",
+                             "artifacts": []
+                         },
+                         owner="w1",
+                         package=self.PACKAGE)
+
+    def test_the_cli_takes_the_package_from_the_run_not_a_flag(self) -> None:
+        jsonio.write_json(
+            paths.get_run_root(self.run_id) / "run.json", {
+                "run_id": self.run_id,
+                "package": self.PACKAGE
+            })
+        self.enter_workspace(self.run_id)
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            code = runtime.main([
+                "items", "queue", "--to", "tpu-pallas", "--request",
+                '{"wrong": 1}'
+            ])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(items.load(self.run_id)["items"], {})
+
+    def test_a_package_built_before_the_graph_still_runs(self) -> None:
+        build = jsonio.load_json(self.root / "tpu-agent-suite-build.json")
+        del build["delegation"]
+        jsonio.write_json(self.root / "tpu-agent-suite-build.json", build)
+        review = self.admit("tpu-critical-review")
+        self.assertEqual(
+            self.admit("tpu-pallas", parent=review["id"])["depth"], 2)
+
+
+class StudyTimelineTest(ItemStoreTestCase):
+
+    def test_changes_reach_the_attached_study_and_never_fail_on_it(
+            self) -> None:
+        study.start_study(study_id="probe-study",
+                          protocol={
+                              "primary_metric": {
+                                  "name": "tokens_per_s",
+                                  "unit": "tok/s",
+                                  "direction": "maximize",
+                              },
+                              "measurement_cell": {
+                                  "topology": "v6e-2x2x1"
+                              },
+                              "replicate_count": 3,
+                              "noise_floor_pct": 0.4,
+                              "stopping_rule": {
+                                  "max_rounds": 10
+                              },
+                              "admissibility_gates": [],
+                              "mode": "approve",
+                          },
+                          package="probe-pkg",
+                          target="probe-model",
+                          owner="tester")
+        study.attach_run_to_study("probe-study", self.run_id)
+        self.queue()
+        items.claim(self.run_id, "I1", owner="w1")
+        mirrored = [
+            event for event in study.read_study_events("probe-study")
+            if event.get("kind") == "items"
+        ]
+        self.assertEqual([(e["change"], e["item"]) for e in mirrored],
+                         [("queued", "I1"), ("claimed", "I1")])
+        # Best-effort: an unwritable study never fails a delegation.
+        with mock.patch.object(study,
+                               "append_study_event",
+                               side_effect=OSError("disk full")):
+            self.assertEqual(self.queue()["status"], items.STATUS_QUEUED)
 
 
 if __name__ == "__main__":

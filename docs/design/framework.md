@@ -17,7 +17,8 @@ enforces the package's contracts while its agents run.
 - The **installer** runs on the user's machine. It can see the user's
   workspace and settings.
 - The **runtime** ships inside every build and runs during agent sessions. It
-  can see each request and result as it happens.
+  can see each request and result as it happens, and holds each `items queue`
+  request to the delegation graph the compiler published.
 - **Compute** gives every agent one family of commands, `compute …`, that works
   the same way across four built-in backends (plus external drivers).
 
@@ -77,7 +78,9 @@ It has five commands:
   as errors; the rest are advisory.
 - **`translate`** builds the package for one harness. It replaces tokens, maps
   portable tool names to the harness's own, and appends a **generated execution
-  contract** to every prompt.
+  contract** to every prompt. Its `tpu-agent-suite-build.json` publishes the
+  delegation graph `verify` checked, as `delegation`: each node's edges, the
+  roots a request with no parent may reach, and the depth cap.
 - **`archive`** packages a build as a release archive.
 
 The generated execution contract is written from the prose unit's frontmatter,
