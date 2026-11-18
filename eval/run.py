@@ -2420,6 +2420,7 @@ def resolve_accelerator_slug(config: dict[str, Any]) -> str:
 
     for candidate in (
             os.environ.get("GKE_TPU_ACCELERATOR"),
+            _expand_templates(agent_env.get("GKE_TPU_ACCELERATOR", "")),
             _expand_templates(agent_env.get("TPU_ACCELERATOR_TYPE", "")),
             os.environ.get("TPU_ACCELERATOR_TYPE"),
             _expand_templates(agent_env.get("GKE_CLUSTER", "")),
@@ -2429,6 +2430,13 @@ def resolve_accelerator_slug(config: dict[str, Any]) -> str:
             slug = _normalize_accelerator_slug(candidate)
             if slug in ("v7", "v6e", "v5p", "v5e", "v4"):
                 return slug
+    if "GKE_TPU_ACCELERATOR" in agent_env:
+        job_label = config.get("job_name") or f"COMPUTE_BACKEND={backend}"
+        raise RuntimeError(
+            f"GKE_TPU_ACCELERATOR is required for '{job_label}' "
+            f"(COMPUTE_BACKEND={backend}) but is unset or empty; export "
+            "GKE_TPU_ACCELERATOR (e.g. 'tpu7x' or 'tpu-v6e-slice') before "
+            "running.")
     return ""
 
 
