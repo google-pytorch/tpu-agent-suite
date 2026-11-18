@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "perf-triage-result.json",
+  "title": "tpu-performance-optimization Result",
+  "description": "Output payload of the tpu-performance-optimization agent: the served job's gaps ranked by share x headroom against tpu-roofline floors, each diagnosed, the top ones with hypotheses. Shares are measured on the microbenchmark twin and scaled to the served model; floors, headroom, ceilings and expected gains are modelled. Nothing here is a result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "run_id"
+  ],
+  "status_requires": {
+    "triaged": [
+      "gaps",
+      "decomposition",
+      "roofline",
+      "traces"
+    ],
+    "invalid_input": [
+      "missing"
+    ]
+  },
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "triaged",
+        "invalid_input",
+        "failed"
+      ],
+      "description": "'triaged': the gaps were ranked and the top ones diagnosed. 'invalid_input': the request cannot be run as given, an engine with no procedure section included; every gap is in `missing`. 'failed': a delegate or a script failed, or tpu-roofline returned anything but `modeled`, so there are no floors to rank against; named in `failure_reason`."
+    },
+    "summary": {
+      "type": "string",
+      "description": "The top gaps with their e2e ceilings, and the ops with no floor."
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "What failed: the delegate or script and the status it returned. For tpu-roofline, its status and each `missing` entry or its `failure_reason`."
+    },
+    "missing": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "reason"
+        ],
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "engine": {
+      "enum": [
+        "vllm"
+      ],
+      "description": "The request's engine, echoed."
+    },
+    "gaps": {
+      "type": "array",
+      "description": "Ranked gaps in rank order, then ops with no floor by share.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "op",
+          "layer_kind",
+          "regimes",
+          "measured_ms",
+          "share",
+          "diagnosis",
+          "neighbours",
+          "hypotheses"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "rank",
+              "floor_ms",
+              "gap_ms",
+              "headroom",
+              "e2e_ceiling_pct"
+            ]
+          },
+          {
+            "required": [
+              "no_floor"
+            ]
+          }
+        ],
+        "dependentRequired": {
+          "rank": [
+            "floor_ms",
+            "gap_ms",
+            "headroom",
+            "e2e_ceiling_pct"
+          ],
+          "floor_ms": [
+            "rank",
+            "gap_ms",
+            "headroom",
+            "e2e_ceiling_pct"
+          ],
+          "gap_ms": [
+            "rank",
+            "floor_ms",
+            "headroom",
+            "e2e_ceiling_pct"
+          ],
+          "headroom": [
+            "rank",
+            "floor_ms",
+            "gap_ms",
+            "e2e_ceiling_pct"
+          ],
+          "e2e_ceiling_pct": [
+            "rank",
+            "floor_ms",
+            "gap_ms",
+            "headroom"
+          ]
+        },
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "op": {
+            "type": "string",
+            "description": "The op or block, named as the roofline row it joins."
+          },
+          "layer_kind": {
+            "type": "string",
+            "description": "The layer kind it runs in, or `step` for an op outside the layers."
+          },
+          "regimes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The plan shapes it was measured in."
+          },
+          "measured_ms": {
+            "type": "number",
+            "description": "Served ms per step, regime-weighted: twin-measured and scaled by the served layer count."
+          },
+          "floor_ms": {
+            "type": "number",
+            "description": "tpu-roofline's floor at the same scope (modelled)."
+          },
+          "no_floor": {
+            "type": "string",
+            "description": "Why the op has no usable floor: tpu-roofline did not price it, or the twin cannot show its served cost. Such an op has no headroom, ceiling or rank."
+          },
+          "gap_ms": {
+            "type": "number",
+            "description": "measured_ms - floor_ms."
+          },
+          "share": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "measured_ms / step ms (measured)."
+          },
+          "headroom": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "1 - floor_ms / measured_ms (modelled)."
+          },
+          "e2e_ceiling_pct": {
+            "type": "number",
+            "description": "share x headroom summed over regime weights, in percent: the ranking key (modelled)."
+          },
+          "bound_by": {
+            "type": "string",
+            "description": "The roofline's binding term: memory, compute or communication."
+          },
+          "diagnosis": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "where",
+              "why",
+              "evidence"
+            ],
+            "properties": {
+              "where": {
+                "type": "string",
+                "description": "Where the time goes."
+              },
+              "why": {
+                "type": "string",
+                "description": "Why it costs more than its floor."
+              },
+              "remove": {
+                "type": "string",
+                "description": "What would remove it."
+              },
+              "class": {
+                "enum": [
+                  "redundant-relayout",
+                  "kernel"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Paths of the queries, summaries and reports behind it."
+              }
+            }
+          },
+          "neighbours": {
+            "type": "array",
+            "description": "The ops around it that the diagnosis checked.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "op",
+                "relation",
+                "ms"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "relation": {
+                  "enum": [
+                    "before",
+                    "after",
+                    "producer",
+                    "consumer"
+                  ]
+                },
+                "ms": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "tried": {
+            "type": "string",
+            "description": "What the request's `tried` already tested on this op."
+          },
+          "report": {
+            "type": "string",
+            "description": "The candidate report."
+          },
+          "hypotheses": {
+            "type": "array",
+            "description": "Orthogonal hypotheses, for the top_n ranked gaps; empty elsewhere.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "lever",
+                "route",
+                "claim",
+                "expected_gain_pct",
+                "cost",
+                "evidence"
+              ],
+              "properties": {
+                "lever": {
+                  "type": "string",
+                  "description": "The flag or env var and value, the kernel change, or the code change."
+                },
+                "route": {
+                  "enum": [
+                    "flag-env",
+                    "kernel",
+                    "code"
+                  ]
+                },
+                "claim": {
+                  "type": "string",
+                  "description": "Why the op costs more than its floor and how the lever removes it."
+                },
+                "expected_gain_pct": {
+                  "type": "number",
+                  "description": "Served gain in percent (modelled), at most the gap's e2e ceiling."
+                },
+                "cost": {
+                  "type": "string",
+                  "description": "What testing it spends, e.g. one env arm, one tpu-pallas run."
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Paths, source locations and knowledge-base citations behind the claim."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "decomposition": {
+      "type": "string",
+      "description": "decomposition.md."
+    },
+    "roofline": {
+      "type": "string",
+      "description": "The roofline-result the floors came from; a `modeled` one."
+    },
+    "traces": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The traces and events parquets the shares came from."
+    }
+  },
+  "examples": [
+    {
+      "status": "triaged",
+      "summary": "3 gaps above 0.5%: MoE dispatch all-to-all 6.1%, MLA decode attention 3.4%, router top-k 0.9%. Fused EP MoE kernel has no floor.",
+      "run_id": "20260921T120000Z-abcdef012345",
+      "engine": "vllm",
+      "gaps": [
+        {
+          "rank": 1,
+          "op": "MoE: dispatch all-to-all",
+          "layer_kind": "moe",
+          "regimes": [
+            "decode-b64-kv8k",
+            "mixed-c512"
+          ],
+          "measured_ms": 4.2,
+          "floor_ms": 1.1,
+          "gap_ms": 3.1,
+          "share": 0.083,
+          "headroom": 0.74,
+          "e2e_ceiling_pct": 6.1,
+          "bound_by": "communication",
+          "diagnosis": {
+            "where": "the all-to-all after the router, every MoE layer",
+            "why": "identical payload on fast and slow layers: wait on the last arriver, not transfer",
+            "remove": "overlap the dispatch with the shared expert",
+            "class": "kernel",
+            "evidence": [
+              "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-performance-optimization/j-8f2c/diag/1/summary.md"
+            ]
+          },
+          "neighbours": [
+            {
+              "op": "MoE: router top-k",
+              "relation": "producer",
+              "ms": 0.4
+            }
+          ],
+          "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-performance-optimization/j-8f2c/candidates/1-moe-dispatch.md",
+          "hypotheses": [
+            {
+              "lever": "XLA_FLAGS=--xla_tpu_enable_async_all_to_all=true",
+              "route": "flag-env",
+              "claim": "the all-to-all waits 2.6 ms per step behind the shared expert; async lets them overlap",
+              "expected_gain_pct": 3.0,
+              "cost": "one env arm",
+              "evidence": [
+                "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-performance-optimization/j-8f2c/diag/1/summary.md"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "fused EP MoE kernel",
+          "layer_kind": "moe",
+          "regimes": [
+            "decode-b64-kv8k"
+          ],
+          "measured_ms": 2.0,
+          "no_floor": "tpu-roofline does not model the fused dispatch-GEMM-combine kernel",
+          "share": 0.04,
+          "diagnosis": {
+            "where": "one custom call per MoE layer",
+            "why": "unknown without a floor",
+            "evidence": [
+              "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-performance-optimization/j-8f2c/join.csv"
+            ]
+          },
+          "neighbours": [],
+          "hypotheses": []
+        }
+      ],
+      "decomposition": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-performance-optimization/j-8f2c/decomposition.md",
+      "roofline": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/roofline/roofline_result.json",
+      "traces": [
+        "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-forward-bench/j-8f2c/base/jobs/j-91/profile/rank0.xplane.pb"
+      ]
+    },
+    {
+      "status": "invalid_input",
+      "summary": "The baseline arm has no traces.",
+      "run_id": "20260921T120000Z-abcdef012345",
+      "missing": [
+        {
+          "input": "baseline",
+          "reason": "the forward-bench baseline must be profiled (profile: true): shares come from its traces"
+        }
+      ]
+    },
+    {
+      "status": "failed",
+      "summary": "tpu-diagnostics could not export the events parquet.",
+      "run_id": "20260921T120000Z-abcdef012345",
+      "failure_reason": "trace_empty_or_partial"
+    }
+  ]
+}

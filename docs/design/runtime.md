@@ -187,8 +187,8 @@ does not change the commands above.
 A run covers one session. Some optimization work lasts much longer, so the
 runtime has a second, longer-lived scope called a study.
 
-Studies are used by the tpu-performance-optimization agent, which is still in development.
-Most sessions today do not involve a study.
+No agent uses studies today; the hill-climb keeps its state in a ledger file. The store and its
+commands stay in the runtime, unused.
 
 | Level | Term | What it is |
 | --- | --- | --- |
@@ -204,10 +204,9 @@ and runs exist whether or not a study does.
   Its state is in `study.json`. Hooks append what happened to `events.jsonl`.
   Some sections of `study.json` have a size limit; when a round adds more than
   fits, the oldest entries move to `journal.jsonl`, so nothing is lost.
-- **A round is meant to be one run.** The study agent does one round and
-  exits. Because the next round is a new session, it starts with an empty
-  context and reads only `study.json`, whose size is capped, rather than the
-  full history. Round 60 therefore costs about as much as round 2. A retry is
+- **A round is meant to be one run.** Because the next round is a new
+  session, it starts with an empty context and reads only `study.json`, whose
+  size is capped, rather than the full history. Round 60 therefore costs about as much as round 2. A retry is
   simply a new round.
 - **The framework counts rounds by counting runs.** It does not stop a second
   round from being recorded in the same session, but that round would not be

@@ -1,6 +1,16 @@
+---
+title: "vllm-torchtpu model support"
+type: source
+tags: [serving, vllm, models]
+created: 2026-10-25
+updated: 2026-10-25
+sources: 1
+human_reviewed: false
+---
+
 # `vllm-torchtpu` Model Support
 
-This is the single source of truth for which models the `vllm-torchtpu` engine natively supports. Every `tpu-performance-optimization` instruction and reference routes models by this list; update it here rather than repeating it elsewhere.
+This is the single source of truth for which models the `vllm-torchtpu` engine natively supports; update it here rather than repeating it elsewhere.
 
 ## 1. Native `vllm-torchtpu` Supported Models
 
@@ -15,6 +25,6 @@ These models are deployed and tuned through the `vllm-torchtpu` engine (engine s
 
 ## 2. Models Not Supported by `vllm-torchtpu`
 
-Every model not listed in Section 1 runs as native PyTorch / `torch_tpu` without an inference engine and is optimized under `NATIVE_PYTORCH_PERFORMANCE.md`. Representative models for validating that recipe:
+Every model not listed in Section 1 runs as native PyTorch / `torch_tpu` without an inference engine. Representative models:
 * **Qwen 3.8 (27B)**: Dense Transformer testing static KV-cache preallocation, single-step decode compilation, and 128-byte tile padding alignment.
 * **Custom / Unsupported LLMs**: Arbitrary HuggingFace architectures lacking native `vllm-torchtpu` engine or kernel implementations.

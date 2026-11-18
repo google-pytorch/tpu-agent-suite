@@ -63,11 +63,11 @@ better starting point.
 | arm | One candidate change that a study is testing. |
 | execution | One compute job that measures an arm. |
 
-Study, round, protocol, arm and execution are all concepts used by the
-tpu-performance-optimization agent for hill-climbing, and that agent is still in
-development. We expect most users, for now, to start a session and run one or
-two specialists, such as onboarding or kernel authoring. In that case only the
-session and its run exist.
+Study, round, protocol, arm and execution are the terms of the framework's
+study store (`framework/study.py`). No agent uses the store today: the
+hill-climb keeps its state in a ledger file under the workspace. Most sessions
+run one or two specialists, such as onboarding or kernel authoring, and only
+the session and its run exist.
 
 How these terms relate:
 
@@ -76,9 +76,8 @@ How these terms relate:
 - **A study is worked on by many runs, and a run belongs to at most one study.**
   The framework enforces the second half: attaching a run to a second study is
   refused.
-- **A round is meant to be one run.** The study agent does one round and exits,
-  so that each round starts with a fresh context and costs about the same as
-  the first. The framework counts rounds by counting runs. It does not stop a
+- **A round is meant to be one run,** so that each round starts with a fresh
+  context and costs about the same as the first. The framework counts rounds by counting runs. It does not stop a
   second round from being recorded in the same session, but that round would
   not be counted.
 - **A round tests arms, and each measurement of an arm is an execution.**

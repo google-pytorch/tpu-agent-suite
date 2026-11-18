@@ -50,8 +50,7 @@ CALLERS = [
     "skills/tpu-agent/SKILL.md",
     "agents/tpu-sharding.md",
     "agents/tpu-kernel-development.md",
-    "agents/tpu-performance-optimization.md",
-    "agents/tpu-performance-optimization-executor.md",
+    "references/tpu-performance-optimization/agent.md",
 ]
 
 _JSON_BLOCK = re.compile(r"```json\n(.*?)\n\s*```", re.DOTALL)

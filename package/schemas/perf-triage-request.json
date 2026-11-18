@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "perf-triage-request.json",
+  "title": "tpu-performance-optimization Request",
+  "description": "Input payload for the tpu-performance-optimization agent: rank the performance gaps of one served job from its tpu-forward-bench baseline and propose hypotheses for the top ones. It runs no benchmark and changes no code.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "engine",
+    "model",
+    "tpu",
+    "baseline"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "The caller's run; artifacts go under it."
+    },
+    "engine": {
+      "enum": [
+        "vllm"
+      ],
+      "description": "The inference engine the source job served with. Values are added as engines gain a procedure section."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The served model id, e.g. zai-org/GLM-5.2-FP8."
+    },
+    "tpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accelerator_type",
+        "topology"
+      ],
+      "properties": {
+        "accelerator_type": {
+          "type": "string",
+          "pattern": "^\\S+-\\d+$",
+          "description": "Generation and chip count, e.g. tpu7x-8."
+        },
+        "topology": {
+          "type": "string",
+          "pattern": "^\\d+(x\\d+)*$"
+        }
+      }
+    },
+    "baseline": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path of a `measured` forward-bench-result whose baseline arm was profiled: its report, plan, cost_model, evidence and traces are the inputs."
+    },
+    "source_job": {
+      "type": "string",
+      "description": "The served job the baseline was derived from; its recipe.yaml is passed to tpu-roofline as context."
+    },
+    "roofline": {
+      "type": "string",
+      "description": "Path of a `modeled` roofline-result at the plan's cells. Absent: the agent requests one from tpu-roofline."
+    },
+    "checkout": {
+      "type": "string",
+      "description": "Local checkout of the engine plugin at the image's revision (vllm: vllm-torchtpu), read while diagnosing and forming hypotheses. Absent: plugin code locations are written as unknown."
+    },
+    "metric": {
+      "enum": [
+        "e2e",
+        "ttft",
+        "tpot"
+      ],
+      "default": "e2e",
+      "description": "The metric regime weights are taken against."
+    },
+    "tried": {
+      "type": "array",
+      "description": "Levers already tested on this job, from the caller's ledger. Not proposed again unless the evidence changed.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "op",
+          "lever",
+          "outcome"
+        ],
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "lever": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "The verdict or stop class, e.g. win, loss, refuted, budget."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "The A/B result or gap file behind the outcome."
+          }
+        }
+      }
+    },
+    "top_n": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 5,
+      "description": "How many ranked gaps get a full diagnosis and hypotheses."
+    }
+  },
+  "examples": [
+    {
+      "run_id": "20260921T120000Z-abcdef012345",
+      "engine": "vllm",
+      "model": "zai-org/GLM-5.2-FP8",
+      "tpu": {
+        "accelerator_type": "tpu7x-8",
+        "topology": "2x2x2"
+      },
+      "baseline": "./.work/GLM-5.2-FP8/hill-climb/j-8f2c/bench/base.result.json",
+      "source_job": "j-8f2c",
+      "checkout": "/workspace/vllm-torchtpu",
+      "tried": [
+        {
+          "op": "MoE: gate",
+          "lever": "env.VLLM_TORCHTPU_MOE_FUSED=1",
+          "outcome": "loss",
+          "evidence": "./.work/GLM-5.2-FP8/hill-climb/j-8f2c/bench/2-moe-gate-a1.result.json"
+        }
+      ],
+      "top_n": 5
+    }
+  ]
+}
