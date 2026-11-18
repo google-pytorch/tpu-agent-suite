@@ -63,7 +63,9 @@ into place only once it is whole, and a file already there at its full size
 is not copied again.
 
 The copy uses a local bucket mount under `GCS_MOUNT_ROOT` (`<root>/<bucket>/...`,
-symlinking selected files in place without occupying `/dev/shm`), else `gcloud
+symlinking selected files in place without occupying `/dev/shm`, then reading
+the weights once so the page cache holds them, unless they exceed available
+memory), else `gcloud
 storage`, else `gsutil`, else the google-cloud-storage library, with the job's
 own credentials (the TPU VM's service account, or Workload Identity on
 gke_job). A pod with no identity for the bucket can be given an access token in
@@ -78,6 +80,7 @@ Usage, as a module:  path = fetch_weights.fetch(model_id)  # local snapshot
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import contextlib
 import dataclasses
 import errno
@@ -149,6 +152,10 @@ LAYER_KEYS = ("num_hidden_layers", "num_layers", "n_layer")
 GCS_SCHEME = "gs://"
 # Root directory where GCS buckets are FUSE-mounted locally (`<root>/<bucket>/...`).
 GCS_MOUNT_ENV = "GCS_MOUNT_ROOT"
+# Weights linked from that mount are read once into the page cache, this
+# many files at a time in reads of this size (see `_warm_page_cache`).
+WARM_THREADS = 16
+WARM_BLOCK_BYTES = 16 * 1024 * 1024
 # Where gs:// checkpoints are copied when set; otherwise beside the hub cache.
 CHECKPOINT_DIR_ENV = "CHECKPOINT_DIR"
 # A file holding an access token, for a pod with no identity of its own for
@@ -718,6 +725,74 @@ def gcs_weight_bytes(url: str, local: str) -> int | None:
     return sum(sizes[f] for f in sel.files if _ext(f) in WEIGHT_EXTS) or None
 
 
+# A container's memory limit: cgroup v2, then v1. Page cache counts against
+# it, so it caps what the warm-up can keep cached.
+CGROUP_MEMORY_LIMITS = ("/sys/fs/cgroup/memory.max",
+                        "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+
+
+def _mem_available() -> int | None:
+    """Bytes this process can fill, or None if unknown.
+
+    The kernel's `MemAvailable`, capped by the container's cgroup memory limit
+    when one is set: in a container, `/proc/meminfo` describes the whole host.
+    """
+    avail = None
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) * 1024
+                    break
+    for path in CGROUP_MEMORY_LIMITS:
+        with contextlib.suppress(OSError, ValueError):
+            with open(path, encoding="utf-8") as f:
+                raw = f.read().strip()
+            # "max" (v2) or a huge sentinel (v1) means no limit.
+            if raw.isdigit() and int(raw) < 1 << 60:
+                avail = min(avail, int(raw)) if avail is not None else int(raw)
+            break
+    return avail
+
+
+def _warm_page_cache(paths: list[str], total: int) -> None:
+    """Read linked weight files once so the page cache holds all of them.
+
+    A linked file lives on a FUSE mount. An engine that memory-maps it reads
+    what is not cached in small page faults, each a round trip to the
+    bucket, and a multi-host engine whose prefetch is split across hosts
+    leaves each host about half the shards uncached that way. Large
+    sequential reads in parallel here fill the cache in minutes instead.
+    Skipped when the files would not fit in available memory, where they
+    would only evict each other, and a read error is left for the engine to
+    report.
+    """
+    avail = _mem_available()
+    if avail is not None and total > avail:
+        _say(f"WEIGHTS NOTE not reading {total / GB:.1f} GB into the page "
+             f"cache: only {avail / GB:.1f} GB of memory is available")
+        return
+    started = time.monotonic()
+
+    def read(path: str) -> None:
+        buf = bytearray(WARM_BLOCK_BYTES)
+        with open(path, "rb", buffering=0) as f:
+            while f.readinto(buf):
+                pass
+
+    pool = concurrent.futures.ThreadPoolExecutor(WARM_THREADS)
+    try:
+        list(pool.map(read, paths))
+    except OSError as exc:
+        # Drop the queued reads rather than finish them after a failure.
+        pool.shutdown(wait=True, cancel_futures=True)
+        _say(f"WEIGHTS NOTE page cache warm-up stopped: {exc}")
+        return
+    pool.shutdown(wait=True)
+    _say(f"WEIGHTS CACHED {len(paths)} files, {total / GB:.1f} GB in the "
+         f"page cache in {int(time.monotonic() - started)}s")
+
+
 def fetch_gcs(url: str,
               dest: str | None = None,
               small_only: bool = False,
@@ -795,8 +870,10 @@ def fetch_gcs(url: str,
             raise OSError(errno.ENOSPC, problem_text)
         cap = (f" under its {space.shm_limit / GiB:.0f} GiB cap"
                if space.shm_limit is not None else "")
-        _say(f"WEIGHTS SPACE {needed / GB:.1f} GB to copy, "
-             f"{space.free / GB:.1f} GB free{cap}")
+        # Linked files take no local space; say so rather than "to copy".
+        what = (f"0.0 GB to copy ({needed / GB:.1f} GB linked from the mount)"
+                if zero_copy else f"{needed / GB:.1f} GB to copy")
+        _say(f"WEIGHTS SPACE {what}, {space.free / GB:.1f} GB free{cap}")
 
         result: dict[str, BaseException] = {}
 
@@ -837,6 +914,10 @@ def fetch_gcs(url: str,
             _say(f"{FAILED}: {problem_text}")
             raise OSError(errno.EIO, problem_text)
 
+    if zero_copy and not small_only:
+        weights = [f for f in files if _ext(f) in WEIGHT_EXTS]
+        _warm_page_cache([_local(dest, f) for f in weights],
+                         sum(sizes[f] for f in weights))
     verb = "linked" if zero_copy else f"copied {needed / GB:.1f} GB"
     _say(f"{READY} {dest} ({total / GB:.1f} GB; {verb} "
          f"from {url} in {int(time.monotonic() - started)}s)")

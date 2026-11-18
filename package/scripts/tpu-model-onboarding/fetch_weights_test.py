@@ -1010,6 +1010,33 @@ class GcsStorageChoiceTest(unittest.TestCase):
                 self.assertFalse(
                     os.path.exists(os.path.join(small, "model.safetensors")))
             self.assertIn("linked from gs://bkt/ckpt/m/", out.getvalue())
+            self.assertIn("WEIGHTS SPACE 0.0 GB to copy (", out.getvalue())
+            # Weights are read into the page cache once; small files only
+            # skip it.
+            self.assertEqual(out.getvalue().count("WEIGHTS CACHED 1 files"), 1)
+
+    def test_warm_up_skips_past_the_memory_limit_and_stops_on_errors(self):
+        # The full warm-up runs in the mount test above. Here: the memory cap
+        # (cgroup limit over MemAvailable) and the two early exits.
+        with tempfile.TemporaryDirectory() as d:
+            limit = os.path.join(d, "memory.max")
+            with open(limit, "w", encoding="utf-8") as f:
+                f.write("1024\n")
+            out = io.StringIO()
+            with mock.patch.object(fw, "CGROUP_MEMORY_LIMITS", (limit, )), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(fw._mem_available(), 1024)
+                fw._warm_page_cache([os.path.join(d, "gone")], 2048)
+            self.assertIn("WEIGHTS NOTE not reading", out.getvalue())
+            with open(limit, "w", encoding="utf-8") as f:
+                f.write("max\n")  # no limit: MemAvailable alone
+            with mock.patch.object(fw, "CGROUP_MEMORY_LIMITS", (limit, )):
+                self.assertNotEqual(fw._mem_available(), 1024)
+            out = io.StringIO()
+            with mock.patch.object(fw, "_mem_available", return_value=None), \
+                    contextlib.redirect_stdout(out):
+                fw._warm_page_cache([os.path.join(d, "gone")], 1)
+            self.assertIn("warm-up stopped", out.getvalue())
 
 
 class CliStorageTest(unittest.TestCase):
