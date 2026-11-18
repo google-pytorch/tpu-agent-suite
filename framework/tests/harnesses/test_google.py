@@ -57,6 +57,7 @@ class GoogleHarnessTest(unittest.TestCase):
         ag = harnesses.require("antigravity")
         parent_cid = "conv-parent-999"
         child_cid = "subagent-child-888"
+        grandchild_cid = "subagent-grandchild-777"
         role_cid = "test-descriptor-role-8888"
         parent_run_id = "20260913T120000Z-999999999999"
 
@@ -65,8 +66,8 @@ class GoogleHarnessTest(unittest.TestCase):
             run_id=parent_run_id,
             package=self.PKG,
         )
-        sub_dir = (self.fake_home / ".gemini" / "antigravity-cli" / "brain" /
-                   parent_cid / ".system_generated" / "subagents")
+        brain_root = self.fake_home / ".gemini" / "antigravity-cli" / "brain"
+        sub_dir = brain_root / parent_cid / ".system_generated" / "subagents"
         sub_dir.mkdir(parents=True)
         (sub_dir / f"{child_cid}.json").write_text(
             json.dumps({"subagentDescriptor": {
@@ -78,6 +79,15 @@ class GoogleHarnessTest(unittest.TestCase):
             json.dumps({"subagentDescriptor": {
                 "role": "kernel-reviewer"
             }}),
+            encoding="utf-8",
+        )
+        nested_dir = brain_root / child_cid / ".system_generated" / "subagents"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / f"{grandchild_cid}.json").write_text(
+            json.dumps(
+                {"subagentDescriptor": {
+                    "typeName": "tpu-knowledge-base"
+                }}),
             encoding="utf-8",
         )
 
@@ -98,9 +108,11 @@ class GoogleHarnessTest(unittest.TestCase):
 
             self.assertEqual(run_state.resolve_session_run_id(child_cid),
                              parent_run_id)
+            self.assertEqual(run_state.resolve_session_run_id(grandchild_cid),
+                             parent_run_id)
             ev = events.normalize_inbound_event(
                 raw_payload={
-                    "conversationId": child_cid,
+                    "conversationId": grandchild_cid,
                     "toolCall": {
                         "name": "view_file",
                         "args": {
@@ -113,8 +125,16 @@ class GoogleHarnessTest(unittest.TestCase):
                 package=self.PKG,
                 workspace=self.workspace,
             )
-            self.assertEqual(ev["context"]["session_id"], child_cid)
+            self.assertEqual(ev["context"]["session_id"], grandchild_cid)
             self.assertEqual(ev["context"]["run_id"], parent_run_id)
+
+        with mock.patch.object(ag,
+                               "parent_session_id",
+                               side_effect={
+                                   "a": "b",
+                                   "b": "a"
+                               }.get):
+            self.assertIsNone(run_state.resolve_session_run_id("a"))
 
     def test_complete_subagent_stop(self):
         ag = harnesses.require("antigravity")

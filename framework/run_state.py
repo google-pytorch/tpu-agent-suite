@@ -145,14 +145,23 @@ def record_session_run(
     jsonio.write_json(session_file, session_doc)
 
 
-def _iter_session_ids(session_id: str) -> Iterator[str]:
-    """Yield `session_id`, followed by its parent session ID if it is a subagent."""
-    yield session_id
+def _parent_session_id(session_id: str) -> str | None:
+    """Return the immediate parent session ID across registered harnesses, or None."""
     for name in harnesses.names():
         parent_id = harnesses.HARNESSES[name].parent_session_id(session_id)
         if parent_id and parent_id != session_id:
-            yield parent_id
-            return
+            return parent_id
+    return None
+
+
+def _iter_session_ids(session_id: str) -> Iterator[str]:
+    """Yield `session_id` followed by its ancestor session IDs."""
+    seen: set[str] = set()
+    current: str | None = session_id
+    while current and current not in seen:
+        seen.add(current)
+        yield current
+        current = _parent_session_id(current)
 
 
 def resolve_session_run_id(session_id: str | None = None) -> str | None:
