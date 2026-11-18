@@ -1478,8 +1478,11 @@ def handle_compute_cli(
         for param in get_registered_driver_cli_flags()
         if hasattr(args, param) and getattr(args, param) is not None
     }
-    if getattr(args, "interpreter", None) is not None:
-        param_overrides["python_interpreter"] = args.interpreter
+    interpreter = getattr(args, "interpreter", None)
+    # A shell says how a recipe runs, not which Python the target has: the
+    # profile's stays, and is what a `.sh` recipe gets as its Python.
+    if interpreter is not None and not base.is_shell(interpreter):
+        param_overrides["python_interpreter"] = interpreter
 
     # Two job actions span backends rather than address one: each resolves a
     # driver per job, from the backend its record names.

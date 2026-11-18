@@ -431,10 +431,14 @@ class GkeJobDriver(base.ComputeDriver):
         shell.require_file(recipe_path, "recipe_path")
         recipe = Path(recipe_path)
         name = self._job_name(job_name, unique=False)
-        # By extension. A shell recipe gets Python as TPU_AGENT_SUITE_PYTHON.
+        # By extension. A shell recipe gets Python as TPU_AGENT_SUITE_PYTHON,
+        # never a shell that --interpreter names (`base.recipe_python`).
         python = python_interpreter or self.config.python_interpreter
         shell_recipe = recipe.suffix == ".sh"
         interpreter = "bash" if shell_recipe else python
+        shell_python = base.recipe_python(
+            python_interpreter,
+            self.config.python_interpreter) if shell_recipe else None
 
         inputs, outputs = inputs or [], outputs or []
         clean_bucket = self._clean_bucket(needed=False)
@@ -483,7 +487,7 @@ class GkeJobDriver(base.ComputeDriver):
                 log_url=log_url,
                 serve=serve,
                 placement=placement,
-                shell_python=python if shell_recipe else None,
+                shell_python=shell_python,
                 token_secret=token_expires is not None,
             )
             # JSON, not templated YAML, so odd values can't break the

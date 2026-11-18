@@ -556,6 +556,30 @@ class TestApplyVllmPatch(unittest.TestCase):
         with open(self.quant) as f:
             self.assertIn("GPT_OSS_MXFP4", f.read())
 
+    def test_applier_takes_no_shell_for_its_python(self):
+        """TPU_AGENT_SUITE_PYTHON=bash: the plugin is looked up with python3.
+
+        A recipe submitted with `--interpreter bash` got bash as its Python,
+        and the lookup ran under bash: "not importable", exit 3.
+        """
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        python3 = os.path.join(bin_dir, "python3")
+        with open(python3, "w") as f:
+            f.write(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        os.chmod(python3, 0o755)
+        env = dict(os.environ,
+                   TPU_AGENT_SUITE_PYTHON="bash",
+                   PATH=bin_dir + os.pathsep + os.environ["PATH"])
+        done = subprocess.run(["bash", APPLIER, self.patch],
+                              capture_output=True,
+                              text=True,
+                              env=env,
+                              check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        with open(self.quant) as f:
+            self.assertIn("GPT_OSS_MXFP4", f.read())
+
     def test_missing_plugin_is_reported(self):
         os.environ["PYTHONPATH"] = self.tmp
         site = os.path.join(self.tmp, "site")

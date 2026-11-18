@@ -92,9 +92,13 @@ class LocalDriver(base.ComputeDriver):
         # against the *remote* home -- the same spelling works for both.
         runner = os.path.expanduser(runner)
         if path.suffix == ".sh":
-            # The Python a shell recipe finds its tools beside.
+            # The Python a shell recipe finds its tools beside: never a shell
+            # that --interpreter names.
+            python = os.path.expanduser(
+                base.recipe_python(python_interpreter, self.python_interpreter,
+                                   sys.executable))
             return [
-                "env", f"TPU_AGENT_SUITE_PYTHON={runner}", "bash",
+                "env", f"TPU_AGENT_SUITE_PYTHON={python}", "bash",
                 str(path), *(args or [])
             ]
         return [runner, str(path), *(args or [])]

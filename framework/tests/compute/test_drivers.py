@@ -403,6 +403,23 @@ class TestLocalDriver(ScriptMixin, unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.stderr)
         self.assertIn(f"py={sys.executable}", result.stdout)
 
+    def test_a_shell_interpreter_is_not_a_shell_recipes_python(self):
+        """`--interpreter bash` on a .sh recipe keeps the configured Python.
+
+        It was exported as TPU_AGENT_SUITE_PYTHON, and every script that runs
+        Python with it ran the Python under bash.
+        """
+        script = self._script('echo "py=$TPU_AGENT_SUITE_PYTHON"\n',
+                              suffix=".sh")
+        for shell_name in ("bash", "/bin/sh"):
+            with self.subTest(shell_name):
+                result = self.driver.run(script, python_interpreter=shell_name)
+                self.assertEqual(result.exit_code, 0, result.stderr)
+                self.assertIn(f"py={sys.executable}\n", result.stdout)
+        # A Python it names is still the one the recipe gets.
+        result = self.driver.run(script, python_interpreter="/venv/bin/python")
+        self.assertIn("py=/venv/bin/python\n", result.stdout)
+
     def _await_terminal(self, job_id: str, timeout: float = 5.0):
         """Poll a submitted job until it reaches a terminal state."""
         deadline = time.monotonic() + timeout
@@ -651,6 +668,33 @@ class TestRemoteShellDrivers(ScriptMixin, unittest.TestCase):
                 remote = " ".join(mock_run.call_args.args[0])
                 self.assertIn(f"{venv_python} -c ", remote)
                 self.assertNotIn(" python3 -c ", remote)
+
+    @patch("subprocess.run")
+    def test_a_shell_interpreter_is_not_a_shell_recipes_python(self, mock_run):
+        """`--interpreter bash` on a .sh recipe keeps the configured Python."""
+        recipe = self._script("echo hi\n", suffix=".sh")
+        venv_python = "~/tpu_venv/bin/python3"
+        cases = [
+            # (--interpreter, TPU_AGENT_SUITE_PYTHON)
+            ("bash", venv_python),
+            ("/usr/bin/sh", venv_python),
+            ("/opt/py/bin/python3", "/opt/py/bin/python3"),
+        ]
+        for name, make_driver in _shell_drivers().items():
+            for named, python in cases:
+                with self.subTest(name, interpreter=named):
+                    mock_run.reset_mock()
+                    mock_run.return_value = completed()
+                    driver = make_driver()
+                    driver.python_interpreter = venv_python
+                    driver.submit(recipe, python_interpreter=named)
+                    sent = [
+                        " ".join(str(x) for x in c.args[0])
+                        for c in mock_run.call_args_list
+                    ]
+                    launch = next(s for s in sent if "nohup setsid" in s)
+                    self.assertIn(f"TPU_AGENT_SUITE_PYTHON={python} bash",
+                                  launch)
 
     @patch("subprocess.run")
     def test_run_stages_inputs_and_copies_outputs_back(self, mock_run):

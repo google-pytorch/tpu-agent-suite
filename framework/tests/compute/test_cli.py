@@ -311,6 +311,35 @@ class TestComputeCliContracts(ScriptMixin, unittest.TestCase):
             f"{landing / 'results.json'}", stderr)
         self.assertEqual(stderr.count("warning:"), 1)
 
+    def test_a_shell_interpreter_leaves_the_profiles_python(self):
+        """`--interpreter bash` says how a recipe runs, not which Python.
+
+        It replaced the profile's python_interpreter too, so the driver had no
+        Python left to give a `.sh` recipe as TPU_AGENT_SUITE_PYTHON.
+        """
+        for named, override in (("bash", None), ("/usr/bin/sh", None),
+                                ("/venv/bin/python3", "/venv/bin/python3")):
+            driver = MagicMock()
+            driver.submit.return_value = "job-s"
+            driver.get_status.return_value = AsynchronousExecutionResult(
+                "job-s", "RUNNING")
+            resolve = MagicMock(return_value=driver)
+            with self.subTest(named), temp_home() as tmp, \
+                    patch.object(compute.cli.lease, "spawn_watcher"), \
+                    io.StringIO() as out, contextlib.redirect_stdout(out):
+                recipe = tmp / "eval_recipe.sh"
+                recipe.write_text("echo hi\n")
+                args = self._submit_args(str(recipe),
+                                         interpreter=named,
+                                         run_id=_RUN)
+                self.assertEqual(
+                    compute.handle_compute_cli(args, resolve=resolve), 0)
+                overrides = resolve.call_args.kwargs["param_overrides"]
+                self.assertEqual(overrides.get("python_interpreter"), override)
+                # The recipe still runs under what was named.
+                submitted = driver.submit.call_args.kwargs
+                self.assertEqual(submitted["python_interpreter"], named)
+
     def test_job_artifacts_defaults_to_run_artifact_dir(self):
         """When --out-dir is omitted, artifacts default to {{runs}}/<run_id>/artifacts/<job_id>/."""
         driver = MagicMock()

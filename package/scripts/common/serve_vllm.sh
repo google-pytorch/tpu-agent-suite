@@ -66,8 +66,11 @@ PROFILE_DIR="${VLLM_PROFILE_DIR:-$PWD/artifacts/vllm_profile}"
 FILES_PORT="${VLLM_PROFILE_FILES_PORT:-8790}"
 
 # Resolved, since the default interpreter is a bare `python3`, and with a
-# leading ~ expanded, since Kubernetes passes env values through as is.
+# leading ~ expanded, since Kubernetes passes env values through as is. A
+# shell is not a Python: a runtime that took `--interpreter bash` for one
+# exported it here.
 PY="${TPU_AGENT_SUITE_PYTHON:-python3}"
+case "${PY##*/}" in bash | sh | dash | zsh | ksh) PY=python3 ;; esac
 PY="$(command -v "${PY/#\~/$HOME}" || true)"
 VLLM="$(dirname "$PY")/vllm"
 [ -x "$VLLM" ] || VLLM="$(command -v vllm)"

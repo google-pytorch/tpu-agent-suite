@@ -54,6 +54,27 @@ Path = pathlib.Path
 READY_TIMEOUT_SEC = 30.0
 READY_POLL_SEC = 0.1
 
+# Shells that `--interpreter` may name. A `.sh` recipe runs under bash
+# whatever is named, and gets a Python as TPU_AGENT_SUITE_PYTHON, which the
+# scripts beside it run Python code with: a shell there breaks every one.
+SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
+
+
+def is_shell(interpreter: str | None) -> bool:
+    """Whether `interpreter` names a shell (`bash`, `/bin/sh`), not a Python."""
+    words = (interpreter or "").split()
+    return bool(words) and os.path.basename(words[0]) in SHELLS
+
+
+def recipe_python(*interpreters: str | None) -> str:
+    """The first of `interpreters` that is not a shell, else `python3`.
+
+    A shell recipe's TPU_AGENT_SUITE_PYTHON. `--interpreter bash` says how
+    the recipe runs, which for a `.sh` file is bash anyway, so it leaves the
+    configured Python in place.
+    """
+    return next((i for i in interpreters if i and not is_shell(i)), "python3")
+
 
 class StagedFile:
     """One file carried across the local/target boundary by `run`.
@@ -215,13 +236,14 @@ class ComputeDriver(abc.ABC):
         """Pick the program that executes a recipe, by file extension.
 
         A shell recipe gets the configured Python as `TPU_AGENT_SUITE_PYTHON`, which
-        is how it finds tools installed beside it (e.g. a venv's `vllm`).
+        is how it finds tools installed beside it (e.g. a venv's `vllm`); a
+        shell `--interpreter` names is never that Python (`recipe_python`).
         Unquoted, like the Python runner, so `~` expands on the target.
         """
-        python = python_interpreter or self.python_interpreter or "python3"
         if path.suffix == ".sh":
+            python = recipe_python(python_interpreter, self.python_interpreter)
             return f"TPU_AGENT_SUITE_PYTHON={python} bash"
-        return python
+        return python_interpreter or self.python_interpreter or "python3"
 
     @classmethod
     @abc.abstractmethod

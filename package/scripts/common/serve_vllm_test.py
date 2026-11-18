@@ -204,6 +204,18 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
         self.assertNotIn("--distributed-timeout-seconds", argv)
         self.assertEqual(envs["VLLM_ENGINE_READY_TIMEOUT_S"], "3600")
 
+    def test_a_shell_is_not_taken_for_the_python(self):
+        """TPU_AGENT_SUITE_PYTHON=bash: python3 answers the probes instead.
+
+        A recipe submitted with `--interpreter bash` got bash as its Python.
+        Every `-c` probe then failed, so the server came up without its
+        profiler or its distributed timeout.
+        """
+        path = os.path.dirname(self.python) + os.pathsep + os.environ["PATH"]
+        argv, _, _ = self._serve(TPU_AGENT_SUITE_PYTHON="bash", PATH=path)
+        self.assertIn("--profiler-config", argv)
+        self.assertIn("--distributed-timeout-seconds", argv)
+
     def test_llo_flag_is_appended_to_caller_args(self):
         _, envs, stderr = self._serve(LIBTPU_INIT_ARGS="--xla_foo=1")
         self.assertEqual(envs["LIBTPU_INIT_ARGS"], "--xla_foo=1 " + LLO_ON)

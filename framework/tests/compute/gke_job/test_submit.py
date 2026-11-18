@@ -191,6 +191,34 @@ class TestGkeJobSubmit(unittest.TestCase):
                          1 + gke_job.driver.NAME_SUFFIX_ATTEMPTS)
         self.assertIsNone(fake.find("create"))
 
+    def test_a_shell_recipe_never_gets_a_shell_as_its_python(self):
+        """`--interpreter bash` on a .sh recipe: bash runs it, Python stays.
+
+        bash was exported as TPU_AGENT_SUITE_PYTHON, so apply_vllm_patch.sh
+        ran its Python under bash and found no plugin (exit 3).
+        """
+        recipe = self.tmp / "eval_recipe.sh"
+        recipe.write_text("echo hi\n", encoding="utf-8")
+        cases = [
+            # (--interpreter, TPU_AGENT_SUITE_PYTHON)
+            (None, "python3"),
+            ("bash", "python3"),
+            ("/bin/sh", "python3"),
+            ("/opt/venv/bin/python3", "/opt/venv/bin/python3"),
+        ]
+        for index, (named, python) in enumerate(cases):
+            with self.subTest(interpreter=named):
+                fake = FakeKubectl()
+                with patch.object(subprocess, "run", fake):
+                    make_driver().submit(str(recipe),
+                                         job_name=f"run-{index}",
+                                         python_interpreter=named)
+                container = fake.applied_container()
+                env = {e["name"]: e["value"] for e in container["env"]}
+                self.assertEqual(env["TPU_AGENT_SUITE_PYTHON"], python)
+                self.assertEqual(container["command"][-2:],
+                                 ["bash", "/app/eval_recipe.sh"])
+
     def test_manifest_mounts_the_hf_cache_pvc(self):
         # Without it each pod starts with an empty filesystem and downloads
         # the model again: a 65 GB Qwen took ~50 minutes per pod.
