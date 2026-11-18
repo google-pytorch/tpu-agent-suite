@@ -728,6 +728,41 @@ class TestGkeJobPodRanking(GkeJobLifecycleBase):
         self.assertEqual((result.status, result.details["pod_name"]),
                          ("RUNNING", "job-pod-live"))
 
+    def test_the_latest_run_is_each_indexs_newest_pod(self):
+        """A pod of an earlier run lingers until it is reaped; it is not one.
+
+        By creation, then a pod not being deleted, then a live one; for a
+        multi-host Job, per host.
+        """
+
+        def pod(name, created, index=None, phase="Running", deleting=False):
+            meta = {"name": name, "creationTimestamp": created}
+            if index is not None:
+                meta["labels"] = {
+                    gke_job.gke_common.COMPLETION_INDEX_KEY: str(index)
+                }
+            if deleting:
+                meta["deletionTimestamp"] = created
+            return {"metadata": meta, "status": {"phase": phase}}
+
+        def names(*pods):
+            return sorted(p["metadata"]["name"]
+                          for p in gke_job.status.current_pods(list(pods)))
+
+        early, late = "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"
+        stopped = pod("stopped", early, phase="Failed")
+        self.assertEqual(names(stopped, pod("new", late, phase="Pending")),
+                         ["new"])
+        self.assertEqual(names(pod("new", late), stopped), ["new"])
+        # One second apart at most: a pod being deleted is the older run.
+        self.assertEqual(
+            names(pod("going", late, deleting=True),
+                  pod("new", late, phase="Pending")), ["new"])
+        self.assertEqual(
+            names(pod("h0-old", early, 0, "Failed"), pod("h1", late, 1),
+                  pod("h0", late, 0)), ["h0", "h1"])
+        self.assertEqual(names(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

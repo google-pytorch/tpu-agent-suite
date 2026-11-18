@@ -268,6 +268,30 @@ def pick_live_pod(pods: list[dict[str, Any]]) -> dict[str, Any] | None:
     )
 
 
+def current_pods(pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The pods of the Job's latest run: the newest pod of each index.
+
+    A pod outlives its run until it is reaped: one Kueue preempted, whose
+    Job it restarts with new pods when it readmits it, or one that failed
+    and was replaced. Its log is not the Job's any more.
+    """
+    newest: dict[int | None, dict[str, Any]] = {}
+    for pod in pods:
+        index = pod_index(pod)
+        if index not in newest or _recency(pod) > _recency(newest[index]):
+            newest[index] = pod
+    return list(newest.values())
+
+
+def _recency(pod: dict[str, Any]) -> tuple[float, bool, int]:
+    """Created later, then not being deleted, then Running or Pending."""
+    meta = pod.get("metadata", {})
+    created = parse_time(meta.get("creationTimestamp")) or 0.0
+    phase = pod.get("status", {}).get("phase")
+    live = {"Running": 2, "Pending": 1}.get(phase, 0)
+    return created, not meta.get("deletionTimestamp"), live
+
+
 def _lagging_host(pods: list[dict[str, Any]],
                   hosts: int) -> tuple[int, dict[str, Any] | None] | None:
     """The first of `hosts` indexes with no pod Running (or done), and its pod.

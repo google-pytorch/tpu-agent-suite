@@ -260,6 +260,75 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
                 make_driver(staging_bucket="gs://b").fetch_logs("run-1"),
                 "step_time_ms: 41.7\n")
 
+    @staticmethod
+    def _requeued(new: dict[str, Any], old: dict[str, Any]) -> FakeKubectl:
+        """A Job Kueue preempted and readmitted: `old` lingers beside `new`.
+
+        `kubectl logs job/run-1` reads the old pod, as it did.
+        """
+        old["metadata"]["creationTimestamp"] = "2026-01-01T00:00:00Z"
+        new["metadata"]["creationTimestamp"] = "2026-01-01T01:30:00Z"
+        stopped = "INFO: Application startup complete.\n"
+        return FakeKubectl({
+            "get job": (0, job_json(active=1), ""),
+            "get pods": (0, json.dumps({"items": [old, new]}), ""),
+            "logs pod/run-1-new": (0, "Loading weights\n", ""),
+            "logs pod/run-1-old": (0, stopped, ""),
+            "logs job/run-1": (0, stopped, ""),
+        })
+
+    def test_logs_are_the_latest_runs_after_a_requeue(self):
+        """After a requeue, the new pod's log, not the stopped one's.
+
+        `kubectl logs job/<id>` picked the pod Kueue had stopped, so a wait
+        for the readiness line matched its line a second after the new pod
+        ran, and clients reached a server still loading. A lost node in the
+        earlier run must not make this run's log final either.
+        """
+        new = failed_pod(phase="Running", name="run-1-new")
+        olds = {
+            "stopped":
+            failed_pod(exit_code=143, name="run-1-old"),
+            "its node lost":
+            failed_pod(exit_code=255,
+                       container_reason="ContainerStatusUnknown",
+                       name="run-1-old"),
+        }
+        for label, old in olds.items():
+            with self.subTest(label), job_store():
+                jobs.JobRecord.create(job_id="run-1",
+                                      backend="gke_job",
+                                      serve=True)
+                fake = self._requeued(new, old)
+                with patch.object(subprocess, "run", fake), \
+                        patch.object(shutil, "which", return_value=None), \
+                        patch.object(time, "sleep"):
+                    logs = make_driver().fetch_logs("run-1")
+                self.assertEqual(logs, "Loading weights\n")
+                self.assertIsNone(fake.find("logs job/run-1"))
+                self.assertFalse(
+                    gke_job.log_retrieval.saved_log("run-1").exists())
+
+    def test_a_requeued_job_not_started_again_has_no_log_yet(self):
+        """Readmitted, its new pod not started: nothing, not the old run's.
+
+        Neither the stopped pod's log nor the copy it uploaded on its way
+        out is this run's; kept as the Job's log, it would be read for good.
+        """
+        jobs.JobRecord.create(job_id="run-1", backend="gke_job", serve=True)
+        fake = self._requeued(
+            failed_pod(phase="Pending", node=None, name="run-1-new"),
+            failed_pod(exit_code=143, name="run-1-old"))
+        fake.responses["logs pod/run-1-new"] = (
+            1, "", 'container "workload" in pod "run-1-new" is waiting to '
+            "start: ContainerCreating")
+        with patch.object(subprocess, "run", fake), \
+                patch.object(gcs_staging, "download_file_from_gcs") as download:
+            self.assertEqual(
+                make_driver(staging_bucket="gs://b").fetch_logs("run-1"), "")
+        download.assert_not_called()
+        self.assertFalse(gke_job.log_retrieval.saved_log("run-1").exists())
+
 
 class TestGkeJobArtifacts(GkeJobLifecycleBase):
     """Fetching a Job's artifacts."""
