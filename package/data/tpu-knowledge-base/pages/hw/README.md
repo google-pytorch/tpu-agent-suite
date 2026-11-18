@@ -29,6 +29,12 @@ remains pending. v4 is retained unchanged.
 The v5p and v6e pages also cite GCP's TPU7x comparison table where their own
 specification pages omit a figure.
 
+The v6e and v7x overviews are pinned: each carries a "Roofline inputs" table,
+and `critical_fields` in its header names the rows that must stay stated.
+`pages_test.py` fails a regenerated or edited page that leaves one
+`not stated`, and `kb_summarize` refuses to cache a summary of the
+`cloud-tpu-v6e` or `cloud-tpu-7x` url that does.
+
 | Generation | Replay query |
 |---|---|
 | v5e | [Recipe](v5e/overview.recipe.json) |

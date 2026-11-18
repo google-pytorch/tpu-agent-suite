@@ -383,7 +383,7 @@ class Hardware:
     #: Pooled VMEM per SparseCore -- the working-set denominator that decides whether
     #: an intermediate can be kept off HBM. Every "fused" / "kept in VMEM" claim in
     #: `model/common/` is a comparison against this (REQUIREMENTs.md s Fusion).
-    vmem_bytes: float
+    sparsecore_vmem_bytes: float
     # vLLM's `--gpu-memory-utilization` (that name on TPU too). The KV pool is
     #   cap = hbm_capacity * memory_utilization
     #   kv  = cap - weights - resident_overhead
@@ -1088,10 +1088,13 @@ def _score_note(c, verb: str) -> str:
     mib = c.T * c.Sk * c.n.b("indexer_av") / MiB
     if c.m.indexer_fused_scores:
         return (
-            f"scores fused in VMEM ({c.hw.vmem_bytes / MiB:,.0f} MiB); spilled "
+            f"scores fused in SparseCore VMEM ({c.hw.sparsecore_vmem_bytes / MiB:,.0f} MiB);"
+            f" spilled "
             f"they would be {mib:,.2f} MiB")
-    return (f"scores spill to HBM, {verb} {mib:,.2f} MiB "
-            f"(VMEM is {c.hw.vmem_bytes / MiB:,.0f} MiB); fused this is 0")
+    return (
+        f"scores spill to HBM, {verb} {mib:,.2f} MiB "
+        f"(SparseCore VMEM is {c.hw.sparsecore_vmem_bytes / MiB:,.0f} MiB);"
+        f" fused this is 0")
 
 
 DSA_FLASH = "DSA Indexer: Flash Attention QK+AV"

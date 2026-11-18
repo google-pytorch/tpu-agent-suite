@@ -11,7 +11,13 @@ source_ids:
 - openxla-tiled-layout
 - openxla-sparsecore
 - tpu-info-chips
+- ironwood-performance
+- tpu-system-architecture
+- jax-tpu-info
+- scaling-book-tpus
 generation_recipe: overview.recipe.json
+pinned: true
+critical_fields: [peak_bf16, peak_fp8, hbm_capacity, hbm_bw, ici_bw_per_chip, ici_bw_per_link, ici_links, ici_topology, pod, d2d, tensorcores_per_chip, mxu_min_dim, vmem_per_core, sparsecores_per_chip]
 ---
 
 # TPU v7x (Ironwood) Hardware Overview
@@ -51,7 +57,7 @@ The TPU7x memory architecture is organized into three principal layers:
 
 TPU7x chips form a 3D mesh and 3D torus network topology utilizing direct optical or electrical Inter-Chip Interconnect (ICI) channels [^cloud-tpu-7x].
 
-- **ICI Bandwidth:** Each chip delivers 1200 GBps of bidirectional ICI bandwidth, providing 200 GBps bidirectional bandwidth along each physical axis (X, Y, Z) within a pod [^cloud-tpu-7x].
+- **ICI Bandwidth:** Each chip delivers 1200 GBps of bidirectional ICI bandwidth, over six ICI links of 200 GBps bidirectional each, 400 GBps per axis [^cloud-tpu-7x].
 - **Pod Scale:** A full TPU7x Pod encompasses 9,216 chips [^cloud-tpu-7x].
 - **Datacenter Network (DCN):** Each chip features an independent DCN network bandwidth of 100 Gbps for external communication across hosts and clusters [^cloud-tpu-7x].
 
@@ -91,12 +97,52 @@ All TPU7x deployments operate using full-host, 4-chip virtual machine nodes runn
 - **Infrastructure Environments:** TPU7x is accessible through Google Kubernetes Engine (GKE) and Compute Engine [^cloud-tpu-7x]. It supports GKE "All Capacity mode" reservations, granting access to all reserved capacity without hold-backs, alongside visibility into physical topology, utilization, and health metrics [^cloud-tpu-7x].
 - **Custom Kernel Tuning:** Pallas kernels running on TensorCores must fit instruction-scoped allocations within the 63.9MB VMEM limit; block and tile dimensions must be tailored accordingly using compiler flags (`--xla_tpu_scoped_vmem_limit_kib`) or kernel parameters (`vmem_limit_bytes`) [^cloud-tpu-7x] [^xla-scoped-vmem].
 
+## Roofline inputs
+
+Every field roofline.py's `Hardware` and cost_estimator's `_TpuGenInfo` read,
+and every precision a source states. Values are per chip unless the unit
+says otherwise; frameworks expose each chiplet as a device, so a roofline
+works per TensorCore. The fields in `critical_fields` must stay stated: a
+regeneration of this page that leaves one `not stated` is refused.
+
+| Field | Roofline name | Value | Unit | Source |
+| :--- | :--- | :--- | :--- | :--- |
+| peak_bf16 | peak_bf16 | 2307 | TFLOPs bf16 per chip; 1153.5 per TensorCore (derived) | vendor [^cloud-tpu-7x] |
+| peak_fp8 | peak_fp8 | 4614 | TFLOPs FP8 per chip; 2307 per TensorCore (derived) | vendor [^cloud-tpu-7x] [^ironwood-performance] |
+| peak_int8 | none | not stated | | JAX records it as "Not Available" [^jax-tpu-info] |
+| peak_int4 | none | not stated | | JAX records it as "Not Available" [^jax-tpu-info] |
+| peak_fp4 | none | not stated | | |
+| peak_vpu_bf16 | peak_vpu_bf16 | 1.8e13 | bf16 FLOPs/s per TensorCore (estimate at about 2.2 GHz) | scaling book [^scaling-book-tpus] |
+| peak_vpu_fp32 | peak_vpu_fp32 | 9e12 | fp32 FLOPs/s per TensorCore (estimate at about 2.2 GHz) | scaling book [^scaling-book-tpus] |
+| hbm_capacity | hbm_capacity | 192 | GiB per chip; 96 per chiplet | vendor [^cloud-tpu-7x] [^tpu-info-chips] |
+| hbm_bw | hbm_bw | 7380 | GBps per chip; 3690 per chiplet (derived, assumes an even split) | vendor [^cloud-tpu-7x] |
+| ici_bw_per_chip | none | 1200 | GBps bidirectional per chip; 400 per axis | vendor [^cloud-tpu-7x] |
+| ici_links | none | 6 | ICI links per chip | vendor [^cloud-tpu-7x] |
+| ici_bw_per_link | none | 200 | GBps bidirectional per link | vendor [^cloud-tpu-7x] |
+| ici_bw | ici_bw, link_bw_oneway | 1.0e11 | bytes/s one-way per link, half the 200 GBps bidirectional per link stated in the row above | vendor [^cloud-tpu-7x] |
+| ici_topology | ndim | 3D torus | 3D mesh; slices of 64 or more chips are 4x4x4 cubes in a 3D torus; ndim 3 | vendor [^cloud-tpu-7x] |
+| pod | slice_dims | 9216 | chips per Pod (144 cubes); slices AxBxC with A, B, C multiples of 4 | vendor [^cloud-tpu-7x] |
+| full_axis | full_axis | none | wraparound only on whole 4x4x4 cubes, through the optical switches | scaling book [^scaling-book-tpus] |
+| hop_latency | hop_latency | not stated | | |
+| d2d | d2d | 2 | chiplets per chip, joined by a die-to-die (D2D) interface | vendor [^cloud-tpu-7x] |
+| d2d_bw | d2d_bw | 6.0e11 | bytes/s one-way (derived: the vendor's six times a 1D ICI link, x the 1.0e11 `ici_bw` row) | vendor [^cloud-tpu-7x] |
+| tensorcores_per_chip | none | 2 | TensorCores per chip, 1 per chiplet | vendor [^cloud-tpu-7x] |
+| mxus_per_core | none | 2 | MXUs per TensorCore | JAX [^jax-tpu-info], scaling book [^scaling-book-tpus] |
+| mxu_min_dim | mxu_min_dim | 256 | 256 x 256 multiply-accumulators per MXU | vendor [^tpu-system-architecture] |
+| vmem_per_core | none | 64 | MiB VMEM per TensorCore | vendor [^ironwood-performance]; JAX agrees [^jax-tpu-info] |
+| sparsecore_vmem | sparsecore_vmem_bytes | 8 | MiB per SparseCore (derived: 16 subcores x 512 KiB); not the TensorCore's VMEM, which is the row above | JAX [^jax-tpu-info] |
+| sparsecores_per_chip | none | 4 | SparseCores per chip, 2 per chiplet | vendor [^cloud-tpu-7x] |
+| dcn | none | 100 | Gbps per chip | vendor [^cloud-tpu-7x] |
+
+JAX lists no native int8 or int4 matmul for TPU7x [^jax-tpu-info]; that is
+not a vendor statement, so those rows stay `not stated`.
+
 ## Gaps and Unspecified Specifications
 
 Certain technical specifications for TPU7x are not detailed in the supplied evidence:
 
-- **Physical VMEM and SPMEM Size:** The gross physical SRAM capacity for TensorCore VMEM and the exact per-tile scratchpad memory (SPMEM) capacity for SparseCores are undisclosed [^cloud-tpu-7x] [^xla-scoped-vmem] [^openxla-sparsecore].
-- **Clock Frequencies and Core Microarchitecture:** Operating clock frequencies, the exact physical dimensions and count of MXUs per TensorCore, SparseCore tile counts, and SIMD widths for TPU7x remain unspecified [^cloud-tpu-7x] [^openxla-sparsecore].
+- **SPMEM Size:** The per-tile scratchpad memory (SPMEM) capacity for SparseCores is undisclosed [^cloud-tpu-7x] [^xla-scoped-vmem] [^openxla-sparsecore]. VMEM is 64 MiB per TensorCore [^ironwood-performance].
+- **Clock Frequencies and Core Microarchitecture:** Operating clock frequencies, SparseCore tile counts, and SIMD widths for TPU7x remain unspecified on the vendor page [^cloud-tpu-7x] [^openxla-sparsecore]. MXU dimensions and count are in the roofline table above.
 - **Thermal and Power Envelopes:** Thermal Design Power (TDP), electrical requirements, and physical server chassis form factors are undocumented [^cloud-tpu-7x].
 - **Availability Timeline:** General availability dates, regional cloud availability, and pricing tiers are omitted [^cloud-tpu-7x].
 
@@ -115,6 +161,14 @@ See [the generation-specific memory and buffer reference](memory-buffers.md) for
 [^openxla-tiled-layout]: [OpenXLA tiled layout](https://github.com/openxla/xla/blob/main/docs/tiled_layout.md). compiler-reference. Tiling and padding; not generation-specific physical capacities. URL checked 2026-10-03.
 
 [^openxla-sparsecore]: [OpenXLA SparseCore](https://github.com/openxla/xla/blob/main/docs/sparsecore.md). architecture-reference. SparseCore organization, scratch sizing and embedding stack estimates. URL checked 2026-10-03.
+
+[^ironwood-performance]: [TPU7x (Ironwood) performance optimizations](https://docs.cloud.google.com/tpu/docs/ironwood-performance). specification. FP8 peak and VMEM per TensorCore. URL checked 2026-10-25.
+
+[^tpu-system-architecture]: [Cloud TPU system architecture](https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm). specification. MXU dimensions per generation. URL checked 2026-10-25.
+
+[^jax-tpu-info]: [JAX tpu_info.py](https://github.com/jax-ml/jax/blob/ab54161869a7b637c128f8ebb3ca5114755ca140/jax/_src/tpu_info.py). compiler-reference. Per-TensorCore VMEM, MXU count and dtype support, from JAX's own table; not a vendor spec. URL checked 2026-10-25.
+
+[^scaling-book-tpus]: [How to Think About TPUs](https://jax-ml.github.io/scaling-book/tpus/). secondary-source. One-way ICI per link and VPU throughput estimates. URL checked 2026-10-25.
 
 <!-- sources:generated:end -->
 

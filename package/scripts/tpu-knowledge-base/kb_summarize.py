@@ -192,6 +192,61 @@ PAGE_MARKUP = re.compile(
 MAX_MARKUP_TAGS = 10
 
 
+def critical_fields(row: dict, keyword: str) -> list[str]:
+    """The fields a page for this row must state: the row's, else those the
+    page it would replace declares."""
+    if "critical_fields" in row:
+        return list(row["critical_fields"])
+    kept = cache_file(row, keyword)
+    listed = catalog.front_field(kept.read_text("utf-8"),
+                                 "critical_fields") if kept.is_file() else ""
+    return [
+        f.strip() for f in (listed or "").strip("[]").split(",") if f.strip()
+    ]
+
+
+def unstated(text: str, fields: list[str]) -> list[str]:
+    """The fields no table row in `text` gives a value for.
+
+    A row states a field it names in any cell when its `Value` column
+    (else its second) is neither empty nor `not stated`.
+    """
+    stated: set[str] = set()
+    column = 1
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            column = 1
+            continue
+        cells = [
+            c.strip().strip("`") for c in line.strip().strip("|").split("|")
+        ]
+        lowered = [c.lower() for c in cells]
+        if "value" in lowered:
+            column = lowered.index("value")
+            continue
+        value = cells[column] if column < len(cells) else ""
+        if value.strip("-: ") and not value.lower().startswith("not stated"):
+            stated.update(cells)
+    return [f for f in fields if f not in stated]
+
+
+def asking_for(fields: list[str]) -> str:
+    """The instruction that makes a summary's critical fields checkable."""
+    if not fields:
+        return ""
+    return (" End with a table headed `| Field | Value |`, one row per field, "
+            "each named exactly: " + ", ".join(fields) +
+            ". Write `not stated` where the source is silent.")
+
+
+def refuse_unstated(row: dict, keyword: str, text: str) -> None:
+    """Raise unless `text` states every critical field; nothing is written."""
+    missing = unstated(text, critical_fields(row, keyword))
+    if missing:
+        raise ValueError(f"{row.get('id')}: critical fields not stated "
+                         f"({', '.join(missing)}); the kept page stays.")
+
+
 def cache_file(row: dict, keyword: str) -> pathlib.Path:
     """Where this row's answer to `keyword` lives.
 
@@ -414,6 +469,8 @@ def header(row: dict,
         f"retrieved: {today}",
         f"grounded: {str(grounded).lower()}",
         *([f"run: {run_id}"] if run_id else []),
+        *([f"critical_fields: [{', '.join(critical_fields(row, keyword))}]"]
+          if critical_fields(row, keyword) else []),
         f"generator: {generator}",
         "---",
         "",
@@ -459,7 +516,8 @@ def build(row: dict,
         raise ValueError(f"skipped: no CLI here reads a url headless (only "
                          f"{', '.join(BUILD_HARNESSES)})")
     uri = as_uri(source)
-    prompt = catalog.with_keyword(template, keyword)
+    prompt = catalog.with_keyword(template, keyword) + asking_for(
+        critical_fields(row, keyword))
     body = ask(
         f"{ONLY_THE_PAGE}{AS_DATA}Use this source: {uri}. Answer only from "
         f"it.{github_note(uri)} {prompt}\n"
@@ -469,6 +527,7 @@ def build(row: dict,
     if unread(body):
         raise ValueError(f"the harness could not read {uri}: "
                          f"{body.strip()[:200]}")
+    refuse_unstated(row, keyword, body)
     out = cache_file(row, keyword)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(header(row, keyword, True, run_id, source, template) +
@@ -513,6 +572,7 @@ def keep(row: dict,
     if len(PAGE_MARKUP.findall(text)) >= MAX_MARKUP_TAGS:
         raise ValueError("the summary is page markup, not a summary of the "
                          "page. Summarise it as the instructions ask.")
+    refuse_unstated(row, keyword, text)
     out = cache_file(row, keyword)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".tmp")

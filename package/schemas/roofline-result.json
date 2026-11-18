@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "roofline-result.json",
   "title": "tpu-roofline Result",
   "description": "Output payload of the tpu-roofline agent. Every number it carries is modelled, not measured. The full report stays on disk; this payload carries the summary and the paths.",
   "type": "object",
@@ -8,16 +9,26 @@
     "status",
     "summary"
   ],
+  "status_requires": {
+    "modeled": [
+      "provenance",
+      "results",
+      "artifacts",
+      "hardware"
+    ],
+    "invalid_input": [
+      "missing"
+    ]
+  },
   "properties": {
     "status": {
       "type": "string",
       "enum": [
-        "completed",
-        "needs_input",
+        "modeled",
         "invalid_input",
         "failed"
       ],
-      "description": "'completed': a roofline was computed. 'needs_input': a required choice is missing and is listed in `missing`. 'invalid_input': the request names nothing to model. 'failed': the selftest or a script failed."
+      "description": "'modeled': a roofline was computed. 'invalid_input': the request names nothing to model, or leaves out a required choice; every one is listed in `missing`. 'failed': the selftest or a script failed. The fields each status owes are declared in `status_requires` and enforced by the runtime."
     },
     "summary": {
       "type": "string",
@@ -33,9 +44,98 @@
       "description": "Optional headline numbers, keyed by metric name (for example roofline_ms, bound_by, t_prefill_ms, tpot_ms). Keys are not fixed.",
       "additionalProperties": true
     },
+    "rows": {
+      "type": "array",
+      "description": "One floor per requested row and cell, when the request named `rows`.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operator",
+          "cell",
+          "layer_total_ms",
+          "bound_by"
+        ],
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cell": {
+            "type": "string",
+            "minLength": 1
+          },
+          "layer_total_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "The row's floor over every layer that runs it: per-layer floor x count, summed over layer kinds. Not roofline_data.json's per-layer floor_ms."
+          },
+          "bound_by": {
+            "type": "string",
+            "enum": [
+              "HBM",
+              "MXU",
+              "VPU",
+              "collective"
+            ]
+          }
+        }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accelerator_type",
+        "sources"
+      ],
+      "description": "Where the hardware numbers came from. Per-field sources are in the config's `_provenance` and the report's Inputs table.",
+      "properties": {
+        "accelerator_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The tpu-knowledge-base references cited."
+        },
+        "assumed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Modelling constants no spec page states (hop_latency, d2d_hop_latency, ici_contention, memory_utilization, resident_overhead_gb), each as `field=value` taken from the starting config. Specs are never assumed: a missing one is invalid_input."
+        }
+      }
+    },
+    "unmodelled": {
+      "type": "array",
+      "description": "Model components roofline.py has no op for, so the floor leaves them out and must not be read as complete. Absent when everything is modelled.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "component",
+          "reason"
+        ],
+        "properties": {
+          "component": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "missing": {
       "type": "array",
-      "description": "Inputs required before a roofline can be computed, when status is 'needs_input'.",
+      "description": "Inputs the caller must add before a roofline can be computed, when status is 'invalid_input'.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -55,14 +155,14 @@
     },
     "artifacts": {
       "type": "array",
-      "description": "Paths of the files written: the report, the config, the raw output and the CSV.",
+      "description": "Paths of the files written: the report, the config, the raw output and the CSV, and for Path B and rows-only runs the roofline_data.json that roofline_data.py builds from the CSV.",
       "items": {
         "type": "string"
       }
     },
-    "error_message": {
+    "failure_reason": {
       "type": "string",
-      "description": "Diagnostic message when status is 'failed' or 'invalid_input'."
+      "description": "Diagnostic message when status is 'failed'."
     },
     "run_id": {
       "type": "string",
@@ -71,7 +171,7 @@
   },
   "examples": [
     {
-      "status": "completed",
+      "status": "modeled",
       "summary": "MoE down-projection, 8192 tokens: roofline 1.42 ms, HBM bound. Weight reads are 81% of the bytes.",
       "provenance": "modeled",
       "results": {
@@ -81,10 +181,16 @@
       "artifacts": [
         "~/.tpu-agent-suite/runs/20260914T120000Z-000000000000/artifacts/roofline/moe_down.md"
       ],
+      "hardware": {
+        "accelerator_type": "tpu7x-8",
+        "sources": [
+          "https://docs.cloud.google.com/tpu/docs/tpu7x"
+        ]
+      },
       "run_id": "20260914T120000Z-000000000000"
     },
     {
-      "status": "needs_input",
+      "status": "invalid_input",
       "summary": "Cannot compute the model roofline: the workload is not given.",
       "missing": [
         {
@@ -92,6 +198,39 @@
           "reason": "ISL, OSL, max-num-batched-tokens and decode concurrency set every phase time."
         }
       ],
+      "run_id": "20260914T120000Z-000000000000"
+    },
+    {
+      "status": "modeled",
+      "summary": "MLA QK Rope at decode-b64-p50-90: 0.21 ms, MXU bound; 3 of its 4 GFLOP are contraction padding (D_rope 64 padded to 256).",
+      "provenance": "modeled",
+      "results": {
+        "roofline_ms": 0.31
+      },
+      "rows": [
+        {
+          "operator": "MLA: QK Rope",
+          "cell": "decode-b64-p50-90",
+          "layer_total_ms": 0.21,
+          "bound_by": "MXU"
+        },
+        {
+          "operator": "MLA: Query Down Proj",
+          "cell": "decode-b64-p50-90",
+          "layer_total_ms": 0.1,
+          "bound_by": "HBM"
+        }
+      ],
+      "artifacts": [
+        "~/.tpu-agent-suite/runs/20260914T120000Z-000000000000/artifacts/roofline/qk_rope_rows.md",
+        "~/.tpu-agent-suite/runs/20260914T120000Z-000000000000/artifacts/roofline/roofline_data.json"
+      ],
+      "hardware": {
+        "accelerator_type": "tpu7x-8",
+        "sources": [
+          "https://docs.cloud.google.com/tpu/docs/tpu7x"
+        ]
+      },
       "run_id": "20260914T120000Z-000000000000"
     }
   ]

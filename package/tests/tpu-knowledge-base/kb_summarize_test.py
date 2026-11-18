@@ -514,6 +514,40 @@ class KeepTest(Isolated):
         self.assertEqual(list(out.parent.glob("*.tmp")), [])
 
 
+class CriticalFieldsTest(Isolated):
+    """A spec page is replaced only by one that states every critical field."""
+
+    CRITICAL = {**ROW, "critical_fields": ["peak_bf16", "hbm_bw"]}
+    COMPLETE = ("| Field | Value |\n| --- | --- |\n"
+                "| peak_bf16 | 918 TFLOPs bf16 per chip |\n"
+                "| hbm_bw | 1638 GBps per chip |\n")
+    GAP = COMPLETE.replace("1638 GBps per chip", "not stated")
+
+    def test_a_page_with_a_critical_field_not_stated_is_refused(self):
+        existing = summarize.keep(self.CRITICAL, "k", self.COMPLETE, "")
+        with self.ran(self.GAP), self.assertRaisesRegex(ValueError, "hbm_bw"):
+            summarize.build(self.CRITICAL, "k", ROW["url"], "", None)
+        with self.assertRaisesRegex(ValueError, "hbm_bw"):
+            summarize.keep(self.CRITICAL, "k", self.GAP, "")
+        # The page it would have replaced declares them too.
+        with self.assertRaisesRegex(ValueError, "hbm_bw"):
+            summarize.keep(ROW, "k", self.GAP, "")
+        self.assertIn("1638 GBps", existing.read_text())
+
+    def test_a_rewrite_through_a_bare_row_keeps_the_pin(self):
+        """A row without critical_fields inherits the page's, and writes them back."""
+        summarize.keep(self.CRITICAL, "k", self.COMPLETE, "")
+        summarize.keep(ROW, "k", self.COMPLETE, "")
+        with self.assertRaisesRegex(ValueError, "hbm_bw"):
+            summarize.keep(ROW, "k", self.GAP, "")
+
+    def test_a_complete_page_is_kept(self):
+        with self.ran(self.COMPLETE):
+            out = summarize.build(self.CRITICAL, "k", ROW["url"], "", None)
+        self.assertIn("1638 GBps", out.read_text())
+        self.assertTrue(summarize.keep(self.CRITICAL, "k", self.COMPLETE, ""))
+
+
 class RawUrlTest(unittest.TestCase):
     """Which urls have an exact-text twin for `curl` to read."""
 

@@ -290,14 +290,16 @@ def to_read(row: dict,
     ]
     if run_id:
         keep += ["--run", run_id]
+    instructions = (
+        summarize.AS_DATA + catalog.with_keyword(template, keyword) +
+        summarize.asking_for(summarize.critical_fields(row, keyword)))
     return {
         "source": source,
         "file": file,
         "fetch_error": fetch_error,
         "entry": row.get("id", ""),
         "keyword": keyword,
-        "instructions":
-        summarize.AS_DATA + catalog.with_keyword(template, keyword),
+        "instructions": instructions,
         # `<file>` is where the caller saved its summary; the rest is
         # quoted so the line can be pasted once that is filled in.
         "keep": " ".join(shlex.quote(a) if a != "<file>" else a for a in keep),

@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "tpu-roofline Request",
-  "description": "Input payload for the tpu-roofline agent. The caller states in `prompt` what it needs a hardware floor for: one op, a block of code, or a whole model on a slice. Everything else is optional context. The agent decides the path and returns `needs_input` when a required choice (hardware, sharding, workload) is missing.",
+  "description": "Input payload for the tpu-roofline agent. The caller states in `prompt` what it needs a hardware floor for: one op, a block of code, a whole model on a slice, or only the rows a gap affects at given cells. Everything else is optional context. `tpu` is required: the agent reads that TPU's specs from tpu-knowledge-base. The agent decides the path and returns `invalid_input` listing every required choice (sharding, workload) the request leaves out.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "prompt",
-    "run_id"
+    "run_id",
+    "tpu"
   ],
   "properties": {
     "prompt": {
@@ -17,10 +18,80 @@
       "type": "string",
       "description": "Identifier of the active TPU agent suite run namespace."
     },
+    "tpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accelerator_type",
+        "topology"
+      ],
+      "description": "The TPU to model. Its specs are looked up from accelerator_type, never assumed.",
+      "properties": {
+        "accelerator_type": {
+          "type": "string",
+          "pattern": "^\\S+-\\d+$",
+          "description": "The TPU_ACCELERATOR_TYPE string, generation and chip count, e.g. tpu7x-8 or v6e-8. The generation (tpu7x, v6e) is the knowledge-base key for its specs."
+        },
+        "topology": {
+          "type": "string",
+          "pattern": "^\\d+(x\\d+)*$",
+          "description": "Slice topology, e.g. 2x2x2; sets the config's slice_dims."
+        }
+      }
+    },
     "context": {
       "type": "object",
       "description": "Optional free-form inputs the caller already holds, for example a config path, a source file, a model id, the slice, the sharding or the workload. Keys are not fixed.",
       "additionalProperties": true
+    },
+    "rows": {
+      "type": "array",
+      "description": "Optional operator rows to price, named as roofline.py prints them (e.g. 'MLA: QK Rope'). When given, the result carries a floor per row and cell in `rows`, not a full report.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "cells": {
+      "type": "array",
+      "description": "Optional operating points to price, one per microbenchmark cell, in the shape of a roofline config's `phases` entry. Each becomes one phase; they replace the workload for Path B.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "tokens",
+          "kv_len",
+          "batch"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The cell's name in the caller's plan; results are keyed by it."
+          },
+          "tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Tokens per step."
+          },
+          "kv_len": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Context length each request attends over."
+          },
+          "batch": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Requests in the step."
+          },
+          "mnbt": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "max-num-batched-tokens, which sets the prefill chunking."
+          }
+        }
+      }
     },
     "output_dir": {
       "type": "string",
@@ -30,15 +101,47 @@
   "examples": [
     {
       "prompt": "Roofline of the MoE down-projection of GLM-5.2 at 8K prefill tokens on one v7x chip, fp8 weights.",
-      "run_id": "20260914T120000Z-000000000000"
+      "run_id": "20260914T120000Z-000000000000",
+      "tpu": {
+        "accelerator_type": "tpu7x-4",
+        "topology": "2x2x1"
+      }
     },
     {
       "prompt": "Model the GLM-5.2-FP8 serving roofline on v7x 2x2x2.",
       "run_id": "20260914T120000Z-000000000000",
+      "tpu": {
+        "accelerator_type": "tpu7x-8",
+        "topology": "2x2x2"
+      },
       "context": {
         "sharding": "TP=8, EP on",
         "workload": "ISL 8192, OSL 1024, max-num-batched-tokens 8192, 64 concurrent decodes"
       }
+    },
+    {
+      "prompt": "Floors for the rows around the MLA QK Rope gap, GLM-5.2-FP8 on v7x 2x2x2.",
+      "run_id": "20260914T120000Z-000000000000",
+      "tpu": {
+        "accelerator_type": "tpu7x-8",
+        "topology": "2x2x2"
+      },
+      "context": {
+        "config": "glm-5.2-fp8-8k1k-2x2x2.json"
+      },
+      "rows": [
+        "MLA: QK Rope",
+        "MLA: Query Down Proj"
+      ],
+      "cells": [
+        {
+          "name": "decode-b64-p50-90",
+          "tokens": 64,
+          "kv_len": 9216,
+          "batch": 64,
+          "mnbt": 1024
+        }
+      ]
     }
   ]
 }

@@ -96,6 +96,19 @@ class Isolated(unittest.TestCase):
                                  side_effect=ValueError(reason))
 
 
+class PinnedSpecTest(Isolated):
+
+    def test_a_chip_key_is_served_its_shipped_spec_page_without_a_fetch(self):
+        for key, page in (("tpu7x-8", "hw/v7x/overview.md"),
+                          ("v6e", "hw/v6e/overview.md")):
+            with self.subTest(key=key), self.failing() as ask:
+                found = lookup.route(lookup.catalog.rows(), [key], None)
+                self.assertEqual(found["sources"],
+                                 [str(lookup.catalog.PAGE_DIR / page)])
+                ask.assert_not_called()
+                self.download.assert_not_called()
+
+
 class OneKeyTest(Isolated):
 
     def test_a_small_local_page_is_read_where_it_is(self):

@@ -3,7 +3,7 @@ title: "Profiling a vLLM server on TPU with the phased profiler"
 type: howto
 tags: [vllm, vllm-torchtpu, xprof, profiling, phased-profiler]
 created: 2026-10-09
-updated: 2026-10-12
+updated: 2026-10-29
 sources: 0
 human_reviewed: false
 ---
@@ -51,7 +51,7 @@ PROFILE_DIR=/logs/artifacts/xprof/raw   # local disk; copied to GCS in step 4
 export USE_PHASED_PROFILER=true         # (A) the phased profiler, not the plain torch one
 export PYTHON_TRACER_LEVEL=0            # (I) default 1 floods the trace and drops the TPU timeline
 # (J) when the question is inside a Pallas kernel; see "Kernels" below
-# export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} --xla_xprof_register_llo_debug_info=true"
+# export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} --xla_xprof_register_llo_debug_info=true --xla_xprof_enable_custom_call_tracing=true"
 
 args=(
   --served-model-name "$MODEL_ID"
@@ -76,7 +76,7 @@ read: the worker and the phased runner both take
 | (D)+(E) `profiler` + `torch_profiler_dir` | With (A) set, the server **refuses to start**: `USE_PHASED_PROFILER is set but there is nowhere to write traces`. Without `--profiler-config` at all, vLLM ≥ 0.22 does not register `/start_profile`, so the server cannot be profiled. |
 | (F) `max_iterations` | 0 falls back to 15 steps per phase. 5 is enough to see the steady-state step. |
 | (G) `delay_iterations` | Decode steps skipped before the **decode-heavy** capture only (it becomes `num_decode_steps_to_skip`). The decode-only capture ignores it; move that one with the `*_kv_len_threshold` keys (see Capturing long-context steps). |
-| (J) `LIBTPU_INIT_ARGS=--xla_xprof_register_llo_debug_info=true` | Pallas kernels show as opaque `tpu_custom_call`s: no LLO ops inside them, and the roofline reads `0.0 GFLOP/s`, `bound_by: Unknown`. Optional; see Kernels. |
+| (J) `LIBTPU_INIT_ARGS=--xla_xprof_register_llo_debug_info=true --xla_xprof_enable_custom_call_tracing=true` | Pallas kernels show as opaque `tpu_custom_call`s: no LLO ops inside them, and the roofline reads `0.0 GFLOP/s`, `bound_by: Unknown`. The first flag alone gives static LLO info only; the runtime breakdown needs the second. Optional; see Kernels. |
 | (H) `ignore_frontend` | The API server process gets traced too: more bytes, nothing about the TPU. |
 
 The legacy `additional_config["phased_profiling_dir"]` is rejected at startup.
@@ -212,8 +212,35 @@ default trace shows only as opaque `tpu_custom_call`s. To see inside them,
 set (J) in the server's environment **before it starts**: libtpu reads
 `LIBTPU_INIT_ARGS` once, when it initializes, and a later change has no
 effect. Append to any value the image already sets rather than replacing it.
-Which flags to use, what they cost and how to read the result:
-`index.py get custom-call-profiling` and `index.py get kernel-profiling`.
+
+Two flags, and they are not interchangeable:
+
+| flag | gives | needs |
+| --- | --- | --- |
+| `--xla_xprof_register_llo_debug_info=true` | LLO debug info, opcodes and metadata: static analysis (`xprof get_llo_analysis`, `get_llo_debug_string`) | jax ≥ 0.10.2, libtpu ≥ 0.0.42 |
+| `--xla_xprof_enable_custom_call_tracing=true` | the runtime LLO detail inside each custom call: `Pallas Primitives` and `LLO Ops` lanes in Trace Viewer, an LLO utilization line per core | jax ≥ 0.11.0, libtpu ≥ 0.0.44 (it aborts the backend on 0.0.42) |
+
+With only the first, `get_llo_analysis` can report `"success": true` yet hold
+no LLO data for the kernels: a gemma-4-31B-it capture on tpu7x 2x2x1
+(2026-10-28) showed exactly that for its RPA kernels. Validate a kernel
+capture by checking the kernels in question appear with LLO data, not by
+lane names.
+
+- **Cost:** custom-call tracing grows traces 6–12× and can overflow the trace
+  buffer, dropping HLO begin/end events (`NO_DATA`/`IDLE` in `get_hlo_stats`).
+  Capture few steps; raise `xla_tpu_bundle_instrumentation_options`
+  frequencies only if events drop.
+- **Custom-call tracing never in a measured run:** it instruments every kernel
+  and skews kernel timings, and both flags are in the compile-cache key.
+  `serve_vllm.sh` keeps `--xla_xprof_register_llo_debug_info` on by default and
+  custom-call tracing off; capture with custom-call tracing separately from any
+  run whose timings count. With no custom calls it traces nothing.
+- **Hardware counters** (tpu7x and later): `TpuProfilerConfig`
+  `experimental_options` such as `tpu_enable_periodic_counter_sampling`,
+  passed to the plugin worker's `profile(profiler_kwargs=...)`. vLLM's own
+  `start_profile` accepts only a file-name prefix and rejects `:`/`;`.
+
+More: `index.py get custom-call-profiling` and `index.py get kernel-profiling`.
 
 ## Capturing long-context steps
 
@@ -236,4 +263,6 @@ Read from the installed packages, not from upstream docs:
 `vllm/benchmarks/serve.py` (warmup before `/start_profile`),
 `vllm_torchtpu/worker/tpu_worker.py` (`profiler_config.torch_profiler_dir`).
 Directory layout and trace sizes are from a gemma-4-31B-it campaign on tpu7x
-2x2x1, 2026-10-09.
+2x2x1, 2026-10-09. The Kernels flags, versions and costs are from the OpenXLA
+xprof custom-call profiling doc (index entry `xprof-custom-call`), read
+2026-10-29; the static-only result is from a tpu7x 2x2x1 capture, 2026-10-28.

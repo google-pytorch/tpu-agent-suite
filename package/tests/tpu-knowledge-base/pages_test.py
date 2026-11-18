@@ -34,6 +34,11 @@ _spec = importlib.util.spec_from_file_location(
     "kb_catalog", _PACKAGE / "scripts" / "tpu-knowledge-base" / "catalog.py")
 catalog = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(catalog)
+_spec = importlib.util.spec_from_file_location(
+    "kb_summarize",
+    _PACKAGE / "scripts" / "tpu-knowledge-base" / "kb_summarize.py")
+summarize = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(summarize)
 
 # `preflight_check.discover_playbook_mappings()` on the knowledge base's
 # playbooks, before they moved.
@@ -188,6 +193,16 @@ class HardwarePagesTest(unittest.TestCase):
                     self.assertIn("](http", cited.group(1),
                                   f"{source_id} cites no url")
                 self.assertFalse((_PAGES / f"hw-tpu-{generation}.md").exists())
+
+    def test_pinned_spec_pages_state_every_critical_field(self):
+        for name in ("hw/v6e/overview.md", "hw/v7x/overview.md"):
+            with self.subTest(page=name):
+                text = (_PAGES / name).read_text(encoding="utf-8")
+                front = yaml.safe_load(text.split("---", 2)[1])
+                self.assertIs(front["pinned"], True)
+                self.assertTrue(front["critical_fields"])
+                self.assertEqual(
+                    summarize.unstated(text, front["critical_fields"]), [])
 
 
 if __name__ == "__main__":
