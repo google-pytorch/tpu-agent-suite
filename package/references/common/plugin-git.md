@@ -149,16 +149,7 @@ Return the log text, the diff path and the tags. Read only: nothing changes.
 
 ## `push`
 
-Read `image` and `path` (the checkout's path in the image) from the base record, then:
-
-```bash
-{{runtime}} compute image commit --from <image> --repo <repo> --ref stack --base base \
-  --path <path> --name <name>
-```
-
-It prints one JSON object; its `image`, pinned by digest, is the result's `image`. Return `skipped` with the error code as `reason` when it
-reports `IMAGE_REGISTRY_NOT_CONFIGURED`, `MISSING_TOOL` (no docker or git) or `INVALID_BACKEND`
-(the profile's backend has no image field), or when the runtime has no `image` command. Any other
-error is `failed`.
+Building an image from the stack needs the runtime's `image` command, which this package does
+not have yet. Return `skipped` with `reason: no image command`; the caller keeps the pinned image.
 
 Env and flag overrides are not code: they ride an arm as overrides, never as commits.
