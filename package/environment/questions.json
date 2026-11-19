@@ -321,7 +321,7 @@
     },
     {
       "name": "xprof_interpreter",
-      "prompt": "Optional path to the Python interpreter that runs XProf analysis, when it is not the same environment as the workload (e.g. a venv holding only xprof)",
+      "prompt": "Optional path to the Python interpreter for XProf analysis on the host. Leave blank to use the python3 your harness started with (never python_interpreter, even on local); set it only if xprof lives in a separate environment",
       "type": "string",
       "default": ""
     },

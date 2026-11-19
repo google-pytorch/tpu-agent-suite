@@ -117,16 +117,11 @@ else, read that skill:
 <xprof_interpreter> {{script:tpu-diagnostics/locate_xprof_skill.py}}
 ```
 
-`<xprof_interpreter>` is the interpreter that holds XProf: read
-`xprof_interpreter` from the environment configuration, falling back to
-`python_interpreter` when the compute backend is `local`, and otherwise to the
-`python3` already running you. Any other backend runs the workload elsewhere,
-so its `python_interpreter` is a path on that machine, not this one. Naming
-an interpreter is how a workload environment and an analysis environment are
-kept apart, so prefer a configured one whenever there is one; an environment
-that configures neither is saying it has just the one interpreter, and
-refusing to use it would leave you with none. Run XProf under the same
-interpreter.
+`<xprof_interpreter>` is the top-level `xprof_interpreter` that
+`{{runtime}} config show --json --package {{package_tag}}` prints, if it is
+set; otherwise it is the `python3` already running you, on every backend.
+Never take XProf from `python_interpreter`, even on `local`. Run XProf under
+the same interpreter.
 
 It prints the wheel's `SKILL.md`, the version it belongs to, and the names of
 its references. To read a reference `SKILL.md` links to, run the same command

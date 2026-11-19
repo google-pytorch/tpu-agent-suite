@@ -175,7 +175,7 @@
     },
     "xprof_interpreter": {
       "type": "string",
-      "description": "Path to the Python interpreter that runs XProf analysis, when it differs from python_interpreter. The two XProf distributions share a package directory and raise no pip conflict, so a workload environment can silently carry a version whose CLI takes different arguments and omits tools the agents call. Naming the analysis interpreter separately is what stops analysis from running against whichever one happened to install last. Leave empty when one environment serves both."
+      "description": "Python interpreter for XProf analysis on the host. Empty means the python3 the harness started with (never python_interpreter, even on local); set it only if xprof lives in a separate environment."
     },
     "trajectory": {
       "type": "object",

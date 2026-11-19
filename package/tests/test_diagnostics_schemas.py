@@ -193,6 +193,41 @@ class TestDiagnosticsSchemas(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertIn(f"`{kind}`", text)
 
+    # -- which interpreter runs XProf -----------------------------------------
+
+    def test_xprof_ships_only_in_the_host_requirements(self):
+        """The premise of the interpreter rule below: no workload env gets XProf."""
+        for name in ("package.release.json", "package.experimental.json"):
+            with self.subTest(manifest=name):
+                package = load_package(_PACKAGE_ROOT, manifest=name)
+                agent = {
+                    a["name"]: a
+                    for a in package["agents"]
+                }["tpu-diagnostics"]
+                self.assertIn("xprof", agent.get("host_dependencies", []))
+                self.assertIn("xprof", package["host_dependencies"])
+                self.assertNotIn("xprof", package["tpu_dependencies"])
+
+    def test_xprof_runs_on_the_host_interpreter_not_the_workloads(self):
+        """On `local` the workload interpreter is on this machine but has no XProf.
+
+        Falling back to `python_interpreter` there blocked every profile read
+        in an environment built from the TPU requirements.
+        """
+        text = (_PACKAGE_ROOT /
+                "agents/tpu-diagnostics.md").read_text(encoding="utf-8")
+        rule = re.search(r"`<xprof_interpreter>` is the top-level.*?\n\n",
+                         text, re.DOTALL)
+        self.assertIsNotNone(rule)
+        rule = " ".join(rule.group(0).split())
+        self.assertIn("config show --json --package {{package_tag}}", rule)
+        self.assertIn(
+            "otherwise it is the `python3` already running you, on every "
+            "backend", rule)
+        self.assertIn(
+            "Never take XProf from `python_interpreter`, even on `local`",
+            rule)
+
     # -- the request: prose and programmatic callers alike -------------------
 
     def test_request_accepts_a_prompt_and_run_id_alone(self):

@@ -183,7 +183,7 @@ refuses until you ask to share. The settings:
 Every profile can also set `python_interpreter`, and `xprof_interpreter` is a
 setting of its own:
 - `python_interpreter`: Path to the Python interpreter running workloads on the target (e.g. `~/tpu_venv/bin/python3` on a TPU VM, or `/opt/conda/bin/python` in a container). If omitted, defaults to the target's ambient `python3` (or `sys.executable` for `local`).
-- `xprof_interpreter`: Separate Python interpreter for XProf analysis when it does not share the workload's environment (e.g. a dedicated venv for `xprof`).
+- `xprof_interpreter`: Python interpreter for XProf analysis on the host. Defaults to the python3 your harness started with (never python_interpreter, even on local); set only if xprof lives in a separate environment.
 
 ### Headless installs (CI, containers)
 
@@ -396,7 +396,7 @@ Example answers for a `tpu7x` cluster admitting work through Kueue LocalQueue
 | `kube_context` | *(suggested: current `kubectl` context)* |
 | `priority`, `declared_duration_minutes`, `kubeconfig` | *(blank)* |
 | `staging_bucket` and service-account fields | *(blank unless inputs > 900 KiB or outputs > 1 MiB; see below)* |
-| `python_interpreter`, `xprof_interpreter` | *(blank: image `python3` has `torch_tpu`)* |
+| `python_interpreter` | *(blank: image `python3` has `torch_tpu`)* |
 
 ### Large files on `gke_job`: the staging bucket
 
