@@ -193,6 +193,25 @@ class OnboardingPreflightTest(unittest.TestCase):
                   encoding="utf-8") as f:
             self.assertTrue(f.read().startswith("# flag discovery exited 2"))
 
+    def test_hosts_reach_the_engine_check_and_size_the_shim(self):
+        """Two tpu7x hosts: the check plans for 16 devices on 2 hosts, and
+        the chipless node stands in for one host of 8."""
+        _, calls = self._run("--model",
+                             "org/m",
+                             "--mode",
+                             "inference",
+                             "--devices",
+                             "16",
+                             "--hbm-gb-per-device",
+                             "96",
+                             "--hosts",
+                             "2",
+                             chipless="tpu7x")
+        argv = calls["engine_compatibility_check"]["argv"]
+        self.assertEqual(argv[argv.index("--devices") + 1], "16")
+        self.assertEqual(argv[argv.index("--hosts") + 1], "2")
+        self.assertEqual(calls["engine_compatibility_check"]["devices"], "8")
+
     def test_on_a_cpu_node_torch_tpu_is_told_the_profiles_tpu(self):
         """With the generation compute sets in a --cpu-requests job, the
         self-test runs first, every later step loads the shim, and the probe

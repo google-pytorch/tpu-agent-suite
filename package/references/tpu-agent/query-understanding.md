@@ -9,7 +9,7 @@ delegates:
 Follow this before the first delegation of an ask to {{agent:tpu-model-onboarding}},
 a preflight or compatibility check included, and only then. Later delegations for the same ask
 (measuring serving candidates, relaunching a kept configuration, a follow-up benchmark) reuse the
-confirmed plan and its `accelerator_type` without planning again. It produces one thing: a **plan**
+confirmed plan and its `accelerator_type`, `job_chips` and `job_hosts` without planning again. It produces one thing: a **plan**
 the user confirms, which the onboarding request is built from.
 
 It exists because the expensive mistakes happen before any TPU work does. A
@@ -80,12 +80,15 @@ from `accelerator`, else `details.accelerator_type`, else
 `details.tpu_accelerator`. `unknown`, `tpu`, `none`, an empty value, or no or
 unparseable output (compute not set up) all mean not found, and then which TPU
 is a user question with no default. Do not inspect again for this ask: later
-delegations reuse the plan's `accelerator_type`.
+delegations reuse the plan's `accelerator_type`, `job_chips` and `job_hosts`.
 
-Record only the accelerator in the plan. Onboarding does not inspect: it takes
-the per-chip specs for that accelerator from the knowledge base and the chip
-count from the compute profile. Keep the output: when onboarding asks for the
-chip count (a profile with no topology), answer with its `chips`.
+Record the slice with the accelerator: `job_chips` is `details.job_chips`, else
+the top-level `chips`; `job_hosts` is `details.job_hosts`, else 1. Inspect
+reports the split the backend will actually run (gke_job fits it to the
+nodes), which the profile's params can't: on a multi-host gke_job slice,
+`tpu_chips` is one host's chips. Leave both out when inspect reported no
+chips. Onboarding does not inspect: it takes the per-chip specs for that
+accelerator from the knowledge base and the chips and hosts from these.
 
 When the plan turns on what is installed, read it the same way: `pip show`,
 or a version printed with `python3 -c`. Running the model, building or
@@ -217,6 +220,8 @@ reading of the request:
 - `model.model_id`: the confirmed repository id.
 - `accelerator_type`: the TPU from section 2b, or the user's answer when the
   probe found none. The request is rejected without it.
+- `job_chips` and `job_hosts`: the slice from section 2b, when inspect
+  reported one.
 - `mode`: set only when the user named a deliverable; otherwise omit it, and
   onboarding applies its own default.
 - `run_id`: the session `run_id`.

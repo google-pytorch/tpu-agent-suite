@@ -11,10 +11,12 @@ query the cluster or VM yourself.
    With no page for it, return `needs_input` naming the accelerator. Devices
    per chip comes from tpu-model-onboarding's table, not the page.
 
-3. Take the chips one deployment gets from the active compute profile
-   (`{{runtime}} config show --json --package {{package_tag}}`): `tpu_chips`,
-   else the product of `tpu_topology`. With neither, return `needs_input`
-   asking your caller for the chip count.
+3. Take the chips one deployment gets, and the hosts they span, from the
+   request's `job_chips` and `job_hosts`. Without them, from the active
+   compute profile (`{{runtime}} config show --json --package
+   {{package_tag}}`): the product of `tpu_topology`, else `tpu_chips`, on 1
+   host. With neither, return `needs_input` asking your caller for the chip
+   count.
 
 4. Compute what inspect would report:
    - **Devices, for tensor parallelism**: TP is sized to devices, not chips,

@@ -31,10 +31,24 @@ bandwidth downloading the model weights or compiling XLA graphs.
    tpu-model-onboarding's sizing says (per-chip specs from the knowledge base,
    chips from the compute profile) and does not run `compute inspect`.
    Without both numbers, stop -- TP cannot be sized on unknown hardware.
+   On a slice of several hosts, the check plans for them: it reads the
+   job's own host count (`TPU_NUM_HOSTS`, which compute sets on each host),
+   or `--hosts <N>` when it runs elsewhere: the onboarding request's
+   `job_hosts`, which is `compute inspect`'s.
+   torch_tpu's device-layout lookup is per host (it stops at one host's
+   devices), so without a host count every TP above one host's devices is
+   refused. With it, a TP above one host's devices is planned when it spans
+   whole hosts, and a smaller one when it does not straddle two. vLLM then
+   checks a TP across hosts as serve_vllm.sh's `mp` launch starts it
+   (`nnodes`, `node_rank`, `master_addr`), which rendezvouses the hosts: run
+   the check on the TPU slice itself, where compute starts it on every host,
+   not on a CPU node (`--cpu-requests`), where vLLM rejects that TP as `this
+   job runs on 1`.
 2. **Run Preflight Check via Unified Compute**: Each compute job takes a whole
    TPU node. When onboarding's preflight job already ran this check for this
-   model and these devices in this run, its `<inference_work>/tp_plan.json` is
-   this step's result, and its console output is in that job's log (the
+   model and these devices in this run, on the slice itself when it spans
+   several hosts (preflight-check.md runs it there), its
+   `<inference_work>/tp_plan.json` is this step's result, and its console output is in that job's log (the
    `tail` in its `preflight.json` if it failed): go on to Analyze Output. Otherwise, or to re-plan with another `--tp`, execute the
    preflight check script on the target accelerator environment using
    `{{runtime}} compute run`:

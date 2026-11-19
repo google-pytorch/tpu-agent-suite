@@ -101,9 +101,10 @@ step, not up front.
 The one step you do not run yourself is CUDA unwiring: when preflight reports
 `ONBOARDING_REQUIRED`, the workflow delegates it to {{agent:tpu-unwiring}}.
 
-The request's `accelerator_type` is the TPU this onboarding targets; your
-caller read it with `compute inspect`. Do not run `compute inspect`: size from
-the request, the knowledge base and the compute profile
+The request's `accelerator_type` is the TPU this onboarding targets, and its
+`job_chips` and `job_hosts` the slice; your caller read them with `compute
+inspect`. Do not run `compute inspect`: size from the request, the knowledge
+base and, for what the request leaves out, the compute profile
 (`{{runtime}} config show --json --package {{package_tag}}`, the active
 profile's `backend` and `params`):
 
@@ -121,13 +122,18 @@ profile's `backend` and `params`):
   | v7x (tpu7x) | 2 (one per chiplet) |
 
   An accelerator not in the table: return `needs_input` naming it.
-- **Chips** one deployment gets: the profile's `tpu_chips`, else the product
-  of its `tpu_topology` (`2x2x1` is 4). When it has neither (a TPU VM, local
-  host or pod), return `needs_input` asking your caller for the chip count.
+- **Chips and hosts** one deployment gets: the request's `job_chips` (the
+  whole slice) and `job_hosts`. Without them, the product of the profile's
+  `tpu_topology` (`2x2x1` is 4), else its `tpu_chips`, on 1 host; prefer the
+  topology, since on `gke_job` `tpu_chips` is one host's chips. The check
+  still finds the real host count when it runs on the slice. With neither (a
+  TPU VM, local host or pod), return `needs_input` asking your caller for the
+  chip count.
 - Then, as inspect computes them: HBM per device = HBM per chip / devices per
   chip, and devices = chips x devices per chip. A tpu7x chip is 2 devices of
-  96 GB each, so a 2x2x1 slice (4 chips) has 8 devices. These are the
-  `<JOB_DEVICES>` and `<HBM_GB_PER_DEVICE>` the steps pass on.
+  96 GB each, so a 2x2x1 slice (4 chips) has 8 devices. These and the hosts
+  are the `<JOB_DEVICES>`, `<HBM_GB_PER_DEVICE>` and `<JOB_HOSTS>` the steps
+  pass on.
 
 When the profile names a `tpu_accelerator` that differs from the request's,
 return `needs_input` naming both rather than sizing for either. Compare

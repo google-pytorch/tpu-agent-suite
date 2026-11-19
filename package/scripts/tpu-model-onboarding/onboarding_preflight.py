@@ -23,7 +23,8 @@ compatibility check, so a patch it applied (--vllm-patch) is in place for it.
 
 On a CPU node (a gke_job --cpu-requests job, which sets
 TPU_AGENT_SUITE_CHIPLESS_TPU to the profile's TPU generation), it first has
-chipless_tpu.py tell torch_tpu it has --devices chips of that generation, and
+chipless_tpu.py tell torch_tpu it has one host's devices (--devices /
+--hosts) of that generation, as the node it stands in for has, and
 the probe skips the device; the server's start is then the first use of a
 chip. If that self-test fails, nothing else runs and it exits 75, which
 compute answers by running the job again on a TPU node.
@@ -58,7 +59,8 @@ Usage:
     --output preflight.json:<local> ... \
     -- --model <id> --mode inference \
        [--engine vllm|sglang] [--trust-remote-code] \
-       [--devices <n> --hbm-gb-per-device <gb> [--tp <n>] [--vllm-patch <py>]
+       [--devices <n> --hbm-gb-per-device <gb> [--hosts <n>] [--tp <n>]
+        [--vllm-patch <py>]
         [--points <isl:osl:c,...>]
         [--objective throughput|latency]]
 """
@@ -129,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--devices", type=int)
     parser.add_argument("--hbm-gb-per-device", type=float)
+    # Hosts the devices span; passed to the engine check.
+    parser.add_argument("--hosts", type=int, default=1)
     parser.add_argument("--tp", type=int)
     parser.add_argument("--vllm-patch")
     # Passed to the engine check: the target points the KV check and the
@@ -156,8 +160,10 @@ def main(argv: list[str] | None = None) -> int:
         env["PYTHONPATH"] = os.pathsep.join(
             filter(None, [os.path.abspath(".chipless"),
                           env.get("PYTHONPATH")]))
-        # The device count the plan is for; torch_tpu's layout lookups use it.
-        env["CHIPLESS_TPU_DEVICES"] = str(args.devices or 1)
+        # One host's devices, as the job's node has; torch_tpu's layout
+        # lookups use it.
+        env["CHIPLESS_TPU_DEVICES"] = str(
+            max((args.devices or 1) // max(args.hosts, 1), 1))
         chipless = run_step(
             f"chipless: as {env['CHIPLESS_TPU_DEVICES']} device(s) of "
             f"{env[CHIPLESS_ENV]}, no chip",
@@ -203,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
             check_args += ["--engine", args.engine]
         if args.trust_remote_code:
             check_args += ["--trust-remote-code"]
+        if args.hosts != 1:
+            check_args += ["--hosts", str(args.hosts)]
         if args.tp is not None:
             check_args += ["--tp", str(args.tp)]
         if args.vllm_patch:

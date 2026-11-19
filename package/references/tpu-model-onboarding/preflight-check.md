@@ -112,9 +112,18 @@ before `--`, and skip the gate below. If the CPU node cannot stand in for the
 TPU, compute runs the job on a TPU node itself (`details.cpu_fallback` says
 why).
 
-**Here, when this host has the software.** If this machine's own Python
-already has torch_tpu and vLLM (`python3 -c 'import torch_tpu, vllm'` exits
-0), run the check here instead of as a job, with no node and no queue.
+**Not on a slice of several hosts.** When `<JOB_HOSTS>` is above 1 and this
+onboarding serves on vLLM, run the job on the slice itself: no
+`--cpu-requests` and no `chipless_tpu.py`, and not here (below). vLLM checks a
+TP that spans hosts only from a job on every one of them, as compute starts
+it on a slice; from a CPU node or this machine, the check rejects every such
+TP (`this job runs on 1`). Compute hands back host 0's `tp_plan.json`; every
+host plans the same.
+
+**Here, when this host has the software.** On a single-host slice only: if
+this machine's own Python already has torch_tpu and vLLM (`python3 -c 'import
+torch_tpu, vllm'` exits 0), run the check here instead of as a job, with no
+node and no queue.
 Put the script and every file the job form below names with `--input` in one
 directory under `<artifacts>`, and run it there with the same arguments and
 the TPU generation of the request's `accelerator_type` (`v5e`, `v5p`, `v6e` or
@@ -182,7 +191,8 @@ before `--`:
 and, after `--`, the compatibility check's arguments as the engine
 compatibility check describes them (`engine-compatibility.md`, read beside
 this one): `--engine sglang` when onboarding on SGLang, `--devices <JOB_DEVICES>
---hbm-gb-per-device <HBM_GB_PER_DEVICE>` as Step 0.1 sized them, `--tp <N>`
+--hbm-gb-per-device <HBM_GB_PER_DEVICE>` as Step 0.1 sized them, `--hosts
+<JOB_HOSTS>` (Step 0.1's host count) when it is above 1, `--tp <N>`
 only when the user stated one, `--vllm-patch gpt_oss_mxfp4.py` for a model in
 the patch registry, and always `--points <ISL:OSL:C,...>` (the request's target
 points), which the check needs to check the KV cache at those points, to pick

@@ -192,15 +192,18 @@ class Hardware(NamedTuple):
 
 
 def chips_per_job(params: dict[str, Any]) -> str:
-    """A gke_job profile's chips per Job: `tpu_chips`, else its topology's."""
-    if params.get("tpu_chips"):
-        return str(params["tpu_chips"])
+    """A gke_job profile's chips per Job: its topology's, else `tpu_chips`.
+
+    The topology is the whole slice. `tpu_chips` is chips per pod, which on a
+    slice of several hosts is one host's, so it counts only without one.
+    """
     try:
         return str(
             math.prod(
                 int(d) for d in str(params.get("tpu_topology")).split("x")))
     except ValueError:
-        return "auto"
+        pass
+    return str(params["tpu_chips"]) if params.get("tpu_chips") else "auto"
 
 
 def hardware_key(profile: dict[str, Any],

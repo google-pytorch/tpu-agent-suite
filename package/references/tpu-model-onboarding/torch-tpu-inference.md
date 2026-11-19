@@ -67,9 +67,10 @@ next.
     deployment runs on, and everything below sizes for that TPU. Read the
     active profile's `backend` and `params` with
     `{{runtime}} config show --json --package {{package_tag}}`; do not run
-    `compute inspect`. Work out `<JOB_DEVICES>` and `<HBM_GB_PER_DEVICE>` for
-    Step 0.2 as tpu-model-onboarding's sizing says: per-chip specs from the
-    knowledge base, chips from the profile.
+    `compute inspect`. Work out `<JOB_DEVICES>`, `<JOB_HOSTS>` and
+    `<HBM_GB_PER_DEVICE>` for Step 0.2 as tpu-model-onboarding's sizing says:
+    per-chip specs from the knowledge base, chips and hosts from the
+    request's `job_chips` and `job_hosts`.
 
 -   [ ] **Step 0.1b: Pick the TPU and book its slot (only for a sweep of
     several shapes that Step 5b runs here, on `gke_job` in serving mode;

@@ -14,6 +14,7 @@
 """Tests for the TP/DP plan; they need no vLLM or TPU."""
 
 import contextlib
+import dataclasses
 import importlib
 import io
 import json
@@ -237,6 +238,79 @@ class TestPlanParallelism(unittest.TestCase):
         self.assertEqual(plan["tensor_parallel_size"], 4)
         self.assertEqual(plan["data_parallel_size"], 2)
         self.assertIn("2 replicas use all 8 devices", plan["reason"])
+
+    def test_tp_across_hosts_takes_whole_hosts(self):
+        """The lookup is per host: a TP across hosts asks it for one host."""
+        asked = []
+
+        def lookup(n):
+            asked.append(n)
+            return _layouts({2, 4, 8})(n)
+
+        cases = [
+            # devices, hosts, counts laid out, refused TPs
+            (16, 1, {2, 4, 8}, [1, 16]),  # One host: as before.
+            (16, 2, {2, 4}, [1, 8, 16]),  # No layout for a whole host.
+            # Three hosts of 8: TP 3, 6 and 12 would split a host.
+            (24, 3, {1, 2, 3, 4, 6, 8}, [3, 6, 12]),
+        ]
+        for devices, hosts, counts, refused in cases:
+            with self.subTest(devices=devices, hosts=hosts):
+                rejected = check.topology_rejections(devices, _layouts(counts),
+                                                     hosts)
+                self.assertEqual(sorted(rejected), refused)
+        # Two tpu7x hosts: TP 16 passes, and 16 is never looked up.
+        self.assertEqual(sorted(check.topology_rejections(16, lookup, 2)), [1])
+        self.assertNotIn(16, asked)
+        # No engine ran for a host-layout refusal, so none is blamed.
+        rejected = check.topology_rejections(24, _layouts({1, 2, 4, 8}), 3)
+        plan = check.plan_parallelism(24,
+                                      96.0,
+                                      48,
+                                      12,
+                                      60.0,
+                                      user_tp=12,
+                                      rejected=rejected)
+        self.assertIn("TP 12 spans hosts of 8 devices but not whole hosts",
+                      plan["reason"])
+        self.assertNotIn("rejected TP 12", plan["reason"])
+
+    def test_tp_across_hosts_tells_vllm_its_nodes(self):
+        """Muse-Spark TP 32 on four tpu7x hosts, as serve_vllm.sh's mp."""
+        fields = {"nnodes", "node_rank", "master_addr", "master_port"}
+        env = {
+            "TPU_NUM_HOSTS": "4",
+            "TPU_WORKER_ID": "2",
+            "TPU_HEAD_HOST": "worker-0"
+        }
+        self.assertEqual(
+            check.multinode_engine_args(32, 1, 32, 4, env, fields), {
+                "nnodes": 4,
+                "node_rank": 2,
+                "master_addr": "worker-0",
+                "master_port": 29500
+            })
+        # Within a host or with replicas: vLLM's defaults.
+        self.assertEqual(check.multinode_engine_args(8, 4, 32, 4, env, fields),
+                         {})
+        # The config rendezvouses, so one pod would wait for the others.
+        with self.assertRaisesRegex(ValueError,
+                                    "spans 4 hosts, but this job runs on 1;"):
+            check.multinode_engine_args(32, 1, 32, 4, {}, fields)
+        with self.assertRaisesRegex(ValueError, "this job runs on 1;"):
+            check.multinode_engine_args(32, 1, 32, 4, {"TPU_NUM_HOSTS": "x"},
+                                        fields)
+        with self.assertRaisesRegex(ValueError, "no multi-node nnodes"):
+            check.multinode_engine_args(32, 1, 32, 4, env, fields - {"nnodes"})
+
+    def test_the_jobs_own_host_count_wins(self):
+        """A v6e 2x4 the profile split as one host may run as two pods."""
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(check.resolve_hosts(1, {"TPU_NUM_HOSTS": "2"}), 2)
+            # A CPU node or a single host sets none: the stated count stands.
+            self.assertEqual(check.resolve_hosts(2, {}), 2)
+            self.assertEqual(check.resolve_hosts(None, {}), 1)
+        self.assertIn("this job spans 2 hosts", out.getvalue())
 
     def test_a_lookup_that_returns_nothing_rules_the_tp_out(self):
         rejected = check.topology_rejections(2, lambda n: None
@@ -681,6 +755,64 @@ class TestGcsModel(unittest.TestCase):
             written = json.load(f)
         self.assertIsNone(written["max_num_seqs"])
         self.assertEqual(written["max_num_seqs_other_layouts"], [])
+
+    def test_main_checks_a_tp_across_hosts_as_a_multinode_launch(self):
+        seen = []
+
+        @dataclasses.dataclass
+        class EngineArgs:
+            model: str
+            tensor_parallel_size: int = 1
+            data_parallel_size: int = 1
+            enforce_eager: bool = False
+            nnodes: int = 1
+            node_rank: int = 0
+            master_addr: str = "127.0.0.1"
+            master_port: int = 29501
+
+            def create_engine_config(self):
+                seen.append(dataclasses.asdict(self))
+                mc = unittest.mock.MagicMock()
+                mc.model_arch_config.total_num_attention_heads = 32
+                mc.get_total_num_kv_heads.return_value = 8
+                mc.use_mla = False
+                mc.hf_text_config = types.SimpleNamespace()
+                return types.SimpleNamespace(model_config=mc)
+
+        arg_utils = types.ModuleType("vllm.engine.arg_utils")
+        arg_utils.EngineArgs = EngineArgs
+        modules = {
+            "fetch_weights": self.module,
+            "vllm_torchtpu": types.ModuleType("vllm_torchtpu"),
+            "vllm": types.ModuleType("vllm"),
+            "vllm.engine": types.ModuleType("vllm.engine"),
+            "vllm.engine.arg_utils": arg_utils,
+        }
+        plan = os.path.join(self.tmp, "plan.json")
+        argv = [
+            "check", "--model", "gs://b/m", "--devices", "32", "--hosts", "4",
+            "--hbm-gb-per-device", "96", "--tp", "32", "--plan-json", plan
+        ]
+        env = {
+            "TPU_NUM_HOSTS": "4",
+            "TPU_WORKER_ID": "1",
+            "TPU_HEAD_HOST": "worker-0"
+        }
+        with unittest.mock.patch.dict(sys.modules, modules), \
+                unittest.mock.patch.dict(os.environ, env), \
+                unittest.mock.patch.object(sys, "argv", argv), \
+                unittest.mock.patch.object(check, "find_topology_lookup",
+                                           return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                self.assertRaises(SystemExit) as cm:
+            check.main()
+        self.assertEqual(cm.exception.code, 0, out.getvalue())
+        # TP 1 (the architecture probe) stays on one host; TP 32 spans four.
+        by_tp = {s["tensor_parallel_size"]: s for s in seen}
+        self.assertEqual(by_tp[1]["nnodes"], 1)
+        self.assertEqual((by_tp[32]["nnodes"], by_tp[32]["node_rank"],
+                          by_tp[32]["master_addr"], by_tp[32]["master_port"]),
+                         (4, 1, "worker-0", 29500))
 
     def test_main_fails_clearly_when_the_folder_cannot_be_read(self):
 

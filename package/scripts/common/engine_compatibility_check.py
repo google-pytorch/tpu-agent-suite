@@ -203,7 +203,9 @@ def traffic_points(points):
 
 
 def _format_rejection(engine_label, tp, why):
-    if why.startswith(("vLLM ", "SGLang ", "torch_tpu ")):
+    # Refusals from the host layout ("TP 12 spans hosts ...") say their TP
+    # already; no engine ran for them.
+    if why.startswith(("vLLM ", "SGLang ", "torch_tpu ", "TP ")):
         return why
     return f"{engine_label} rejected TP {tp}: {why}"
 
@@ -409,7 +411,7 @@ class TopologyLookupError(Exception):
     """The topology lookup failed for a reason other than refusing a TP."""
 
 
-def topology_rejections(devices, get_topology):
+def topology_rejections(devices, get_topology, hosts=1):
     """TPs dividing `devices` that the installed torch_tpu cannot lay out.
 
     Each engine asks torch_tpu for the device layout of its own TP group (a
@@ -419,27 +421,126 @@ def topology_rejections(devices, get_topology):
     here keeps the plan to what the installed stack will start, without a
     list of counts kept in this script. Maps each refused TP to why.
 
+    The lookup is per host: its table stops at one host's devices (8 on a
+    tpu7x or v6e host). A TP group across `hosts` hosts takes its layout
+    from the slice instead, so it needs whole hosts, each of which the
+    lookup lays out; a group within a host must not straddle two.
+
     Raises TopologyLookupError when the lookup fails any other way (a changed
     signature, a busy runtime, no TPU visible): that is no evidence against
     any TP, so the caller rules none out rather than all of them.
     """
+    per_host = devices // hosts
+    host_layout = {}
+
+    def lookup_problem(n):
+        """Why torch_tpu cannot lay out `n` devices on one host, or None."""
+        if n not in host_layout:
+            try:
+                layout = get_topology(n)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # The whole message decides; only its first line is reported.
+                why = str(e).splitlines()[0] if str(e) else repr(e)
+                if _NO_LAYOUT not in str(e):
+                    raise TopologyLookupError(
+                        f"{type(e).__name__}: {why}") from e
+                host_layout[n] = why
+            else:
+                host_layout[n] = (None if layout is not None else
+                                  "no layout returned")
+        return host_layout[n]
+
     refused = {}
     for tp in range(1, devices + 1):
         if devices % tp:
             continue
-        try:
-            layout = get_topology(tp)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            # The whole message decides; only its first line is reported.
-            why = str(e).splitlines()[0] if str(e) else repr(e)
-            if _NO_LAYOUT not in str(e):
-                raise TopologyLookupError(f"{type(e).__name__}: {why}") from e
-        else:
-            if layout is not None:
+        if tp > per_host:
+            if tp % per_host:
+                refused[tp] = (f"TP {tp} spans hosts of {per_host} devices "
+                               "but not whole hosts")
                 continue
-            why = "no layout returned"
-        refused[tp] = f"torch_tpu has no device layout for TP {tp} ({why})"
+            why = lookup_problem(per_host)
+            if why is not None:
+                refused[tp] = (f"torch_tpu has no device layout for the "
+                               f"{per_host} devices of each host TP {tp} "
+                               f"spans ({why})")
+            continue
+        if per_host % tp:
+            refused[tp] = (f"TP {tp} groups would straddle hosts of "
+                           f"{per_host} devices")
+            continue
+        why = lookup_problem(tp)
+        if why is not None:
+            refused[tp] = f"torch_tpu has no device layout for TP {tp} ({why})"
     return refused
+
+
+def job_hosts(env):
+    """The hosts this job runs on (TPU_NUM_HOSTS), or None if unset or bad."""
+    try:
+        return int(env.get("TPU_NUM_HOSTS") or 0) or None
+    except ValueError:
+        return None
+
+
+def resolve_hosts(stated, env):
+    """The hosts the check plans for: the job's own, else `stated`, else 1.
+
+    Compute sets TPU_NUM_HOSTS on every host of a job that spans several.
+    The check runs on the slice it plans for, so that count is what a
+    deployment there gets, even where a stated `--hosts` guessed otherwise;
+    a job on one host or a CPU node has none, and `stated` stands.
+    """
+    job = job_hosts(env)
+    if job and stated and job != stated:
+        print(f"  ⚠️ WARNING: --hosts {stated}, but this job spans {job} "
+              f"hosts (TPU_NUM_HOSTS); planning for {job}.")
+    return job or stated or 1
+
+
+# serve_vllm.sh's mp launch passes this as --master-port.
+MULTINODE_MASTER_PORT = 29500
+
+
+def multinode_engine_args(tp, dp, devices, hosts, env, fields):
+    """The EngineArgs that make vLLM check a TP group across hosts, or {}.
+
+    vLLM sizes a TP group on one host unless told the nodes it spans, and
+    then asks torch_tpu for a layout of all `tp` devices, which no host
+    has. With `nnodes` and the rest, as serve_vllm.sh's mp launch passes
+    them, vllm_torchtpu lays out each host's share and the slice instead.
+    Only a single replica spans hosts that way; any other layout is left to
+    vLLM as is.
+
+    Building that config rendezvouses with the other hosts, so the check
+    must run on every host the group spans (compute runs a job on each
+    host of its slice; `env` is this host's TPU_NUM_HOSTS, TPU_WORKER_ID
+    and TPU_HEAD_HOST, which compute sets). Raises ValueError, said as
+    vLLM's rejection of the TP, when this job cannot check it.
+    """
+    per_host = devices // hosts
+    if dp != 1 or tp <= per_host:
+        return {}
+    nodes = tp // per_host
+    running = job_hosts(env) or 1
+    if running != nodes:
+        raise ValueError(
+            f"TP {tp} spans {nodes} hosts, but this job runs on {running}; "
+            "vLLM checks a TP across hosts only from a job on exactly the "
+            "hosts it spans")
+    missing = [
+        name for name in ("nnodes", "node_rank", "master_addr", "master_port")
+        if name not in fields
+    ]
+    if missing:
+        raise ValueError(f"this vLLM has no multi-node {', '.join(missing)}"
+                         f", so it cannot run TP {tp} across hosts")
+    return {
+        "nnodes": nodes,
+        "node_rank": int(env.get("TPU_WORKER_ID") or 0),
+        "master_addr": env.get("TPU_HEAD_HOST") or "127.0.0.1",
+        "master_port": MULTINODE_MASTER_PORT,
+    }
 
 
 def find_topology_lookup(engine="vllm"):
@@ -728,6 +829,13 @@ def main():
                         type=int,
                         required=True,
                         help="TPU devices one deployment gets")
+    parser.add_argument("--hosts",
+                        type=int,
+                        default=None,
+                        help="Hosts those devices span (compute inspect's "
+                        "job_hosts); a TP larger than one host's devices "
+                        "spans whole hosts. Defaults to this job's "
+                        "TPU_NUM_HOSTS, else 1")
     parser.add_argument("--hbm-gb-per-device",
                         type=float,
                         required=True,
@@ -776,6 +884,11 @@ def main():
         print("CRITICAL ERROR: --devices and --hbm-gb-per-device must be "
               "positive. compute inspect did not report the hardware; "
               "check details.hbm_gb_note.")
+        sys.exit(1)
+    args.hosts = resolve_hosts(args.hosts, os.environ)
+    if args.hosts < 1 or args.devices % args.hosts:
+        print(f"CRITICAL ERROR: --hosts ({args.hosts}) must be positive and "
+              f"divide --devices ({args.devices}) evenly.")
         sys.exit(1)
     if args.tp is not None and args.tp < 1:
         print("CRITICAL ERROR: --tp must be at least 1.")
@@ -895,6 +1008,10 @@ def main():
             extra_kwargs = ({
                 "trust_remote_code": True
             } if args.trust_remote_code else {})
+            extra_kwargs.update(
+                multinode_engine_args(
+                    tp, dp, args.devices, args.hosts, os.environ,
+                    getattr(EngineArgs, "__dataclass_fields__", {})))
             cfg = EngineArgs(
                 model=engine_model,
                 tensor_parallel_size=tp,
@@ -921,7 +1038,8 @@ def main():
 
     print("==================================================")
     print(f" PRE-FLIGHT CHECK ({args.engine}): {args.model}")
-    print(f" DEVICES: {args.devices} x {args.hbm_gb_per_device:g} GiB")
+    print(f" DEVICES: {args.devices} x {args.hbm_gb_per_device:g} GiB"
+          f"{f' on {args.hosts} hosts' if args.hosts > 1 else ''}")
     print("==================================================")
 
     print("\n[1/3] Introspecting Architecture and Pallas Kernels...")
@@ -997,7 +1115,8 @@ def main():
               "no TP is ruled out for lack of a device layout.")
     else:
         try:
-            rejected.update(topology_rejections(args.devices, lookup))
+            rejected.update(
+                topology_rejections(args.devices, lookup, args.hosts))
         except TopologyLookupError as e:
             print(f"  ⚠️ WARNING: the topology lookup failed ({e}), so no TP "
                   "is ruled out for lack of a device layout.")

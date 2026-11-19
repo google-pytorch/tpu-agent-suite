@@ -18,7 +18,17 @@
     "accelerator_type": {
       "type": "string",
       "minLength": 1,
-      "description": "The TPU type the onboarding targets: the accelerator label from tpu-agent's one `compute inspect` (`accelerator`, else `details.accelerator_type` or `details.tpu_accelerator`), e.g. tpu7x or tpu-v6e-slice, not the slice shape, which onboarding sizes itself. Onboarding compares generations, so tpu7x and v7x match. Required: when the probe finds none, tpu-agent asks the user rather than guessing from a profile, VM or cluster name."
+      "description": "The TPU type the onboarding targets: the accelerator label from tpu-agent's one `compute inspect` (`accelerator`, else `details.accelerator_type` or `details.tpu_accelerator`), e.g. tpu7x or tpu-v6e-slice, not the slice shape, which `job_chips` and `job_hosts` give. Onboarding compares generations, so tpu7x and v7x match. Required: when the probe finds none, tpu-agent asks the user rather than guessing from a profile, VM or cluster name."
+    },
+    "job_chips": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Chips one deployment gets, the whole slice across every host, from the same `compute inspect`: `details.job_chips`, else the top-level `chips` (one host). Onboarding sizes devices from it instead of the profile, whose `tpu_chips` is one host's on a multi-host gke_job slice. Omit when inspect reported none."
+    },
+    "job_hosts": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Hosts that slice spans, from the same `compute inspect`: `details.job_hosts`, else 1. Onboarding passes it to the engine compatibility check as `--hosts`. Omit with `job_chips`."
     },
     "model": {
       "type": "object",

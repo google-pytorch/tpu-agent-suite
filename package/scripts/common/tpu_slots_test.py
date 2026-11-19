@@ -145,10 +145,17 @@ class TestOpenSlots(SlotCase):
         del no_chips["params"]["tpu_chips"]
         self.assertEqual(tpu_slots.hardware_key(no_chips),
                          f"tpu7x|2x2x1|4|{IMAGE}")
-        self.assertEqual(tpu_slots.hardware_key(_gke(chips=4)),
-                         tpu_slots.hardware_key(no_chips))
-        self.assertNotEqual(tpu_slots.hardware_key(_gke(chips=2)),
-                            tpu_slots.hardware_key(no_chips))
+        # The topology is the whole Job, however it splits into pods.
+        for chips in (4, 2):
+            self.assertEqual(tpu_slots.hardware_key(_gke(chips=chips)),
+                             tpu_slots.hardware_key(no_chips))
+        # A v6e 4x4 is four pods of 4 chips: a 16-chip Job, not a 4-chip one.
+        self.assertEqual(
+            tpu_slots.hardware_key(
+                _gke(accelerator="v6e", topology="4x4", chips=4)),
+            f"v6e|4x4|16|{IMAGE}")
+        no_topology = _gke(topology="", chips=8)
+        self.assertEqual(tpu_slots.chips_per_job(no_topology["params"]), "8")
         self.assertIsNone(tpu_slots.hardware_key(_gke(image="")))
         vm = {"backend": "gce_tpu_vm"}
         self.assertIsNone(
