@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +187,20 @@ def released_skills(repo_root: Path | None = None,
     package.release.json; pass a config's own, from `resolve_manifest`.
     """
     return list(read_manifest(repo_root, manifest)["skills"])
+
+
+def manifest_agents(repo_root: Path | None = None,
+                    manifest: str = RELEASE_MANIFEST,
+                    skills: Sequence[str] | None = None) -> list[str]:
+    """Return the sorted names of agents built by `manifest` (or `skills`)."""
+    from framework.builder import overlays, package_loader
+
+    root = repo_root or find_repo_root()
+    with overlays.stage_package_with_overlays(root / "package") as pkg_dir:
+        composed = package_loader.load_package(pkg_dir,
+                                               skills=skills,
+                                               manifest=manifest)
+    return sorted(a["name"] for a in composed.get("agents", []))
 
 
 def skill_subset(names: Iterable[str], released: Iterable[str]) -> list[str]:

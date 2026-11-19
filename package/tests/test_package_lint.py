@@ -187,5 +187,36 @@ class TpuAgentSuiteOrchestrationInvariantsTest(unittest.TestCase):
             self.assertNotIn(phrase, self.text)
 
 
+class TrainManifestParityTest(unittest.TestCase):
+    """Standalone package.train.json stays in sync with package.release.json."""
+
+    SHARED_KEYS = (
+        "version",
+        "author",
+        "copy",
+        "environment",
+        "hooks",
+        "compatibility_targets",
+    )
+
+    def test_train_manifest_verifies_and_passes_gated_lint(self):
+        verify.verify_package(PACKAGE_DIR, manifest_name="package.train.json")
+        manifest = package_loader.load_package(PACKAGE_DIR,
+                                               manifest="package.train.json")
+        findings = [
+            f for f in lint.run_checks(PACKAGE_DIR, manifest)
+            if f.check in GATED_CHECKS
+        ]
+        self.assertFalse(findings, findings)
+
+    def test_train_manifest_shared_fields_match_release(self):
+        release = jsonio.load_json(PACKAGE_DIR / "package.release.json")
+        train = jsonio.load_json(PACKAGE_DIR / "package.train.json")
+        self.assertNotIn("extends", train)
+        for key in self.SHARED_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(train[key], release[key])
+
+
 if __name__ == "__main__":
     unittest.main()

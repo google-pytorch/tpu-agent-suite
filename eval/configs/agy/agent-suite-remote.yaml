@@ -64,7 +64,7 @@ agents:
 - name: antigravity-cli
   model_name: gemini/gemini-4-argon-high
   env:
-    AGENT_PERSONA: tpu-agent
+    AGENT_PERSONA: ${AGENT_PERSONA:-tpu-agent}
     # Pinned, not relocated: every task.toml collects artifacts from
     # /root/.tpu-agent-suite/runs, and nothing sets HOME, so the home has
     # to resolve there or the harness collects an empty directory and

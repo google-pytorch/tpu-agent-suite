@@ -1,6 +1,6 @@
 ---
 name: tpu-agent-export-trajectory
-description: Save this session's trajectory -- the tpu-agent work and every subagent beneath it -- to the destination the user chose for trajectory sharing.
+description: Save this session's trajectory -- the package skill's work and every subagent beneath it -- to the destination the user chose for trajectory sharing.
 # `trajectory export` uploads to GCS through the runtime. This skill
 # can be built without tpu-agent, so google-cloud-storage is needed here.
 host_dependencies:
@@ -9,7 +9,7 @@ host_dependencies:
 
 # Export this session's trajectory
 
-Saves this session -- the tpu-agent work and every subagent beneath it --
+Saves this session -- the active package skill's work and every subagent beneath it --
 to the sink the user chose. That is either a GCS bucket, or
 Harbor as an alternative sink, which renders the session as a browsable
 trajectory. A Harbor install can additionally be configured to share the
@@ -25,8 +25,12 @@ behaviour when the other is in use.
 Run exactly this, and nothing else:
 
 ```
-{{runtime}} trajectory export --harness {{harness}} --package {{package_tag}} --run-id "<this session's run id>" --note "<the user's words>"
+{{runtime}} trajectory export --harness {{harness}} --package {{package_tag}} --entrypoint "<the package skill that ran in this session>" --run-id "<this session's run id>" --note "<the user's words>"
 ```
+
+`--entrypoint` is the name of the top-level package skill whose work this
+session ran (for example `tpu-agent` or `tpu-training-tuner` -- never
+`tpu-agent-export-trajectory` and never a delegated subagent).
 
 `--run-id` is the value on the `TPU agent suite run namespace:` line in your
 context. Copy it exactly. If your context has no such line, do not run the
@@ -52,7 +56,7 @@ where their session was saved.
 ## If it reports that the session's starting point was not found
 
 The command refuses rather than saving the whole session, because it cannot
-tell which part of the session was tpu-agent's work.
+tell which part of the session was the entrypoint skill's work.
 
 When that happens:
 

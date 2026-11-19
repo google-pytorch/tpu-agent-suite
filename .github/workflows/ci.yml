@@ -87,6 +87,8 @@ jobs:
         run: make verify
       - name: Verify experimental package
         run: make verify-experimental
+      - name: Verify training package
+        run: make verify-train
       # A knowledge base change on a PR must come with a log.md entry.
       - name: Knowledge base log entry
         if: github.event_name == 'pull_request'
@@ -191,7 +193,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r cicd-requirements.txt
       - name: Content lint (annotations)
-        run: python3 framework/compiler.py lint package --output-format github
+        run: |
+          python3 framework/compiler.py lint package --output-format github
+          python3 framework/compiler.py lint package --manifest package.train.json --output-format github
       - name: Publish findings to run summary
         if: always()
         run: |

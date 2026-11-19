@@ -1,4 +1,4 @@
-.PHONY: help build build-experimental verify-experimental dist archives verify validate-kb lint coverage coverage-html coverage-diff test test-all test-framework test-package test-knowledge-base test-scripts test-e2e clean
+.PHONY: help build build-experimental build-train verify-experimental verify-train dist archives verify validate-kb lint coverage coverage-html coverage-diff test test-all test-framework test-package test-knowledge-base test-scripts test-e2e clean
 
 PYTHON ?= python3
 COVERAGE_RC := .coveragerc
@@ -10,6 +10,8 @@ DIFF_COVERAGE_MIN ?= 80
 # optimization skills. Install one of the two packages in a workspace, not both.
 EXPERIMENTAL_MANIFEST := package.experimental.json
 EXPERIMENTAL_NAME := tpu-agent-suite-experimental
+TRAIN_MANIFEST := package.train.json
+TRAIN_NAME := tpu-agent-suite-train
 
 help:
 	@echo "Usage: make <target>"
@@ -17,9 +19,11 @@ help:
 	@echo "Primary targets:"
 	@echo "  build           Build distributions for all target harnesses (dist/)"
 	@echo "  build-experimental  Build $(EXPERIMENTAL_NAME) from $(EXPERIMENTAL_MANIFEST) (dist/)"
+	@echo "  build-train         Build $(TRAIN_NAME) from $(TRAIN_MANIFEST) (dist/)"
 	@echo "  archives        Create standalone .tar.gz release archives (dist/archives/)"
 	@echo "  verify          Gate: manifest, graph, schemas, enforced content checks, knowledge base"
 	@echo "  verify-experimental Gate: the same package checks for $(EXPERIMENTAL_MANIFEST)"
+	@echo "  verify-train        Gate: the same package checks for $(TRAIN_MANIFEST)"
 	@echo "  validate-kb     Knowledge base index/log integrity (KB_BASE=origin/main also requires a log entry for changes since that ref)"
 	@echo "  lint            Report content problems not covered by verify"
 	@echo "  test            Run framework, package and tpu-knowledge-base test suites"
@@ -44,6 +48,9 @@ verify: validate-kb
 verify-experimental:
 	$(PYTHON) framework/compiler.py verify package --manifest $(EXPERIMENTAL_MANIFEST)
 
+verify-train:
+	$(PYTHON) framework/compiler.py verify package --manifest $(TRAIN_MANIFEST)
+
 validate-kb:
 	$(PYTHON) package/data/knowledgebase/scripts/validate_kb.py $(if $(KB_BASE),--base $(KB_BASE),)
 
@@ -58,6 +65,12 @@ build-experimental:
 	$(PYTHON) framework/compiler.py translate package --manifest $(EXPERIMENTAL_MANIFEST) --harness codex --output dist/codex/$(EXPERIMENTAL_NAME)
 	$(PYTHON) framework/compiler.py translate package --manifest $(EXPERIMENTAL_MANIFEST) --harness antigravity --output dist/antigravity/$(EXPERIMENTAL_NAME)
 	$(PYTHON) framework/compiler.py translate package --manifest $(EXPERIMENTAL_MANIFEST) --harness cursor --output dist/cursor/$(EXPERIMENTAL_NAME)
+
+build-train:
+	$(PYTHON) framework/compiler.py translate package --manifest $(TRAIN_MANIFEST) --harness claude-code --output dist/claude-code/$(TRAIN_NAME)
+	$(PYTHON) framework/compiler.py translate package --manifest $(TRAIN_MANIFEST) --harness codex --output dist/codex/$(TRAIN_NAME)
+	$(PYTHON) framework/compiler.py translate package --manifest $(TRAIN_MANIFEST) --harness antigravity --output dist/antigravity/$(TRAIN_NAME)
+	$(PYTHON) framework/compiler.py translate package --manifest $(TRAIN_MANIFEST) --harness cursor --output dist/cursor/$(TRAIN_NAME)
 
 dist: build
 

@@ -42,13 +42,14 @@ from eval.agents.installer_staging import collect_task_environment_answers
 from eval.job_naming import (check_version_drift, load_verifier_versions,
                              resolve_verifier_family, resolve_verifier_info,
                              stamp_job_verifier_provenance)
-from eval.mount_advisor import MountUpdates, SkillMountAdvisor
+from eval.mount_advisor import (DEFAULT_AGENT_PERSONA, MountUpdates,
+                                SkillMountAdvisor)
 from eval.staging import stage_composite_package
 from eval.utils import (RELEASE_MANIFEST, find_repo_root, harness_for_config,
                         installs_at_user_scope, is_control_arm,
-                        package_identity, package_label, package_manifest,
-                        read_harness_pins, released_skills, resolve_manifest,
-                        skill_subset)
+                        manifest_agents, package_identity, package_label,
+                        package_manifest, read_harness_pins, released_skills,
+                        resolve_manifest, skill_subset)
 
 
 @dataclass(frozen=True)
@@ -1853,6 +1854,9 @@ def stage_package_if_needed(config: dict[str, Any],
     }
     compute = collect_task_environment_answers(resolved_agent_env)
     control_arm = is_control_arm(config_path)
+    persona = resolved_agent_env.get("AGENT_PERSONA")
+    if persona is None:
+        persona = os.environ.get("AGENT_PERSONA", DEFAULT_AGENT_PERSONA)
     # A control arm installs nothing, so its PACKAGE_MANIFEST is not read.
     manifest = RELEASE_MANIFEST
     if not control_arm:
@@ -1861,6 +1865,17 @@ def stage_package_if_needed(config: dict[str, Any],
                                         REPO_ROOT)
         except ValueError as exc:
             raise RuntimeError(f"{config_path}: {exc}") from exc
+        if persona and harness in ("claude-code", "antigravity"):
+            available = manifest_agents(REPO_ROOT,
+                                        manifest=manifest,
+                                        skills=skills)
+            if persona not in available:
+                raise RuntimeError(
+                    f"{config_path}: AGENT_PERSONA={persona!r} is not an agent "
+                    f"in {manifest} (available: "
+                    f"{', '.join(available) or '(none)'}). Set "
+                    "AGENT_PERSONA=<name> (or AGENT_PERSONA='' to run without "
+                    "--agent).")
 
     staging_result = stage_composite_package(
         harness,
@@ -1884,6 +1899,7 @@ def stage_package_if_needed(config: dict[str, Any],
         user_scope=installs_at_user_scope(config),
         staged_dist=staging_result.staged_dist,
         answers_file=staging_result.staged_root / "answers.json",
+        agent_persona=persona,
     )
     return advisor.get_updates()
 

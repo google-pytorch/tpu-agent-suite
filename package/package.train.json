@@ -1,0 +1,192 @@
+{
+  "name": "tpu-agent-suite-train",
+  "version": "0.7.0",
+  "display_name": "TPU agent suite train",
+  "description": "Experimental training optimization build of tpu-agent-suite",
+  "author": "Accelerator Agents Team",
+  "skills": [
+    "tpu-training-tuner",
+    "tpu-agent-export-trajectory"
+  ],
+  "copy": [
+    "schemas",
+    "environment",
+    "data/tpu-knowledge-base"
+  ],
+  "workspace_memory": [
+    {
+      "marker": "tpu-knowledge-base",
+      "content": "memory/tpu-knowledge-base.md"
+    }
+  ],
+  "environment": {
+    "questions": "environment/questions.json",
+    "schema": "schemas/environment.json"
+  },
+  "hooks": [
+    {
+      "name": "session-run-init",
+      "event": "SessionStart",
+      "action": "builtin:start-run",
+      "timeout": 30,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Initializes the session run namespace and registers RUN_ID."
+    },
+    {
+      "name": "knowledge-base-cache-sweep",
+      "event": "SessionStart",
+      "action": "script:scripts/tpu-knowledge-base/cache_sweep.py",
+      "timeout": 30,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Deletes cached knowledge-base pages no lookup will serve again, at most once a day.",
+      "action_level": {
+        "effect": "delete",
+        "scope": "host",
+        "approval": "never"
+      }
+    },
+    {
+      "name": "session-end-reap",
+      "event": "SessionEnd",
+      "action": "builtin:reap-jobs",
+      "timeout": 60,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Cancels compute jobs the run left active once the session is over, so an executor that died mid-job does not leave a workload holding chips."
+    },
+    {
+      "name": "validate-delegate-request",
+      "event": "PreToolUse",
+      "matchers": [
+        "delegate"
+      ],
+      "action": "builtin:validate-schema",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Validates subagent request payload against the target agent's accepts schema."
+    },
+    {
+      "name": "validate-subagent-result",
+      "event": "SubagentStop",
+      "action": "builtin:validate-schema",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Validates a subagent result against its produces schema."
+    },
+    {
+      "name": "require-foreground-launch",
+      "event": "PreToolUse",
+      "matchers": [
+        "delegate"
+      ],
+      "action": "builtin:track-background",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Refuses a background delegation from an agent that has no shell: headless, the child's report would never reach it."
+    },
+    {
+      "name": "track-background-work",
+      "event": "PostToolUse",
+      "matchers": [
+        "delegate",
+        "shell"
+      ],
+      "action": "builtin:track-background",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Records each background agent or command an agent launches, so a stop made while that work is still running can be told from a finished one.",
+      "action_level": {
+        "effect": "write",
+        "scope": "session",
+        "approval": "never"
+      }
+    },
+    {
+      "name": "background-ledger-cleanup",
+      "event": "SessionEnd",
+      "action": "builtin:track-background",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Drops the session's record of background launches once the session is over.",
+      "action_level": {
+        "effect": "delete",
+        "scope": "session",
+        "approval": "never"
+      }
+    },
+    {
+      "name": "resume-after-quota",
+      "event": "Stop",
+      "action": "script:scripts/tpu-agent/resume_after_quota.py",
+      "timeout": 90,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Resume a run ended by a transient backend refusal, up to 5 times with a minute between attempts.",
+      "action_level": {
+        "effect": "read",
+        "scope": "session",
+        "approval": "never"
+      }
+    },
+    {
+      "name": "record-active-skill",
+      "event": "PostToolUse",
+      "matchers": [
+        "Skill"
+      ],
+      "action": "builtin:skill-tools",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Records which package skill the main conversation is running, so its tool limit lasts for the rest of the session.",
+      "action_level": {
+        "effect": "write",
+        "scope": "session",
+        "approval": "never"
+      }
+    },
+    {
+      "name": "enforce-skill-tools",
+      "event": "PreToolUse",
+      "action": "builtin:skill-tools",
+      "timeout": 10,
+      "on_failure": "allow",
+      "visibility": "external",
+      "description": "Blocks any main-conversation tool the active skill doesn't allow, so tpu-agent keeps delegating after the first turn. Matches every tool so unknown and new tools are blocked too.",
+      "action_level": {
+        "effect": "read",
+        "scope": "session",
+        "approval": "never"
+      }
+    }
+  ],
+  "compatibility_targets": [
+    {
+      "harness": "claude-code",
+      "name": "claude-code-2.1",
+      "versions": ">=2.1.219,<3.0.0"
+    },
+    {
+      "harness": "codex",
+      "name": "codex-0.147",
+      "versions": ">=0.145.0,<0.160.0"
+    },
+    {
+      "harness": "antigravity",
+      "name": "antigravity-1.0",
+      "versions": ">=1.0.0,<2.0.0"
+    },
+    {
+      "harness": "cursor",
+      "name": "cursor-0.40",
+      "versions": ">=0.40.0,<1.0.0"
+    }
+  ]
+}

@@ -61,7 +61,7 @@ agents:
 - import_path: eval.agents.user_scope:UserScopeAntigravityCli
   model_name: gemini/gemini-4-argon-high
   env:
-    AGENT_PERSONA: tpu-agent
+    AGENT_PERSONA: ${AGENT_PERSONA:-tpu-agent}
     TPU_AGENT_SUITE_HOME: /root/.tpu-agent-suite
     PACKAGE_MANIFEST: ${PACKAGE_MANIFEST:-package.release.json}
     COMPUTE_BACKEND: local

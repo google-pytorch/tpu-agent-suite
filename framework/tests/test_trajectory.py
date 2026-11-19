@@ -516,7 +516,8 @@ class RuntimeCliTest(HomeIsolatedTestCase):
              unittest.mock.patch.object(trajectory.bundle,
                                         "_default_uploader"):
             code, output = self._run("trajectory", "export", "--harness",
-                                     "claude-code", "--workspace",
+                                     "claude-code", "--entrypoint",
+                                     "tpu-agent", "--workspace",
                                      str(self.workspace), "--run-id",
                                      self.RUN_ID, "--bucket", "gs://my-bucket",
                                      "--user-id", "a/tester", "--note",

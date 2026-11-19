@@ -335,8 +335,10 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
                          {"enabled": False})
         self.assertIn("trajectory_bucket", res["removed"][0])
         with contextlib.redirect_stderr(err):
-            rc = runtime.main(
-                ["trajectory", "export", "--harness", "claude-code", *where])
+            rc = runtime.main([
+                "trajectory", "export", "--harness", "claude-code",
+                "--entrypoint", "tpu-agent", *where
+            ])
         self.assertEqual(rc, 1)
         self.assertIn("trajectory sharing is off", err.getvalue())
 

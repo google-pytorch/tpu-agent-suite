@@ -82,11 +82,19 @@ agent-suite arm installs:
 | --- | --- |
 | `package.release.json` (the default) | tpu-agent-suite |
 | `package.experimental.json` | tpu-agent-suite-experimental: the release package plus the vLLM optimization skills (close-gaps, decompose-optimization, workload-microbenchmark, accuracy-check, ...) |
+| `package.train.json` | tpu-agent-suite-train: experimental training optimization build (`tpu-training-tuner` and `tpu-agent-export-trajectory`) |
 
-Export it to run any config with another package; nothing else changes:
+Export it to run any config with another package:
 
 ```bash
 PACKAGE_MANIFEST=package.experimental.json python3 eval/run.py -c claude-code/agent-suite -d <dataset>
+```
+
+Packaged configs default `AGENT_PERSONA` to `tpu-agent` (`--agent tpu-agent`). When running a manifest that omits `tpu-agent` (such as `package.train.json`), also export `AGENT_PERSONA` with the agent to start as (or `AGENT_PERSONA=""` to run without `--agent`; `run.py` fails before staging if `AGENT_PERSONA` is missing from the manifest):
+
+```bash
+PACKAGE_MANIFEST=package.train.json AGENT_PERSONA=tpu-training-tuner \
+  python3 eval/run.py -c claude-code/agent-suite-shared-capacity-remote -s flag_optimization
 ```
 
 A new package needs only its manifest in `package/`, named

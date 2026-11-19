@@ -188,6 +188,10 @@ Both packages are built from the same files in `package/`. `--manifest` selects 
 
 `package.experimental.json` declares `"extends": "package.release.json"`. It takes every field of `package.release.json`, replaces `name`, `display_name` and `description`, and lists only the skills it adds under `add_skills`. A change to `package.release.json`, such as a new hook or a version bump, therefore reaches both packages. Only one level of `extends` is supported.
 
+#### The training package (`tpu-agent-suite-train`)
+
+`package/package.train.json` is a standalone manifest building `tpu-agent-suite-train`, an experimental training optimization package (`tpu-training-tuner` and `tpu-agent-export-trajectory`). Build and verify it with `make build-train` and `make verify-train` (or `--manifest package.train.json`).
+
 ---
 
 ## 3. What CI runs
@@ -196,7 +200,7 @@ Every pull request runs the following checks:
 
 | Gate | Runs | Required? |
 | :--- | :--- | :--- |
-| **Package & unit tests** | `make verify`, `make verify-experimental`, `make validate-kb KB_BASE=origin/<base>`, `make test`, `make test-eval`, `make build`, `compiler.py lint`, `make coverage`, `make coverage-diff` | yes (`coverage-diff` advisory) |
+| **Package & unit tests** | `make verify`, `make verify-experimental`, `make verify-train`, `make validate-kb KB_BASE=origin/<base>`, `make test`, `make test-eval`, `make build`, `compiler.py lint`, `make coverage`, `make coverage-diff` | yes (`coverage-diff` advisory) |
 | **Formatting & denylist** | The `pre-commit` hook set plus `.ci/check_denylist.py` on PR diffs and commit messages | yes |
 | **Dataset naming** | Eval dataset and task folder naming (`^[a-z0-9-]+$`) | yes, when `eval/**` changes |
 | **Code owners** | Code-owner approval on protected onboarding, framework, documentation, and infrastructure paths | yes |

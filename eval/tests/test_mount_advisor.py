@@ -13,11 +13,14 @@
 # limitations under the License.
 """Tests for SkillMountAdvisor (eval/mount_advisor.py)."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from eval.mount_advisor import SkillMountAdvisor
+from eval.utils import manifest_agents
 
 
 class TestSkillMountAdvisor(unittest.TestCase):
@@ -263,6 +266,38 @@ class TestSkillMountAdvisor(unittest.TestCase):
         )
         with self.assertRaises(FileNotFoundError):
             advisor.get_mounts()
+
+    def test_agent_persona_override_and_empty_suppression(self) -> None:
+        """AGENT_PERSONA can be overridden or set empty to run without --agent."""
+        for harness in ("claude-code", "antigravity"):
+            with self.subTest(harness=harness):
+                with mock.patch.dict(os.environ,
+                                     {"AGENT_PERSONA": "tpu-training-tuner"}):
+                    env = SkillMountAdvisor(
+                        staged_workspace=self.staged_ws,
+                        harness=harness,
+                        central_pkg_dir=self.central_dir,
+                    ).get_container_env()
+                self.assertEqual(env.get("AGENT_PERSONA"),
+                                 "tpu-training-tuner")
+
+                with mock.patch.dict(os.environ, {"AGENT_PERSONA": ""}):
+                    env_empty = SkillMountAdvisor(
+                        staged_workspace=self.staged_ws,
+                        harness=harness,
+                        central_pkg_dir=self.central_dir,
+                    ).get_container_env()
+                self.assertNotIn("AGENT_PERSONA", env_empty)
+
+    def test_manifest_agents_distinguishes_release_and_train(self) -> None:
+        release_agents = manifest_agents(manifest="package.release.json")
+        train_agents = manifest_agents(manifest="package.train.json")
+        self.assertIn("tpu-agent", release_agents)
+        self.assertNotIn("tpu-agent", train_agents)
+        self.assertEqual(
+            train_agents,
+            ["tpu-diagnostics", "tpu-knowledge-base", "tpu-training-tuner"],
+        )
 
 
 if __name__ == "__main__":

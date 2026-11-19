@@ -134,6 +134,9 @@ def handle_trajectory_cli(args: argparse.Namespace) -> int:
     """Run `trajectory export`."""
     if not trajectory.supported(args.harness):
         raise TpuAgentSuiteError(trajectory.unsupported_message(args.harness))
+    entrypoint = (args.entrypoint or "").strip()
+    if not entrypoint:
+        raise TpuAgentSuiteError("--entrypoint must be a non-empty skill name")
 
     workspace = events.resolve_workspace_root(args.workspace)
     package = args.package or ""
@@ -164,7 +167,7 @@ def handle_trajectory_cli(args: argparse.Namespace) -> int:
             raise TpuAgentSuiteError(
                 f"trajectory destination is 'harbor' but {missing}.")
         bundle = trajectory.resolve_for_export(args.harness, session_id,
-                                               args.entrypoint,
+                                               entrypoint,
                                                args.include_full_session)
         staging = pathlib.Path(
             tempfile.mkdtemp(prefix="tpu-agent-suite-harbor-"))
@@ -198,7 +201,7 @@ def handle_trajectory_cli(args: argparse.Namespace) -> int:
         session_id=session_id,
         run_root=run_root,
         run_id=run_id,
-        entrypoint=args.entrypoint,
+        entrypoint=entrypoint,
         message=args.note,
         bucket=bucket,
         user_id=user_id,
@@ -390,7 +393,7 @@ def build_runtime_parser() -> argparse.ArgumentParser:
         help="Optional note from the user, stored in the manifest")
     p_export.add_argument(
         "--entrypoint",
-        default="tpu-agent",
+        required=True,
         help="Entrypoint skill whose activation starts the bundle")
     p_export.add_argument("--session-id", default="", help="Session to export")
     p_export.add_argument(

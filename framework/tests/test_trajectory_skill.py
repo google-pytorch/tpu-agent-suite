@@ -20,6 +20,7 @@ instruction document.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import pathlib
@@ -95,8 +96,16 @@ class ShippedPackageTest(unittest.TestCase):
                 "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("{{runtime}} trajectory export", body)
         self.assertIn("--harness {{harness}}", body)
+        self.assertIn("--entrypoint", body)
         # The consent flag must never be presented as something to add freely.
         self.assertIn("Never add `--all` on your own initiative", body)
+
+    def test_entrypoint_is_required_by_cli(self) -> None:
+        parser = runtime.build_runtime_parser()
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(
+                    ["trajectory", "export", "--harness", "claude-code"])
 
     def test_sharing_is_declined_by_default(self) -> None:
         """One gate gets the whole feature, and it defaults to off."""
@@ -189,7 +198,7 @@ class ShippedFrameworkTest(unittest.TestCase):
         """The hooks run framework/runtime.py by path, from any directory."""
         result = self._run([
             str(self.package / "framework" / "runtime.py"), "trajectory",
-            "export", "--harness", "codex"
+            "export", "--harness", "codex", "--entrypoint", "tpu-agent"
         ], self.elsewhere)
         self.assertEqual(result.returncode, 1)
         self.assertIn("not supported", result.stderr)

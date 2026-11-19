@@ -2551,6 +2551,53 @@ class TestWholePackage(unittest.TestCase):
                 stage_package_if_needed(cfg, Path("/tmp/agent-suite.yaml"))
             mock_stage.assert_not_called()
 
+    def test_stage_package_if_needed_refuses_missing_agent_persona(
+            self) -> None:
+        # Forgetting AGENT_PERSONA with package.train.json fails fast before
+        # staging or launching containers, naming the available agents.
+        cfg = {
+            "agents": [{
+                "name": "claude-code",
+                "env": {
+                    "PACKAGE_MANIFEST":
+                    "${PACKAGE_MANIFEST:-package.release.json}"
+                },
+            }],
+        }
+        with patch.object(_RUN_MOD, "stage_composite_package") as mock_stage:
+            with patch.dict(os.environ,
+                            {"PACKAGE_MANIFEST": "package.train.json"}):
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "AGENT_PERSONA='tpu-agent'.*tpu-training-tuner"):
+                    stage_package_if_needed(cfg, Path("/tmp/agent-suite.yaml"))
+            mock_stage.assert_not_called()
+
+            mock_stage.return_value = StagingResult(
+                staged_root=Path("/tmp/staged_root"),
+                staged_workspace=Path("/tmp/staged_root/workspace"),
+                staged_dist=Path("/tmp/staged_root/claude-code/pkg"),
+                central_pkg_dir=Path("/tmp/central"),
+                is_empty=False,
+            )
+            with patch.dict(
+                    os.environ, {
+                        "PACKAGE_MANIFEST": "package.train.json",
+                        "AGENT_PERSONA": "tpu-training-tuner",
+                    }):
+                updates = stage_package_if_needed(
+                    cfg, Path("/tmp/agent-suite.yaml"))
+            self.assertEqual(updates.env.get("AGENT_PERSONA"),
+                             "tpu-training-tuner")
+
+            with patch.dict(os.environ, {
+                    "PACKAGE_MANIFEST": "package.train.json",
+                    "AGENT_PERSONA": "",
+            }):
+                updates_empty = stage_package_if_needed(
+                    cfg, Path("/tmp/agent-suite.yaml"))
+            self.assertNotIn("AGENT_PERSONA", updates_empty.env)
+
     def test_stage_package_if_needed_control_arm_ignores_the_manifest(
             self) -> None:
         # A control arm installs nothing, so a bad value must not stop it.

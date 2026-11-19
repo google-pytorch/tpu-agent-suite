@@ -19,11 +19,14 @@ from a staged composite workspace, dynamically injecting them into Harbor config
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from eval.utils import USER_SCOPE_ANSWERS, USER_SCOPE_DIST, find_repo_root
+
+DEFAULT_AGENT_PERSONA = "tpu-agent"
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,7 @@ class SkillMountAdvisor:
         user_scope: bool = False,
         staged_dist: Path | str | None = None,
         answers_file: Path | str | None = None,
+        agent_persona: str | None = None,
     ) -> None:
         self.staged_workspace = Path(
             staged_workspace) if staged_workspace else None
@@ -76,6 +80,9 @@ class SkillMountAdvisor:
         self.user_scope = user_scope
         self.staged_dist = Path(staged_dist) if staged_dist else None
         self.answers_file = Path(answers_file) if answers_file else None
+        self.agent_persona = (os.environ.get("AGENT_PERSONA",
+                                             DEFAULT_AGENT_PERSONA)
+                              if agent_persona is None else agent_persona)
         # A user-scope arm runs the installer inside the trial, so it gets
         # what the installer reads rather than what it would have written.
         self.mounts_staged_install = not is_empty and not user_scope
@@ -237,15 +244,15 @@ class SkillMountAdvisor:
         env: dict[str, str] = {}
         if self.harness == "claude-code":
             env["BASH_ENV"] = "/usr/local/bin/claude_session_supervisor_hook.sh"
-            if not self.is_empty:
-                env["AGENT_PERSONA"] = "tpu-agent"
+            if not self.is_empty and self.agent_persona:
+                env["AGENT_PERSONA"] = self.agent_persona
         elif self.harness == "antigravity":
             env["BASH_ENV"] = "/usr/local/bin/session_supervisor_hook.sh"
             # The CLI is pinned (.ci/pins.conf, installed by the eval adapter);
             # a self-update mid-trial would replace it with the latest one.
             env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
-            if not self.is_empty:
-                env["AGENT_PERSONA"] = "tpu-agent"
+            if not self.is_empty and self.agent_persona:
+                env["AGENT_PERSONA"] = self.agent_persona
         return env
 
     def get_updates(self) -> MountUpdates:
