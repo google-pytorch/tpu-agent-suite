@@ -35,6 +35,10 @@ PACKAGES_DIRNAME = "packages"
 RUNS_DIRNAME = "runs"
 SESSIONS_DIRNAME = "sessions"
 STUDIES_DIRNAME = "studies"
+# The Hillclimber's protected store and, inside it, where the jobs it submits
+# live. Its other contents are `framework.hc.paths`'s concern.
+CAMPAIGNS_DIRNAME = "campaigns"
+SEALED_JOBS_DIRNAME = "sealed_jobs"
 CENTRAL_PACKAGES_PREFIX = f"{TPU_AGENT_SUITE_DIRNAME}/{PACKAGES_DIRNAME}"
 # Per-install config files in .tpu-agent-suite/ (at most one package per
 # workspace or user scope).
@@ -47,7 +51,10 @@ VERIFICATION_FILE = "verification.json"
 # Runtime code uses get_tpu_agent_suite_home() instead so $TPU_AGENT_SUITE_HOME
 # works.
 TPU_AGENT_SUITE_HOME_SPELLING = f"~/{TPU_AGENT_SUITE_DIRNAME}"
+PACKAGES_HOME_SPELLING = f"{TPU_AGENT_SUITE_HOME_SPELLING}/{PACKAGES_DIRNAME}"
 RUNS_HOME_SPELLING = f"{TPU_AGENT_SUITE_HOME_SPELLING}/{RUNS_DIRNAME}"
+CAMPAIGNS_HOME_SPELLING = (
+    f"{TPU_AGENT_SUITE_HOME_SPELLING}/{CAMPAIGNS_DIRNAME}")
 
 # The workspace file naming its active run (see record_active_run).
 ACTIVE_RUN_FILE = "current_run_id"
@@ -197,6 +204,20 @@ def get_study_root(study_id: str) -> Path:
     """Return the directory for `study_id` (~/.tpu-agent-suite/studies/<study_id>/)."""
     utils.validate_study_id(study_id)
     return get_studies_root() / study_id
+
+
+def get_campaigns_root() -> Path:
+    """Return the Hillclimber's protected store (~/.tpu-agent-suite/campaigns/).
+
+    Harness sandboxes deny agents this directory. What is inside it is laid
+    out by `framework.hc.paths`; `compute` needs only the sealed-jobs root.
+    """
+    return get_tpu_agent_suite_home() / CAMPAIGNS_DIRNAME
+
+
+def get_sealed_jobs_root() -> Path:
+    """Return where jobs hc.py submits live (~/.tpu-agent-suite/campaigns/sealed_jobs/)."""
+    return get_campaigns_root() / SEALED_JOBS_DIRNAME
 
 
 def central_prefix_for(package: str, version: str = "") -> str:

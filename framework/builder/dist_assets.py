@@ -367,6 +367,15 @@ def harness_install_specs(
                     "env": dict(harness_rules.CLAUDE_CODE_SETTINGS_ENV),
                     "approved_directories":
                     [paths.TPU_AGENT_SUITE_HOME_SPELLING],
+                    "permissions": {
+                        "deny": [
+                            f"Read({paths.CAMPAIGNS_HOME_SPELLING}/**)",
+                            f"Write({paths.CAMPAIGNS_HOME_SPELLING}/**)",
+                            f"Edit({paths.CAMPAIGNS_HOME_SPELLING}/**)",
+                            f"Write({paths.PACKAGES_HOME_SPELLING}/**)",
+                            f"Edit({paths.PACKAGES_HOME_SPELLING}/**)",
+                        ],
+                    },
                 },
             }],
             "toml_sets": [],

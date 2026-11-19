@@ -76,7 +76,7 @@ def recorded_status(job_id: str) -> base.AsynchronousExecutionResult | None:
 
 
 def _last_seen_path(job_id: str) -> Path:
-    return jobs.jobs_dir() / job_id / "last_seen.json"
+    return jobs.job_directory(job_id) / "last_seen.json"
 
 
 def note_last_seen(job_id: str,

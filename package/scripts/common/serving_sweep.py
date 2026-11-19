@@ -137,6 +137,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -204,6 +205,57 @@ def utc_now() -> str:
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_atomic(path, json.dumps(data, indent=1) + "\n")
+
+
+def mirror_file(out: Path, mirror: Path | None, source: Path) -> None:
+    """Copy `source`, a file under `out`, to the same relative path under `mirror`.
+
+    `--mirror-dir` exists for sweeps whose `--out-dir` is somewhere the agent
+    cannot read (the Hillclimber's protected campaign storage): the sweep's
+    plan, status, result and per-point summaries are duplicated into a
+    directory the agent can read, so it can follow progress. The copy is
+    best effort -- a failure is reported on stderr and never fails the
+    sweep, since `out` keeps the authoritative files -- and a no-op when
+    `mirror` is unset or is `out` itself.
+
+    The mirror is the agent's directory and this process is not sandboxed,
+    so nothing under it is followed: a symlink at any level of the relative
+    path, or a destination that resolves outside the mirror, is refused
+    rather than written through. Bytes are copied as they are.
+    """
+    if mirror is None or not source.is_file():
+        return
+    try:
+        if mirror.is_symlink():
+            raise OSError(f"{mirror} is a symlink")
+        mirror.mkdir(parents=True, exist_ok=True)
+        mirror_root = mirror.resolve()
+        if mirror_root == out.resolve():
+            return
+        rel = source.relative_to(out)
+        parent = mirror_root
+        for part in rel.parts[:-1]:
+            parent = parent / part
+            if parent.is_symlink():
+                raise OSError(f"{parent} is a symlink")
+            parent.mkdir(exist_ok=True)
+        dest = parent / rel.name
+        if dest.is_symlink():
+            raise OSError(f"{dest} is a symlink")
+        if not dest.parent.resolve().is_relative_to(mirror_root):
+            raise OSError(f"{dest} resolves outside {mirror_root}")
+        fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(source.read_bytes())
+            os.replace(tmp, dest)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+    except (OSError, ValueError) as exc:
+        print(f"serving_sweep: could not mirror {source} to {mirror}: {exc}",
+              file=sys.stderr)
 
 
 def shape_id(isl: int, osl: int) -> str:
@@ -484,6 +536,8 @@ class Sweep:
             for name, prof in profiles.items()
         }
         self.out = Path(args.out_dir)
+        mirror_arg = getattr(args, "mirror_dir", None)
+        self.mirror = Path(mirror_arg) if mirror_arg else None
         self.lock = threading.Lock()
         # Held from snapshot to write, so a later state is never overwritten
         # by an earlier one.
@@ -543,7 +597,9 @@ class Sweep:
                     copy.deepcopy(self.shapes),
                     **self.pinned(),
                 }
-            write_json(self.out / "sweep_status.json", snapshot)
+            status_path = self.out / "sweep_status.json"
+            write_json(status_path, snapshot)
+            mirror_file(self.out, self.mirror, status_path)
 
     def pinned(self) -> dict[str, Any]:
         """--patch (with each file's sha256) and --hardware, as given."""
@@ -996,6 +1052,9 @@ class Sweep:
         code = (int(code_path.read_text(encoding="utf-8").strip() or -1)
                 if code_path.is_file() else None)
         if summary_path.is_file():
+            mirror_file(self.out, self.mirror, summary_path)
+            mirror_file(self.out, self.mirror,
+                        shard / CLIENT_DIR / "summary.md")
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             if summary.get("error"):
                 # It gave up on a server that stopped answering /health.
@@ -1069,7 +1128,9 @@ class Sweep:
             raise ValueError(f"{self.out} holds an earlier run's {used[0]}: "
                              "give each run a new --out-dir")
         self.out.mkdir(parents=True, exist_ok=True)
-        write_json(self.out / "sweep_plan.json", self.plan)
+        plan_path = self.out / "sweep_plan.json"
+        write_json(plan_path, self.plan)
+        mirror_file(self.out, self.mirror, plan_path)
         try:
             self._patch_inputs = self.patch_inputs()
             self.plan_servers()
@@ -1113,8 +1174,13 @@ class Sweep:
                         not self.stop_requested else "the sweep was stopped")
                 self.queue.clear()
             self.save_status()
-        return merge(self.plan, self.out, self.shapes, self.servers,
-                     self.pinned())
+        merged = merge(self.plan, self.out, self.shapes, self.servers,
+                       self.pinned())
+        mirror_file(self.out, self.mirror,
+                    self.out / CLIENT_DIR / "summary.json")
+        mirror_file(self.out, self.mirror,
+                    self.out / CLIENT_DIR / "summary.md")
+        return merged
 
     def exit_code(self, merged: dict[str, Any]) -> int:
         """0 ok, 1 a shape failed or was not run, 2 no server ever served."""
@@ -1466,6 +1532,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="a leader's time running when its record has none")
     r.add_argument("--shape-timeout", type=float, default=4 * 3600.0)
     r.add_argument("--out-dir", required=True)
+    r.add_argument(
+        "--mirror-dir",
+        default=None,
+        help="a readable directory to copy the sweep's progress into "
+        "(sweep_plan.json, sweep_status.json, sweep_result.json, and the "
+        "summary files), for an --out-dir the caller cannot read, such as "
+        "the Hillclimber's protected campaign storage",
+    )
 
     m = sub.add_parser("merge", help="merge a run's shapes again")
     m.add_argument("--out-dir", required=True)
@@ -1607,6 +1681,10 @@ def main(argv: list[str] | None = None) -> int:
     target = out / "sweep_result.json"
     if result["status"] != "invalid_input" or not target.exists():
         write_json(target, result)
+        mirror = (sweep.mirror if sweep is not None else (Path(
+            args.mirror_dir) if getattr(args, "mirror_dir", None) else None))
+        if mirror is not None:
+            mirror_file(out, mirror, target)
     print(
         json.dumps({k: result.get(k)
                     for k in ("status", "error", "summary")}))

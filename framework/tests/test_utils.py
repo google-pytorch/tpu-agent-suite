@@ -255,5 +255,61 @@ class TestJsonSchemaDefinitionErrors(unittest.TestCase):
                 self.assertEqual(validate(schema), [expected])
 
 
+class TestJsonConfigManagerLists(unittest.TestCase):
+    """List-valued settings merge as a union and unmerge back to what was there."""
+
+    def test_a_list_the_package_created_is_removed_whole_with_its_empty_parent(
+            self):
+        document: dict = {"env": {"X": "1"}}
+        records: list = []
+        utils.JsonConfigManager.merge(
+            document, {"permissions": {
+                "deny": ["Read(a)", "Write(b)"]
+            }}, [], records)
+        self.assertEqual(document["permissions"]["deny"],
+                         ["Read(a)", "Write(b)"])
+        kinds = [(r["kind"], tuple(r["keys"])) for r in records]
+        self.assertEqual(kinds, [("json_container", ("permissions", )),
+                                 ("json_value", ("permissions", "deny"))])
+        self.assertNotIn("list_extended", records[1])
+
+        for record in reversed(records):
+            utils.JsonConfigManager.remove_added(
+                document,
+                record["keys"],
+                record.get("value", {}),
+                is_container=record["kind"] == "json_container")
+        # Neither an empty `deny` nor an empty `permissions` is left behind.
+        self.assertEqual(document, {"env": {"X": "1"}})
+
+    def test_a_list_the_user_had_keeps_their_items_and_loses_only_ours(self):
+        document: dict = {"permissions": {"deny": ["Bash(rm -rf *)"]}}
+        records: list = []
+        utils.JsonConfigManager.merge(
+            document, {"permissions": {
+                "deny": ["Read(a)", "Bash(rm -rf *)"]
+            }}, [], records)
+        self.assertEqual(document["permissions"]["deny"],
+                         ["Bash(rm -rf *)", "Read(a)"])
+        # Only what was added is recorded, so only that comes out again.
+        self.assertEqual([r["value"] for r in records], [["Read(a)"]])
+        document["permissions"]["deny"].append("Read(.env)")
+
+        utils.JsonConfigManager.remove_added(document, records[0]["keys"],
+                                             records[0]["value"])
+        self.assertEqual(
+            document,
+            {"permissions": {
+                "deny": ["Bash(rm -rf *)", "Read(.env)"]
+            }})
+
+        # If one of ours has since been removed by hand, nothing is touched.
+        document["permissions"]["deny"] = ["Bash(rm -rf *)"]
+        self.assertFalse(
+            utils.JsonConfigManager.remove_added(document, records[0]["keys"],
+                                                 ["Read(a)"]))
+        self.assertEqual(document["permissions"]["deny"], ["Bash(rm -rf *)"])
+
+
 if __name__ == "__main__":
     unittest.main()

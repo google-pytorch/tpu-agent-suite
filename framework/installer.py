@@ -165,8 +165,13 @@ def check_action_modification(destination: Path,
     elif kind == "json_value" and path.is_file():
         exists, value = JsonConfigManager.get_at_path(jsonio.load_json(path),
                                                       action["keys"])
-        if exists and value != action["value"]:
-            return f"{action['path']}:{'/'.join(action['keys'])}"
+        if exists:
+            expected = action["value"]
+            if isinstance(expected, list) and isinstance(value, list):
+                if not all(item in value for item in expected):
+                    return f"{action['path']}:{'/'.join(action['keys'])}"
+            elif value != expected:
+                return f"{action['path']}:{'/'.join(action['keys'])}"
     elif kind == "json_container" and path.is_file():
         exists, value = JsonConfigManager.get_at_path(jsonio.load_json(path),
                                                       action["keys"])
@@ -288,10 +293,7 @@ def rollback_action(destination: Path, action: dict[str, Any]) -> None:
         if path.is_file() and compute_digest(path) == action["sha256"]:
             path.unlink()
     elif kind == "json_value":
-        rollback_json_action(path,
-                             action["keys"],
-                             action["value"],
-                             is_container=False)
+        rollback_json_action(path, action["keys"], action["value"])
     elif kind == "json_container":
         rollback_json_action(path, action["keys"], {}, is_container=True)
     elif kind == "toml_value":
@@ -913,7 +915,8 @@ def summarize_installation(
             print(f"  Added {count} managed blocks to {target}.")
 
     # Claude Code and Codex installs pre-authorize ~/.tpu-agent-suite through
-    # their harness config; harnesses without a config writer need a one-time
+    # their harness config (with Claude Code adding deny rules on campaigns/
+    # and package writes); harnesses without a config writer need a one-time
     # grant. Cursor's install spec writes no config either.
     if harness == "cursor" or harnesses.is_google_harness(harness):
         print(

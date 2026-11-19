@@ -1033,6 +1033,98 @@ class TestMerge(SweepCase):
         self.assertEqual(merged["status"], "failed")
         self.assertIn("isl8192_osl2048", merged["error"])
 
+    def test_mirror_refuses_to_write_through_a_symlink_the_agent_planted(self):
+        out = self.root / "protected_out"
+        (out / "shards" / "s1").mkdir(parents=True)
+        source = out / "shards" / "s1" / "summary.json"
+        source.write_bytes(b'{"ok": 1}\n')
+        mirror = self.root / "workspace_mirror"
+        mirror.mkdir()
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+
+        # A directory on the relative path swapped for a symlink out of the
+        # mirror, as the agent could do between two writes.
+        (mirror / "shards").symlink_to(elsewhere, target_is_directory=True)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            serving_sweep.mirror_file(out, mirror, source)
+        self.assertIn("symlink", err.getvalue())
+        self.assertEqual(list(elsewhere.rglob("*")), [])
+
+        # The destination file itself as a symlink.
+        (mirror / "shards").unlink()
+        (mirror / "shards" / "s1").mkdir(parents=True)
+        victim = self.root / "victim.json"
+        victim.write_text("keep me")
+        (mirror / "shards" / "s1" / "summary.json").symlink_to(victim)
+        with contextlib.redirect_stderr(io.StringIO()):
+            serving_sweep.mirror_file(out, mirror, source)
+        self.assertEqual(victim.read_text(), "keep me")
+
+        # A plain mirror copies bytes verbatim.
+        (mirror / "shards" / "s1" / "summary.json").unlink()
+        serving_sweep.mirror_file(out, mirror, source)
+        self.assertEqual(
+            (mirror / "shards" / "s1" / "summary.json").read_bytes(),
+            b'{"ok": 1}\n')
+
+    def test_mirror_dir_receives_plan_status_result_and_summaries(self):
+        """One `run` through main(): every file the mirror promises arrives."""
+        self.make_slots(2)
+        fake = FakeCompute(delay=0.01)
+        out = self.root / "cli_out"
+        mirror = self.root / "cli_mirror"
+        with (
+                unittest.mock.patch.object(serving_sweep,
+                                           "Compute",
+                                           return_value=fake),
+                unittest.mock.patch.object(serving_sweep.tpu_slots,
+                                           "read_config",
+                                           return_value={
+                                               "profiles": self.declared[0],
+                                               "active_profile": "gke",
+                                           }),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+        ):
+            rc = serving_sweep.main([
+                "run",
+                "--runtime",
+                "rt",
+                "--name",
+                "gemma",
+                "--port",
+                "8000",
+                "--recipe",
+                "launch_vllm.sh",
+                "--slots",
+                str(self.slots),
+                "--leader",
+                "lead-1",
+                "--out-dir",
+                str(out),
+                "--mirror-dir",
+                str(mirror),
+                "--",
+                *CLIENT,
+            ])
+        self.assertEqual(rc, serving_sweep.EXIT_OK)
+        for rel in (
+                "sweep_plan.json",
+                "sweep_status.json",
+                "sweep_result.json",
+                f"{serving_sweep.CLIENT_DIR}/summary.json",
+                f"{serving_sweep.CLIENT_DIR}/summary.md",
+        ):
+            self.assertEqual((mirror / rel).read_bytes(),
+                             (out / rel).read_bytes())
+        plan = json.loads((out / "sweep_plan.json").read_text())
+        for sid in plan["queue"]:
+            shard_rel = (
+                f"shards/{sid}/{serving_sweep.CLIENT_DIR}/summary.json")
+            self.assertEqual((mirror / shard_rel).read_bytes(),
+                             (out / shard_rel).read_bytes())
+
 
 class TestWait(SweepCase):
 

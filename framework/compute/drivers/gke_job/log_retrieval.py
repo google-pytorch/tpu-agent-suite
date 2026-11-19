@@ -359,12 +359,12 @@ def pod_logs(
 
 def saved_log(job_id: str) -> Path:
     """Where `save_logs` keeps a finished Job's log."""
-    return jobs.jobs_dir() / job_id / "output.log"
+    return jobs.job_directory(job_id) / "output.log"
 
 
 def lost_node_marker(job_id: str) -> Path:
     """Marker for a saved log still missing its Cloud Logging tail."""
-    return jobs.jobs_dir() / job_id / "output.log.node-lost"
+    return jobs.job_directory(job_id) / "output.log.node-lost"
 
 
 def log_blob(job_id: str) -> str:

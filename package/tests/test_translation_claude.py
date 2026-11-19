@@ -152,6 +152,14 @@ class TestClaudeTranslationParity(TranslationParityBase, unittest.TestCase):
                          str(harness_rules.SHELL_TIMEOUT_MS))
         self.assertGreater(harness_rules.SHELL_TIMEOUT_MS,
                            harness_rules.MAX_SYNC_COMPUTE_TIMEOUT_S * 1000)
+        approved = merge["value"]["approved_directories"]
+        self.assertEqual(approved, ["~/.tpu-agent-suite"])
+        deny = merge["value"]["permissions"]["deny"]
+        self.assertIn("Read(~/.tpu-agent-suite/campaigns/**)", deny)
+        self.assertIn("Write(~/.tpu-agent-suite/campaigns/**)", deny)
+        self.assertIn("Edit(~/.tpu-agent-suite/campaigns/**)", deny)
+        self.assertIn("Write(~/.tpu-agent-suite/packages/**)", deny)
+        self.assertIn("Edit(~/.tpu-agent-suite/packages/**)", deny)
         self.assertEqual(plan["toml_sets"], [],
                          "Claude Code configures via JSON, not TOML")
         # The tpu-knowledge-base routing block targets Claude Code's memory file

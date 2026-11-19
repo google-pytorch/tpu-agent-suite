@@ -1002,24 +1002,53 @@ class JsonConfigManager:
 
         The inverse of one `merge` record: removes `keys[-1]` only if it still
         holds what the installer put there (`expected_val`), or, for a
-        container record, if nothing is left inside it. A value the user has
-        since changed is left alone. Returns whether anything was removed.
+        container record, if nothing is left inside it. For a list, removes
+        the items the installer contributed, provided they are all still
+        present, and keeps whatever else the user has in it; a list left
+        empty goes, and so does a dict left empty above it, so no
+        `"deny": []` or `"permissions": {}` is left behind. A value the user
+        has since changed is left alone. Returns whether anything was removed.
         """
         if not keys:
             return False
         exists, value = cls.get_at_path(document, keys)
         if not exists:
             return False
-        if not ((is_container and not value) or
-                (not is_container and value == expected_val)):
-            return False
-        # get_at_path succeeded along `keys`, so every prefix is a dict that
-        # holds the next key.
         parent: Any = document
         for key in keys[:-1]:
             parent = parent[key]
+        if not is_container and isinstance(expected_val, list) and isinstance(
+                value, list):
+            if not all(item in value for item in expected_val):
+                return False
+            remaining = list(value)
+            for item in expected_val:
+                if item in remaining:
+                    remaining.remove(item)
+            if remaining:
+                parent[keys[-1]] = remaining
+            else:
+                del parent[keys[-1]]
+                cls._prune_empty_parents(document, keys[:-1])
+            return True
+        if not ((is_container and not value) or
+                (not is_container and value == expected_val)):
+            return False
         del parent[keys[-1]]
         return True
+
+    @classmethod
+    def _prune_empty_parents(cls, document: dict[str, Any],
+                             keys: Sequence[str]) -> None:
+        """Delete each dict along `keys` that removing a child left empty."""
+        for depth in range(len(keys), 0, -1):
+            exists, value = cls.get_at_path(document, keys[:depth])
+            if not exists or not isinstance(value, dict) or value:
+                return
+            parent: Any = document
+            for key in keys[:depth - 1]:
+                parent = parent[key]
+            del parent[keys[depth - 1]]
 
     @classmethod
     def merge(
@@ -1031,6 +1060,10 @@ class JsonConfigManager:
     ) -> None:
         """Deep merge desired dictionary into current, recording added paths.
 
+        List-valued entries are merged as an order-preserving union so existing
+        user list entries (such as custom `permissions.deny` rules) do not
+        conflict with package entries.
+
         Raises:
             TpuAgentSuiteError: If an existing setting conflicts with the new value.
         """
@@ -1041,6 +1074,14 @@ class JsonConfigManager:
                     current[key] = {}
                     records.append({"kind": "json_container", "keys": path})
                     cls.merge(current[key], value, path, records)
+                elif isinstance(value, list):
+                    copied = list(value)
+                    current[key] = copied
+                    records.append({
+                        "kind": "json_value",
+                        "keys": path,
+                        "value": list(copied),
+                    })
                 else:
                     current[key] = value
                     records.append({
@@ -1050,6 +1091,15 @@ class JsonConfigManager:
                     })
             elif isinstance(current[key], dict) and isinstance(value, dict):
                 cls.merge(current[key], value, path, records)
+            elif isinstance(current[key], list) and isinstance(value, list):
+                added = [item for item in value if item not in current[key]]
+                if added:
+                    current[key].extend(added)
+                    records.append({
+                        "kind": "json_value",
+                        "keys": path,
+                        "value": added,
+                    })
             elif current[key] != value:
                 raise TpuAgentSuiteError(
                     f"refusing to replace existing JSON setting: {'/'.join(path)}"

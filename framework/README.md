@@ -31,7 +31,7 @@ The framework is organized into distinct, specialized tools and modules:
 10. **`harnesses/`** *(Shared)*: One adaptor module per harness (`google.py` holds what the Google family shares) and their registry. An adaptor holds a harness's identity -- name, display name, config directory -- which block of the mapping tables it reads, and the inbound, dispatch, and outbound sides of a hook call (`canonical_event`, `before_dispatch`, `after_dispatch`, `render_reply`); the harness-keyed lookups (`harness_mapping`, `to_harness_event`, ...) live here too. Per-harness compile, install and trajectory logic still sits in `builder/`, `installer.py` and `trajectory/`, and is being moved into the adaptors.
 11. **`utils.py`** *(Shared)*: Common semver, JSON schema validation, safe path resolution, and configuration merging.
 12. **`jsonio.py`** *(Shared)*: Reading JSON and JSONL files, and atomic file writes.
-13. **`paths.py`** *(Shared)*: Locating the enclosing git repository and the `~/.tpu-agent-suite` store (runs, sessions, studies, packages, `environment.json`), including the installed version of a package.
+13. **`paths.py`** *(Shared)*: Locating the enclosing git repository and the `~/.tpu-agent-suite` store (runs, sessions, studies, protected campaigns and sealed jobs, packages, `environment.json`), including the installed version of a package.
 
 ---
 

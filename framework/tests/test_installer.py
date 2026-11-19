@@ -733,6 +733,52 @@ class TestInstaller(_TranslatedInstallerTestCase):
                       out.getvalue())
         self.assertNotIn("Added a managed block", out.getvalue())
 
+    def test_claude_permissions_deny_merges_with_user_entries_across_upgrade_and_uninstall(
+            self):
+        """User `permissions.deny` rules coexist with package rules on install, upgrade, and uninstall."""
+        workspace = self._workspace("workspace_claude_deny_union")
+        settings_path = workspace / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        jsonio.write_json(
+            settings_path,
+            {"permissions": {
+                "deny": ["Bash(rm -rf *)"]
+            }},
+        )
+
+        self._install(workspace)
+        after_install = jsonio.load_json(settings_path)
+        deny_after_install = after_install["permissions"]["deny"]
+        self.assertIn("Bash(rm -rf *)", deny_after_install)
+        self.assertIn("Read(~/.tpu-agent-suite/campaigns/**)",
+                      deny_after_install)
+
+        # User adds another rule after installing, then upgrades to a new version.
+        after_install["permissions"]["deny"].append("Read(.env)")
+        jsonio.write_json(settings_path, after_install)
+
+        self._update_manifest(self.pkg_dir, version="1.1.0")
+        dist_v2 = self.temp_dir / "dist_claude_v2"
+        translators.translate(self.pkg_dir, "claude-code", dist_v2)
+        self._install(workspace, distribution=dist_v2)
+
+        after_upgrade = jsonio.load_json(settings_path)
+        deny_after_upgrade = after_upgrade["permissions"]["deny"]
+        self.assertIn("Bash(rm -rf *)", deny_after_upgrade)
+        self.assertIn("Read(.env)", deny_after_upgrade)
+        self.assertIn("Write(~/.tpu-agent-suite/campaigns/**)",
+                      deny_after_upgrade)
+
+        # Uninstall strips only the package's rules and leaves both user rules intact.
+        installer.uninstall(package="pkg", destination=workspace)
+        after_uninstall = jsonio.load_json(settings_path)
+        self.assertEqual(
+            after_uninstall,
+            {"permissions": {
+                "deny": ["Bash(rm -rf *)", "Read(.env)"]
+            }},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -499,6 +499,15 @@ class RemoteShellDriver(base.ComputeDriver):
         status, exit_code, failed_worker = _parse_status_lines((proc.stdout
                                                                 or "").strip())
         if record and record.status == "CANCELLED":
+            if status == "RUNNING":
+                # The process is still winding down after SIGTERM. Report live
+                # RUNNING so callers (such as sealed artifact collection) wait,
+                # without overwriting CANCELLED on disk.
+                return base.AsynchronousExecutionResult(
+                    job_id=job_id,
+                    status="RUNNING",
+                    start_time=record.start_time,
+                )
             # The remote process was killed, so the probe now reports FAILED.
             # Cancellation is the truer account of why it stopped, so keep it.
             return base.AsynchronousExecutionResult(

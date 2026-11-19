@@ -512,7 +512,11 @@ Query or control asynchronous jobs submitted via `submit`:
 # Fetch stdout/stderr execution logs
 {{runtime}} compute job logs --job-id <id>
 
-# Download job output artifacts (defaults to {{runs}}/<run_id>/artifacts/<job_id>/)
+# Download job output artifacts (defaults to {{runs}}/<run_id>/artifacts/<job_id>/).
+# A job hc.py submitted lives under ~/.tpu-agent-suite/campaigns/sealed_jobs/
+# instead of runs/jobs/ (TPU_AGENT_SUITE_JOBS_DIR, which hc.py sets); once
+# its backend reports it terminal, its outputs and log are fetched once into
+# sealed_jobs/<job_id>/sealed/ with SHA-256 digests, and served from there.
 {{runtime}} compute job artifacts --job-id <id> [--out-dir ./artifacts]
 # Exits 1 and lists `missing_outputs` if a declared --output was never
 # produced, even when the job itself reports COMPLETED.

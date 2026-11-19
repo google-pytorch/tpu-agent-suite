@@ -268,7 +268,7 @@ For Claude Code at project scope:
 .claude/skills/tpu-agent-export-trajectory/SKILL.md   # see using.md
 .claude/agents/*.md                       # one compiled prompt per agent
 .claude/hooks.json                        # lifecycle and schema-validation hooks
-.claude/settings.json                     # subagent limits, hooks, and pre-authorized ~/.tpu-agent-suite path
+.claude/settings.json                     # subagent limits, hooks, ~/.tpu-agent-suite approval, and campaign/package deny rules
 CLAUDE.md                                 # managed blocks with package-wide instructions
 .tpu-agent-suite/
     environment.json                      # your compute profiles
@@ -296,6 +296,13 @@ Reinstalling over a user-scope install made before this layout moves the
 block out of `~/AGENTS.md` and leaves the rest of that file alone. Pass
 `--no-workspace-memory` to skip the managed memory block.
 
+> **Sandbox & directory permissions:** Claude Code pre-authorizes
+> `~/.tpu-agent-suite` in `approved_directories` while adding `permissions.deny`
+> rules blocking agent reads/writes under `~/.tpu-agent-suite/campaigns/**` and
+> writes under `~/.tpu-agent-suite/packages/**` (merging by union with any
+> existing `permissions.deny` entries). Codex pre-authorizes
+> `~/.tpu-agent-suite` in `[sandbox] allowed_paths`.
+>
 > **Antigravity:** installs skills, agents, `hooks.json`, and `plugin.json`
 > under `.agents/` (project scope) or `~/.gemini/config/` (user scope), but has
 > no setting for pre-authorizing external directories—so the first time an

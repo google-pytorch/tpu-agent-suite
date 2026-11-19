@@ -11,7 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""On-disk record of asynchronous compute jobs."""
+"""On-disk record of asynchronous compute jobs.
+
+A job's record and everything a driver keeps beside it (its log, exit code,
+declared outputs) live in one directory, `<root>/<job_id>/`. The root is
+`~/.tpu-agent-suite/runs/jobs/` unless `TPU_AGENT_SUITE_JOBS_DIR` names
+another. The Hillclimber (`hc.py`) sets that variable, for the `compute`
+commands it runs, to `~/.tpu-agent-suite/campaigns/sealed_jobs/`, a directory
+its agents cannot write: a job it submits is a *sealed job*, born in protected
+storage, with no agent-writable copy anywhere. Reads need no variable: `load`
+and `list_jobs` look in every root, protected first, so a record an agent
+forged under `runs/jobs/` can never stand in for a sealed one.
+
+Once a sealed job is terminal, `seal_artifacts` copies its outputs and log
+into `<job_id>/sealed/` exactly once, with SHA-256 digests recorded in the
+record, and every later `job artifacts` serves that copy.
+"""
 
 from __future__ import annotations
 
@@ -20,20 +35,76 @@ import datetime
 import json
 import os
 import pathlib
+import re
+import shutil
 import subprocess
+import sys
 import uuid
 from typing import Any, Callable
 
-from framework import jsonio, paths
+from framework import jsonio, paths, utils
 
 Path = pathlib.Path
 
+# Where `hc.py` points the compute commands it runs, so their jobs are
+# created in protected storage (see the module docstring).
+JOBS_DIR_ENV = "TPU_AGENT_SUITE_JOBS_DIR"
+# The write-once copy of a sealed job's outputs, under its directory.
+SEALED_ARTIFACTS_DIRNAME = "sealed"
+
+
+def default_jobs_dir() -> Path:
+    """The root ordinary jobs are created under: `runs/jobs/`."""
+    return paths.get_runs_root() / "jobs"
+
 
 def jobs_dir() -> Path:
-    """Return the directory holding job records, creating it if needed."""
-    path = paths.get_runs_root() / "jobs"
+    """Return the root new job records are created under, creating it if needed.
+
+    `$TPU_AGENT_SUITE_JOBS_DIR` when set, else `runs/jobs/`. Only creation
+    reads this; `load` and `list_jobs` look in every root.
+    """
+    override = os.environ.get(JOBS_DIR_ENV, "").strip()
+    path = (Path(override).expanduser().resolve()
+            if override else default_jobs_dir())
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def job_roots() -> list[Path]:
+    """Every root a job record may be under, protected storage first.
+
+    The sealed root comes first so that, for a job id present in both, the
+    copy agents cannot write is the one found.
+    """
+    roots = [paths.get_sealed_jobs_root(), default_jobs_dir()]
+    override = os.environ.get(JOBS_DIR_ENV, "").strip()
+    if override:
+        extra = Path(override).expanduser().resolve()
+        if extra not in roots:
+            roots.insert(1, extra)
+    return roots
+
+
+# Single path segment: no `/` or `\`, no `.` or `..`, no leading dot.
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _validate_job_id(job_id: str) -> str:
+    """Require `job_id` to be a single non-path identifier segment."""
+    if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
+        raise utils.TpuAgentSuiteError(f"invalid job_id: {job_id!r}")
+    return job_id
+
+
+def job_directory(job_id: str) -> Path:
+    """The directory of `job_id`, in whichever root holds its record.
+
+    For a job with no record yet, the directory it would be created in.
+    """
+    _validate_job_id(job_id)
+    record = JobRecord.load(job_id)
+    return record.directory if record else jobs_dir() / job_id
 
 
 def utc_now() -> str:
@@ -186,10 +257,22 @@ class JobRecord:
     compute_profile: str | None = None
     extra: dict[str, Any] = dataclasses.field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # The root this record lives under. Not a dataclass field: it is
+        # where the record was found, not part of it, and must stay out of
+        # `asdict` (job.json, `job list --json`). Set by `create` and `load`.
+        self._root: Path | None = None
+
     @property
     def directory(self) -> Path:
-        """This job's directory under `jobs_dir()`."""
-        return jobs_dir() / self.job_id
+        """This job's directory: `<root>/<job_id>/`."""
+        return (self._root or jobs_dir()) / self.job_id
+
+    @property
+    def is_sealed(self) -> bool:
+        """Whether this job lives in protected storage (see the module docstring)."""
+        return self._root is not None and self._root == paths.get_sealed_jobs_root(
+        )
 
     @classmethod
     def create(cls,
@@ -200,24 +283,39 @@ class JobRecord:
                serve: bool = False,
                **fields: Any) -> JobRecord:
         """Create a record with a fresh id and its on-disk directory."""
+        resolved_id = (_validate_job_id(job_id)
+                       if job_id is not None else new_job_id())
         record = cls(
-            job_id=job_id or new_job_id(),
+            job_id=resolved_id,
             job_name=job_name,
             run_id=run_id or "",
             backend=backend,
             serve=serve,
             **fields,
         )
+        record._root = jobs_dir()
         (record.directory / "artifacts").mkdir(parents=True, exist_ok=True)
         record.save()
         return record
 
     @classmethod
     def load(cls, job_id: str) -> JobRecord | None:
-        """Load a record by id, or None when it was never written."""
-        data = jsonio.load_json_or_empty(jobs_dir() / job_id / "job.json")
-        if not data:
+        """Load a record by id, or None when it was never written.
+
+        Looks in every root (`job_roots`), protected storage first.
+        """
+        if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
             return None
+        for root in job_roots():
+            data = jsonio.load_json_or_empty(root / job_id / "job.json")
+            if data and data.get("job_id") == job_id:
+                record = cls._from_dict(data)
+                record._root = root
+                return record
+        return None
+
+    @classmethod
+    def _from_dict(cls, data: dict[str, Any]) -> JobRecord:
         known = {f.name for f in dataclasses.fields(cls)}
         extra = data.pop("extra", {}) or {}
         extra.update({k: v for k, v in data.items() if k not in known})
@@ -260,24 +358,118 @@ def list_jobs(
     run_id: str | None = None,
     status: str | None = None,
 ) -> list[JobRecord]:
-    """Persisted job records, oldest first, optionally filtered."""
-    base = jobs_dir()
-    if not base.is_dir():
-        return []
+    """Persisted job records from every root, oldest first, optionally filtered.
 
+    Sealed jobs are included, so the session-end reaper sees them too; an
+    id present in more than one root is reported once, from the protected
+    copy (`load` resolves it the same way).
+    """
+    seen: set[str] = set()
     records: list[JobRecord] = []
-    for item in base.iterdir():
-        record = JobRecord.load(item.name) if item.is_dir() else None
-        if record is None:
+    for base in job_roots():
+        if not base.is_dir():
             continue
-        if run_id and record.run_id != run_id:
-            continue
-        if status and record.status.upper() != status.upper():
-            continue
-        records.append(record)
+        for item in base.iterdir():
+            if not item.is_dir() or item.name in seen:
+                continue
+            record = JobRecord.load(item.name)
+            if record is None:
+                continue
+            seen.add(item.name)
+            if run_id and record.run_id != run_id:
+                continue
+            if status and record.status.upper() != status.upper():
+                continue
+            records.append(record)
 
     records.sort(key=lambda r: (r.start_time, r.job_id))
     return records
+
+
+def _reject_symlinks(job_dir: Path, job_id: str) -> None:
+    """Refuse to seal `job_id` when `job_dir` or anything inside it is a symlink."""
+    links = ([job_dir] if job_dir.is_symlink() else
+             []) + [p for p in job_dir.rglob("*") if p.is_symlink()]
+    if links:
+        raise utils.TpuAgentSuiteError(
+            f"refusing to seal {job_id}: its directory holds "
+            f"symlinks ({', '.join(str(p) for p in links[:3])})")
+
+
+def seal_artifacts(driver: Any, record: JobRecord,
+                   dest_dir: Path) -> list[Path]:
+    """Fetch a sealed job's outputs write-once, then copy them to `dest_dir`.
+
+    The one place artifact sealing happens, wrapped around any backend's
+    `fetch_artifacts`. The first call after the job is terminal -- by the
+    backend's own account, `driver.get_status`, never the record's -- fetches
+    the outputs and the log into `<job_dir>/sealed/`, records their SHA-256
+    digests under `extra["sealed_artifacts"]`, and sets
+    `extra["artifacts_sealed"]`. From then on nothing is fetched again, and
+    every call copies from that directory into `dest_dir`, which is normally
+    the run's artifacts directory the agent can read. Before the job is
+    terminal the outputs are fetched straight to `dest_dir` and nothing is
+    recorded, so a partial file cannot be sealed; the backend's own
+    terminal status is what gates it, so a forged `status` in a record
+    cannot either. A symlink anywhere in the job directory refuses the seal:
+    the copy would dereference it, and a workload (or anyone who could write
+    there) must not be able to seal `campaign.db` under an output's name.
+    """
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    sealed_dir = record.directory / SEALED_ARTIFACTS_DIRNAME
+    if not record.extra.get("artifacts_sealed"):
+        live = driver.get_status(record.job_id).status
+        if live not in TERMINAL_STATUSES:
+            return driver.fetch_artifacts(record.job_id, dest_dir)
+        _reject_symlinks(record.directory, record.job_id)
+        if sealed_dir.exists():
+            shutil.rmtree(sealed_dir)
+        sealed_dir.mkdir(parents=True, exist_ok=True)
+        driver.fetch_artifacts(record.job_id, sealed_dir)
+        try:
+            _reject_symlinks(record.directory, record.job_id)
+        except utils.TpuAgentSuiteError:
+            shutil.rmtree(sealed_dir, ignore_errors=True)
+            raise
+        log_file = sealed_dir / f"{record.job_id}.log"
+        if not log_file.is_file():
+            try:
+                log_file.write_text(driver.fetch_logs(record.job_id),
+                                    encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001 - the outputs still seal
+                print(
+                    f"compute: could not seal the log of {record.job_id}: "
+                    f"{exc}",
+                    file=sys.stderr)
+        # Reload after `driver.get_status` above settled status/exit_code/extra
+        # on disk; saving the caller's pre-status copy would revert job.json.
+        record = JobRecord.load(record.job_id) or record
+        declared = record.extra.get("outputs") or []
+        record.extra["sealed_artifacts"] = {
+            spec["remote"]: utils.compute_digest(sealed_dir / spec["remote"])
+            for spec in declared if (sealed_dir / spec["remote"]).is_file()
+        }
+        record.extra["artifacts_sealed"] = True
+        record.save()
+    return _copy_tree(sealed_dir, dest_dir)
+
+
+def _copy_tree(source: Path, dest: Path) -> list[Path]:
+    """Copy every file under `source` into `dest`, returning the copies."""
+    copied: list[Path] = []
+    if not source.is_dir():
+        return copied
+    same = dest.resolve() == source.resolve()
+    for item in sorted(source.rglob("*")):
+        if item.is_symlink() or not item.is_file():
+            continue
+        target = dest / item.relative_to(source)
+        if not same:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+        copied.append(target)
+    return copied
 
 
 def serving_jobs(run_id: str) -> list[str]:

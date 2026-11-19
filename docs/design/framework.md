@@ -124,8 +124,9 @@ has a shell: how to record hypotheses, experiments and results with
   session (the `compute-setup` guide, through
   `runtime compute setup plan|apply|verify`).
 - **Merges, never replaces.** Changes to the harness's config files only add
-  entries. If an entry would conflict with an existing setting, the install
-  stops with an error.
+  entries (merging list-valued JSON settings such as `permissions.deny` by
+  union). If an entry would conflict with an existing setting, the install stops
+  with an error.
 - **Exact uninstall.** `ownership.json` records every file, config key and
   memory block the installer added. Uninstalling removes exactly those, and
   leaves anything the user edited alone.

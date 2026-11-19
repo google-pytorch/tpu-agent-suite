@@ -959,7 +959,12 @@ def _action_job(driver: ComputeDriver, args: argparse.Namespace) -> int:
                        if run_id else Path.cwd()) / args.job_id
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        retrieved = driver.fetch_artifacts(args.job_id, out_dir)
+        # A sealed job (see `jobs.py`) is fetched write-once into protected
+        # storage and served from there; an ordinary job straight to out_dir.
+        if record is not None and record.is_sealed:
+            retrieved = jobs.seal_artifacts(driver, record, out_dir)
+        else:
+            retrieved = driver.fetch_artifacts(args.job_id, out_dir)
         missing = _missing_declared_outputs(record, out_dir)
         declared = (record.extra.get("outputs") if record else None) or []
         landed = {

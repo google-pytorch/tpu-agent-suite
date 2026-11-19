@@ -41,7 +41,7 @@ the same path in the repository and in a build, and its imports have one form,
 | `framework/items.py` | The run's store of delegated work: what each agent was asked, who holds it, what came back and who waits on it. |
 | `framework/trajectory/` | The trajectory export. |
 | `framework/utils.py` | Shared helpers: schema validation and safe path handling. |
-| `framework/paths.py` | Locating the central store, runs, sessions, studies, and installed packages. |
+| `framework/paths.py` | Locating the central store, runs, sessions, studies, protected campaigns, and installed packages. |
 | `framework/schemas/` | The schemas the runtime checks hooks, studies and contracts against. |
 | `framework/installer.py` | Installs and uninstalls the build. See [Framework: Installer](framework.md#installer). |
 
