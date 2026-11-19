@@ -114,14 +114,15 @@ capabilities change between versions, and the skill that documents them ships
 else, read that skill:
 
 ```bash
-<xprof_interpreter> {{script:tpu-diagnostics/locate_xprof_skill.py}}
+python3 {{script:tpu-diagnostics/locate_xprof_skill.py}} --package {{package_tag}}
 ```
 
-`<xprof_interpreter>` is the top-level `xprof_interpreter` that
-`{{runtime}} config show --json --package {{package_tag}}` prints, if it is
-set; otherwise it is the `python3` already running you, on every backend.
-Never take XProf from `python_interpreter`, even on `local`. Run XProf under
-the same interpreter.
+Run it exactly so; do not pick an interpreter yourself. The script reads
+`xprof_interpreter` from the environment configuration and checks XProf
+there, or in the `python3` running it when that is unset -- never in
+`python_interpreter`. It prints the command that runs that environment's
+XProf: use it wherever the skill writes `xprof`, not with a bare `xprof` from
+PATH.
 
 It prints the wheel's `SKILL.md`, the version it belongs to, and the names of
 its references. To read a reference `SKILL.md` links to, run the same command

@@ -26,8 +26,10 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -157,6 +159,7 @@ class TestLocate(unittest.TestCase):
                            return_value=self.skills)
         files.start()
         self.addCleanup(files.stop)
+        self.cli = f"{shlex.quote(sys.executable)} -m xprof.cli.xprof_cli"
 
     def _locate(self, dists):
         with mock.patch.object(locate_xprof_skill,
@@ -191,6 +194,9 @@ class TestLocate(unittest.TestCase):
         self.assertIn("===== SKILL.md =====\nskill: see [A]", out)
         self.assertIn("References: a, b", out)
         self.assertIn("--reference <name>", out)
+        # The agent runs the wheel's command by path, not whatever is on PATH.
+        self.assertIn(f"Run XProf as {self.cli} wherever the skill writes",
+                      out)
 
     def test_prints_a_reference_named_as_skill_md_links_it(self):
         for name in ("references/a.md", "a.md", "a", "./references/a.md"):
@@ -281,6 +287,113 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(self._run("--reference", "a", dists={})[0], 1)
 
 
+class TestInterpreter(unittest.TestCase):
+    """The script, not the agent, picks the interpreter XProf runs under."""
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def _resolve(self, body: str | None):
+        """Resolves against a stand-in runtime printing `body`, or none."""
+        script = self.root / "runtime.py"
+        if body is not None:
+            script.write_text(
+                "import sys\n"
+                "assert sys.argv[1:] == ['config', 'show', '--json', "
+                "'--package', 'p@1'], sys.argv\n"
+                f"print({body!r})\n",
+                encoding="utf-8")
+        with mock.patch.object(locate_xprof_skill,
+                               "runtime_script",
+                               return_value=script):
+            return locate_xprof_skill.resolve_interpreter("p@1")
+
+    def test_the_runtime_is_found_from_a_checkout_too(self):
+        """Installed it sits beside `scripts/`; here, at the repo root."""
+        self.assertEqual(locate_xprof_skill.runtime_script(),
+                         _REPO_ROOT / "framework" / "runtime.py")
+
+    def test_resolves_xprof_interpreter_else_the_running_python3(self):
+        local = ('{"profiles": {"a": {"backend": "local", "params": '
+                 '{"python_interpreter": "/workload/bin/python3"}}}}')
+        cases = {
+            "unset": ('{"profiles": {}}', sys.executable),
+            "a path": ('{"xprof_interpreter": "~/xv/bin/py"}',
+                       os.path.expanduser("~/xv/bin/py")),
+            # Left for PATH, as the shell did; not made `<cwd>/python3.12`.
+            "a bare name":
+            ('{"xprof_interpreter": "python3.12"}', "python3.12"),
+            "python_interpreter is never taken": (local, sys.executable),
+            "unreadable": ("not json", sys.executable),
+            "no runtime": (None, sys.executable),
+        }
+        for case, (body, expected) in cases.items():
+            with self.subTest(case=case):
+                interpreter, warnings = self._resolve(body)
+                self.assertEqual(interpreter, expected)
+                self.assertEqual([w.split(" from")[0] for w in warnings],
+                                 ["could not read xprof_interpreter"] if case
+                                 in ("unreadable", "no runtime") else [])
+
+    def _main(self, *argv, interpreter, warnings=(), run=None, report=None):
+        with mock.patch.object(locate_xprof_skill,
+                               "resolve_interpreter",
+                               return_value=(interpreter, list(warnings))), \
+                mock.patch.object(locate_xprof_skill.subprocess, "run",
+                                  **(run or {"return_value":
+                                             mock.Mock(returncode=7)})) as rn, \
+                mock.patch.object(locate_xprof_skill, "locate",
+                                  return_value=report) as loc, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            code = locate_xprof_skill.main(list(argv))
+        return code, out.getvalue(), rn, loc
+
+    def test_another_interpreter_reruns_the_script_without_package(self):
+        """The re-run checks its own interpreter and resolves nothing."""
+        code, _, run, loc = self._main("--package",
+                                       "p@1",
+                                       "--reference",
+                                       "a",
+                                       interpreter="/xv/bin/python3")
+        self.assertEqual(code, 7)
+        self.assertEqual(run.call_args.args[0],
+                         ["/xv/bin/python3",
+                          str(_SCRIPT), "--reference", "a"])
+        loc.assert_not_called()
+
+    def test_an_interpreter_that_cannot_run_names_the_fix(self):
+        """Missing, not executable, a broken shebang: all an OSError."""
+        code, out, _, _ = self._main(
+            "--package",
+            "p@1",
+            interpreter="python3.99",
+            run={"side_effect": FileNotFoundError(2, "No such file")})
+        self.assertEqual(code, 1)
+        self.assertIn("XProf is unusable here", out)
+        self.assertIn("xprof_interpreter is 'python3.99'", out)
+        self.assertIn("config --package p@1 set 'xprof_interpreter=<path>'",
+                      out)
+
+    def test_an_unreadable_configuration_survives_a_refusal(self):
+        """The user learns xprof_interpreter was skipped, not just to install
+        XProf into the host python3."""
+        report = {
+            "errors": ["no xprof distribution is installed"],
+            "warnings": []
+        }
+        code, out, run, _ = self._main(
+            "--package",
+            "p@1",
+            interpreter=sys.executable,
+            warnings=["could not read xprof_interpreter from `x`"],
+            report=report)
+        self.assertEqual(code, 1)
+        run.assert_not_called()
+        self.assertIn("- no xprof distribution is installed", out)
+        self.assertIn("Warning: could not read xprof_interpreter", out)
+
+
 class TestShipping(unittest.TestCase):
 
     def test_callers_relay_an_unusable_xprof_to_the_user(self):
@@ -301,6 +414,17 @@ class TestShipping(unittest.TestCase):
         self.assertIn("never installs XProf itself",
                       result["properties"]["failure_reason"]["description"])
 
+    def test_the_agent_leaves_the_interpreter_to_the_script(self):
+        profiling = (_PACKAGE_ROOT / "agents" /
+                     "tpu-diagnostics.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "python3 {{script:tpu-diagnostics/locate_xprof_skill.py}} "
+            "--package {{package_tag}}", profiling)
+        self.assertNotIn("<xprof_interpreter> {{script:", profiling)
+        rule = " ".join(profiling.split())
+        self.assertIn("never in `python_interpreter`", rule)
+        self.assertIn("not with a bare `xprof` from PATH", rule)
+
     def test_the_agent_ships_the_script_and_nothing_copies_the_skill(self):
         """tpu-diagnostics runs the script from the installed package, and no
         install step copies the skill into a harness: there is no second copy
@@ -311,6 +435,8 @@ class TestShipping(unittest.TestCase):
                 translate(_PACKAGE_ROOT, "claude-code", dist)
             self.assertTrue((dist / "scripts" / "tpu-diagnostics" /
                              "locate_xprof_skill.py").is_file())
+            # runtime_script() finds the runtime beside `scripts/`.
+            self.assertTrue((dist / "framework" / "runtime.py").is_file())
             self.assertEqual(list(dist.rglob("skills/xprof")), [])
 
 

@@ -41,20 +41,32 @@ Each is reported as an error ending in the command to ask the user to run. It
 installs nothing, and neither may the agents that read it: which XProf an
 environment holds is the user's call.
 
+Given `--package`, it also picks the interpreter: `xprof_interpreter` from the
+runtime's `config show --json`, re-running itself there, else the `python3`
+running it (never `python_interpreter`). It prints `<interpreter> -m
+xprof.cli.xprof_cli` as the CLI, so a venv that is not on PATH still works.
+
 Usage:
-    <xprof_interpreter> scripts/tpu-diagnostics/locate_xprof_skill.py
-    <xprof_interpreter> scripts/tpu-diagnostics/locate_xprof_skill.py \
-        --reference references/collect_profile.md
+    python3 scripts/tpu-diagnostics/locate_xprof_skill.py \
+        --package <package_tag>
+    python3 scripts/tpu-diagnostics/locate_xprof_skill.py \
+        --package <package_tag> --reference references/collect_profile.md
 
 The first prints SKILL.md and the names of its references; the second prints
 one reference, named as SKILL.md links it (`references/` and `.md` optional).
+Without `--package` it checks the interpreter running it, as before.
 Exits 0 with the text, 1 when XProf is unusable, 2 for an unknown reference.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -75,6 +87,49 @@ OTHER_DISTRIBUTION = "xprof-nightly"
 MINIMUM_VERSION = "2.24.0"
 UPGRADE = (f"{sys.executable} -m pip install -U "
            f"'{DISTRIBUTION}>={MINIMUM_VERSION}'")
+
+
+def runtime_script() -> Path:
+    """The runtime beside `scripts/` when installed, else a checkout's."""
+    here = Path(__file__).resolve()
+    installed = here.parents[2] / "framework" / "runtime.py"
+    return installed if installed.is_file() else (here.parents[3] /
+                                                  "framework" / "runtime.py")
+
+
+def resolve_interpreter(package: str) -> tuple[str, list[str]]:
+    """`xprof_interpreter`, else the running `python3`; and any warnings.
+
+    A bare name such as `python3.12` is kept for PATH, as the shell did. An
+    unreadable configuration warns and checks the running interpreter.
+    """
+    argv = [
+        sys.executable,
+        str(runtime_script()), "config", "show", "--json", "--package", package
+    ]
+    try:
+        out = subprocess.run(argv,
+                             capture_output=True,
+                             text=True,
+                             timeout=120,
+                             check=True).stdout
+        configured = str(json.loads(out).get("xprof_interpreter") or "")
+    except (OSError, ValueError, AttributeError,
+            subprocess.SubprocessError) as exc:
+        return sys.executable, [
+            f"could not read xprof_interpreter from `{shlex.join(argv)}` "
+            f"({exc}); checking {sys.executable} instead"
+        ]
+    if not configured.strip():
+        return sys.executable, []
+    return os.path.expanduser(configured.strip()), []
+
+
+def _is_running_interpreter(interpreter: str) -> bool:
+    # Compared without resolving symlinks: a venv's python links to the base
+    # interpreter, and resolving would take the venv for the base.
+    found = shutil.which(interpreter) or interpreter
+    return os.path.abspath(found) == os.path.abspath(sys.executable)
 
 
 def installed_distributions() -> dict[str, str]:
@@ -199,23 +254,29 @@ def reference_name(name: str) -> str:
 
 def render(report: dict[str, Any], reference: str | None) -> tuple[str, int]:
     """The text to print, and the exit status."""
+    warnings = [f"Warning: {warning}" for warning in report["warnings"]]
     if report["errors"]:
+        # Warnings too: one may say why this interpreter was checked at all.
         lines = ["XProf is unusable here, so there is no skill to read:"]
         lines += [f"- {error}" for error in report["errors"]]
-        return "\n".join(lines), 1
+        return "\n".join(lines + warnings), 1
 
     skill_dir = Path(report["skill_dir"])
     header = [
         f"XProf skill from {DISTRIBUTION}=={report['version']}, "
         f"the CLI under {report['interpreter']}.",
-    ]
-    header += [f"Warning: {warning}" for warning in report["warnings"]]
+        # The `xprof` console script is `xprof.cli.xprof_cli:main`.
+        f"Run XProf as {shlex.quote(report['interpreter'])} -m "
+        "xprof.cli.xprof_cli wherever the skill writes `xprof`; do not rely "
+        "on `xprof` being on PATH.",
+    ] + warnings
 
     if reference is None:
         script = Path(__file__).resolve()
         header += [
             "Print a reference SKILL.md links to with:",
-            f"  {report['interpreter']} {script} --reference <name>",
+            f"  {shlex.quote(report['interpreter'])} {script} "
+            "--reference <name>",
             "References: " + ", ".join(report["references"]),
         ]
         body = report["skill_md"]
@@ -232,14 +293,52 @@ def render(report: dict[str, Any], reference: str | None) -> tuple[str, int]:
     return "\n".join(header + ["", f"===== {title} =====", text]), 0
 
 
+def run_under(interpreter: str, package: str, reference: str | None) -> int:
+    """Runs this script again under `interpreter`, relaying its output.
+
+    The XProf checks read the installed distributions in-process, so they
+    have to run in the interpreter that holds XProf. The re-run gets no
+    `--package`, so it checks the interpreter running it and resolves nothing.
+    """
+    argv = [interpreter, str(Path(__file__).resolve())]
+    if reference is not None:
+        argv += ["--reference", reference]
+    try:
+        return subprocess.run(argv, check=False).returncode
+    except OSError as exc:
+        fix = shlex.join([
+            "python3",
+            str(runtime_script()), "config", "--package", package, "set",
+            "xprof_interpreter=<path>"
+        ])
+        print("XProf is unusable here, so there is no skill to read:\n"
+              f"- xprof_interpreter is {interpreter!r}, which could not be "
+              f"run ({exc}). Ask the user for the Python interpreter that "
+              f"holds xprof, and to run: {fix}")
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--reference",
         help="print this reference instead of SKILL.md, named as SKILL.md "
         "links it, e.g. references/collect_profile.md")
+    parser.add_argument(
+        "--package",
+        help="the package tag, e.g. tpu-agent-suite@1.0.0, whose "
+        "configuration names xprof_interpreter")
     args = parser.parse_args(argv)
-    text, status = render(locate(), args.reference)
+
+    warnings: list[str] = []
+    if args.package:
+        interpreter, warnings = resolve_interpreter(args.package)
+        if not _is_running_interpreter(interpreter):
+            return run_under(interpreter, args.package, args.reference)
+
+    report = locate()
+    report["warnings"] = warnings + report["warnings"]
+    text, status = render(report, args.reference)
     print(text)
     return status
 

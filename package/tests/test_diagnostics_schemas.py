@@ -208,26 +208,6 @@ class TestDiagnosticsSchemas(unittest.TestCase):
                 self.assertIn("xprof", package["host_dependencies"])
                 self.assertNotIn("xprof", package["tpu_dependencies"])
 
-    def test_xprof_runs_on_the_host_interpreter_not_the_workloads(self):
-        """On `local` the workload interpreter is on this machine but has no XProf.
-
-        Falling back to `python_interpreter` there blocked every profile read
-        in an environment built from the TPU requirements.
-        """
-        text = (_PACKAGE_ROOT /
-                "agents/tpu-diagnostics.md").read_text(encoding="utf-8")
-        rule = re.search(r"`<xprof_interpreter>` is the top-level.*?\n\n",
-                         text, re.DOTALL)
-        self.assertIsNotNone(rule)
-        rule = " ".join(rule.group(0).split())
-        self.assertIn("config show --json --package {{package_tag}}", rule)
-        self.assertIn(
-            "otherwise it is the `python3` already running you, on every "
-            "backend", rule)
-        self.assertIn(
-            "Never take XProf from `python_interpreter`, even on `local`",
-            rule)
-
     # -- the request: prose and programmatic callers alike -------------------
 
     def test_request_accepts_a_prompt_and_run_id_alone(self):
