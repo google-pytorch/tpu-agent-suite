@@ -1,6 +1,7 @@
 # Developing TPU agent suite
 
-How to set up a development environment, what the CI gates are, and the short
+How to set up a development environment, the groundrules every change follows,
+what the CI gates are, and the short
 path for the common contributions: a new agent, a tpu-knowledge-base source, an
 eval dataset. External pull requests are not accepted at this time (see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md)); this guide is for maintainers.
@@ -12,6 +13,53 @@ Reference material this guide points into:
 - [`framework/README.md`](../framework/README.md): compiler, installer, hooks, runtime reference.
 - [`package/README.md`](../package/README.md): the full guide to converting an existing skill into a TPU agent suite package.
 - [`eval/README.md`](../eval/README.md): the evaluation runner.
+
+---
+
+## Groundrules
+
+These apply to every change merged to `main`.
+
+1. **New prose units follow the package format.** A new agent, skill or
+   reference carries the frontmatter that [Package](design/package.md)
+   defines. A skill is listed under `skills` or `add_skills` in the manifest
+   that ships it. Agents and references are not listed: the compiler finds
+   them through the `delegates` and `references` frontmatter of the units
+   that use them.
+2. **No bespoke task-agnostic scripts.** Functionality that more than one agent
+   needs goes through the runtime or a shared agent. For example, TPU access
+   goes through `runtime.py compute` commands, not a script of your own. Every
+   agent declares meaningful `accepts` and `produces` schemas.
+3. **`package.release.json` ships only thoroughly tested functionality.**
+   Skills listed there reach every user, so adding one is a product decision
+   as well as an engineering one. New functionality is added to it only in
+   the version-bump PR (the PR that sets the next `"version"`), and only once:
+   - its user journeys show consistently performant eval results;
+   - the product owners approve releasing it;
+   - it is described in that release's `release-notes/vX.Y.Z.md`.
+4. **Experimental work uses a separate manifest.** Experimental work lives in
+   a manifest that `extends` `package.release.json`: `package.experimental.json`
+   if it belongs to that initiative, or one of your own (see
+   [The experimental package](#the-experimental-package-tpu-agent-suite-experimental)).
+   It merges to `main` as long as it does not break anything already released.
+5. **Reuse first; duplicate only with a plan.** New prose units and code should
+   reuse what already exists, within reason. Duplication is acceptable when
+   reuse would risk breaking existing functionality, or would significantly slow
+   down introducing or validating new functionality. In that case, the PR
+   states what is duplicated and the plan for removing it.
+
+### Versioning
+
+Releases follow [Semantic Versioning](https://semver.org). The interface is
+what users depend on: skill names, the install layout, configuration and the
+runtime CLI. Before 1.0.0:
+
+- a regular release bumps the minor version (0.8.0 → 0.9.0) and may change
+  the interface;
+- a bug-fix release bumps the patch version (0.8.0 → 0.8.1) and must not.
+
+1.0.0 marks the commitment to a stable interface. After that, an incompatible
+change needs a major version bump.
 
 ---
 
@@ -258,15 +306,28 @@ enforces.
    {{runtime}} my-command --harness {{harness}} --package {{package_tag}}
    ```
 
-2. **Register it** in `package/package.release.json` under `skills`, by name:
+2. **Register it in a manifest.** Skills are what users see and invoke, so
+   where you register one decides who gets it. (Agents and references are
+   not listed; a skill pulls them in through `delegates` and `references`.)
+
+   - **To build and test it,** list it under `add_skills` in a manifest that
+     `extends` `package.release.json` (see
+     [The experimental package](#the-experimental-package-tpu-agent-suite-experimental)).
+     Use the manifest of the initiative it belongs to, such as
+     `package.experimental.json` for the vLLM optimization skills, or create
+     one for your own work.
+   - **To release it to every user,** it moves to `skills` in
+     `package/package.release.json`. That is a product decision as much as an
+     engineering one: it needs approval, and happens only in a version-bump
+     PR (see [Groundrules](#groundrules)).
 
    ```json
-   "skills": ["tpu-agent", "tpu-agent-export-trajectory", "my-skill"]
+   "add_skills": ["my-skill"]
    ```
 
    The name is the directory under `skills/`, and the document's frontmatter
    must agree with it, so the two cannot drift apart. No skill is special:
-   the order in `skills` means nothing.
+   the order in either list means nothing.
 
 3. **Write the body to leave as little to judgement as possible.** State the
    single command to run, say what to do with each failure the command can
@@ -279,7 +340,8 @@ enforces.
    `dist/<harness>/tpu-agent-suite/skills/<skill-name>/SKILL.md` for all four
    harnesses, and `tpu-agent-suite-install.json` gains a copy rule per harness.
    Nothing else needs changing: the install specs emit one copy rule for
-   every declared skill.
+   every declared skill. For another manifest, pass `--manifest <file>` to
+   `compose`, `verify`, `lint` and `translate`.
 
 ---
 
