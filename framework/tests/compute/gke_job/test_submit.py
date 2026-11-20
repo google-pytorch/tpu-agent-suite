@@ -386,6 +386,9 @@ class TestGkeJobSubmit(unittest.TestCase):
                          {"requests": {
                              "cpu": "1"
                          }})
+        pod_labels = fake.applied_manifest(
+        )["spec"]["template"]["metadata"]["labels"]
+        self.assertEqual(pod_labels[gke_job.manifest.COLOCATED_LABEL], "true")
         with self.assertRaises(ComputeConfigError):
             make_driver(colocate_requests="cpu")
         with self.assertRaises(ComputeConfigError):

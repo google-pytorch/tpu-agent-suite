@@ -604,6 +604,13 @@ class TestGkeJobMultiHost(unittest.TestCase):
             "requiredDuringSchedulingIgnoredDuringExecution"][0]
         self.assertEqual(anti["topologyKey"],
                          gke_job.gke_common.NODEPOOL_LABEL)
+        self.assertIn(
+            {
+                "key": gke_job.manifest.COLOCATED_LABEL,
+                "operator": "DoesNotExist",
+            },
+            anti["labelSelector"]["matchExpressions"],
+        )
         # For hosts > 1, a refused Service fails submit and cleans up the Job.
         refuse = FakeKubectl({
             "apply -f - -o jsonpath": (0, "uid-1", ""),

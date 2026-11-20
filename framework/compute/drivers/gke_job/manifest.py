@@ -92,6 +92,9 @@ POD_CACHE_ENV = {
 # HF_HUB_CACHE may be shared and is left alone.
 POD_HF_CACHE_ENV = "TPU_AGENT_SUITE_POD_HF_CACHE"
 
+# Pod label of a --colocate-with client (see job_manifest).
+COLOCATED_LABEL = "tpu-agent-suite/colocated"
+
 
 def _pod_cache_command(command: list[str]) -> list[str]:
     """Wrap `command` to set any missing POD_CACHE_ENV defaults.
@@ -498,6 +501,9 @@ def job_manifest(
         # flavor to a pod that requests nothing.
         scheduling = dict(placement)
         resources: dict[str, Any] = {"requests": config.colocate_requests}
+        # Exempt from a multi-host server's pod anti-affinity (below), which
+        # otherwise keeps every colocated client off the server's node.
+        template_metadata.setdefault("labels", {})[COLOCATED_LABEL] = "true"
     elif config.cpu_requests:
         # A CPU Job. Without the TPU toleration it lands on a CPU node.
         scheduling = {}
@@ -668,6 +674,12 @@ def job_manifest(
                                 "key": "job-name",
                                 "operator": "NotIn",
                                 "values": [name],
+                            },
+                            {
+                                # A chipless colocated client can't deadlock
+                                # a slice: let it onto the server's node.
+                                "key": COLOCATED_LABEL,
+                                "operator": "DoesNotExist",
                             },
                         ],
                     },
