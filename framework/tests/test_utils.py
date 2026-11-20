@@ -47,8 +47,14 @@ class TestUtils(unittest.TestCase):
         self.assertTrue(utils.version_satisfies(v2, ">=1.2.0"))
 
     def test_schema_validator(self):
-        props = dict(name=dict(type="string", pattern=r"^[A-Z][a-z]+$"),
+        props = dict(name=dict(type="string",
+                               maxLength=8,
+                               pattern=r"^[A-Z][a-z]+$"),
                      age=dict(type="integer"),
+                     score=dict(type="number", minimum=0.0),
+                     tags=dict(type="array",
+                               minItems=1,
+                               items=dict(type="string")),
                      nick=dict(type=["string", "null"]))
         schema = dict(type="object",
                       required=["name", "age"],
@@ -62,6 +68,10 @@ class TestUtils(unittest.TestCase):
             (dict(name="Alice"), "$/age: required property is missing"),
             (dict(ok, age=True), "$/age: expected integer, got bool"),
             (dict(ok, name="alice1"), "$/name: string does not match"),
+            (dict(ok, name="Alexander"), "$/name: string exceeds maxLength 8"),
+            (dict(ok, tags=[]), "$/tags: array is too short"),
+            (dict(ok, score=float("nan")), "$/score: number must be finite"),
+            (dict(ok, score=float("inf")), "$/score: number must be finite"),
         ):
             with self.subTest(instance=instance):
                 errors = utils.validate_instance(instance, schema)

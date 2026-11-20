@@ -90,7 +90,7 @@ def job_roots() -> list[Path]:
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _validate_job_id(job_id: str) -> str:
+def validate_job_id(job_id: str) -> str:
     """Require `job_id` to be a single non-path identifier segment."""
     if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
         raise utils.TpuAgentSuiteError(f"invalid job_id: {job_id!r}")
@@ -102,7 +102,7 @@ def job_directory(job_id: str) -> Path:
 
     For a job with no record yet, the directory it would be created in.
     """
-    _validate_job_id(job_id)
+    validate_job_id(job_id)
     record = JobRecord.load(job_id)
     return record.directory if record else jobs_dir() / job_id
 
@@ -283,7 +283,7 @@ class JobRecord:
                serve: bool = False,
                **fields: Any) -> JobRecord:
         """Create a record with a fresh id and its on-disk directory."""
-        resolved_id = (_validate_job_id(job_id)
+        resolved_id = (validate_job_id(job_id)
                        if job_id is not None else new_job_id())
         record = cls(
             job_id=resolved_id,

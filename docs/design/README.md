@@ -126,7 +126,8 @@ The central directory, shared by every workspace:
 │   └── journal.jsonl              entries moved out of study.json when it filled up
 ├── campaigns/                     protected hillclimber state (denied to agents where the harness supports path rules)
 │   ├── campaign.db                the SQLite coordination store across campaigns
-│   ├── <campaign_id>/             each campaign's detached bare git repo, sealed scripts, sweeps, and logs
+│   ├── logs/events_unscoped.jsonl rejections before a campaign is resolved
+│   ├── <campaign_id>/             each campaign's detached bare git repo, sealed scripts, sweeps, and logs/events.jsonl
 │   ├── sealed_jobs/<job_id>/      jobs hc.py submitted: their record, log, and write-once sealed/ outputs
 │   └── runs/<run_id>/             per-run active_campaign_id pointers
 ├── sessions/<session_id>.json     which run each session used, and the context its hooks cached

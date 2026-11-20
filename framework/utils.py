@@ -22,6 +22,7 @@ import datetime
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -125,7 +126,9 @@ JSON_SCHEMA_KEYWORDS: frozenset[str] = frozenset({
     "examples",
     "format",  # annotation only; not enforced
     "items",
+    "maxLength",
     "maximum",
+    "minItems",
     "minimum",
     "minLength",
     "oneOf",
@@ -753,6 +756,14 @@ class JsonSchemaValidator:
         if "required" in schema and not isinstance(schema["required"], list):
             errors.append(f"{path}/required: expected an array")
 
+        for bound_kw in ("minLength", "maxLength", "minItems"):
+            if bound_kw in schema:
+                bound_val = schema[bound_kw]
+                if (not isinstance(bound_val, int)
+                        or isinstance(bound_val, bool) or bound_val < 0):
+                    errors.append(
+                        f"{path}/{bound_kw}: expected a non-negative integer")
+
         properties = schema.get("properties", {})
         if not isinstance(properties, dict):
             errors.append(f"{path}/properties: expected an object")
@@ -841,6 +852,9 @@ class JsonSchemaValidator:
         if isinstance(instance, str):
             if len(instance) < schema.get("minLength", 0):
                 errors.append(f"{path}: string is too short")
+            if "maxLength" in schema and len(instance) > schema["maxLength"]:
+                errors.append(
+                    f"{path}: string exceeds maxLength {schema['maxLength']}")
             if "pattern" in schema and not re.search(schema["pattern"],
                                                      instance):
                 errors.append(
@@ -848,10 +862,13 @@ class JsonSchemaValidator:
 
         if isinstance(instance,
                       (int, float)) and not isinstance(instance, bool):
-            if "minimum" in schema and instance < schema["minimum"]:
-                errors.append(f"{path}: value is below minimum")
-            if "maximum" in schema and instance > schema["maximum"]:
-                errors.append(f"{path}: value is above maximum")
+            if isinstance(instance, float) and not math.isfinite(instance):
+                errors.append(f"{path}: number must be finite")
+            else:
+                if "minimum" in schema and instance < schema["minimum"]:
+                    errors.append(f"{path}: value is below minimum")
+                if "maximum" in schema and instance > schema["maximum"]:
+                    errors.append(f"{path}: value is above maximum")
 
         if isinstance(instance, dict):
             properties = schema.get("properties", {})
@@ -904,15 +921,19 @@ class JsonSchemaValidator:
                             allow_additional_properties,
                         ))
 
-        if isinstance(instance, list) and "items" in schema:
-            for index, item in enumerate(instance):
-                errors.extend(
-                    cls.validate_instance(
-                        item,
-                        schema["items"],
-                        f"{path}/{index}",
-                        allow_additional_properties=allow_additional_properties,
-                    ))
+        if isinstance(instance, list):
+            if len(instance) < schema.get("minItems", 0):
+                errors.append(f"{path}: array is too short")
+            if "items" in schema:
+                for index, item in enumerate(instance):
+                    errors.extend(
+                        cls.validate_instance(
+                            item,
+                            schema["items"],
+                            f"{path}/{index}",
+                            allow_additional_properties=
+                            allow_additional_properties,
+                        ))
 
         if "oneOf" in schema:
             alternatives = schema["oneOf"]

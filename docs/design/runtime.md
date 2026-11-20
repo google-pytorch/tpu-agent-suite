@@ -39,6 +39,7 @@ the same path in the repository and in a build, and its imports have one form,
 | `framework/journal.py` | The session journal: one experiment timeline per run. |
 | `framework/bg_ledger.py` | The per-agent ledger of background work and the idle gate: a subagent does not finish while a child or command it launched is still running. |
 | `framework/items.py` | The run's store of delegated work: what each agent was asked, who holds it, what came back and who waits on it. |
+| `framework/hc/` | The Hillclimber's protected campaign store, detached bare Git repository, and coordination schemas. |
 | `framework/trajectory/` | The trajectory export. |
 | `framework/utils.py` | Shared helpers: schema validation and safe path handling. |
 | `framework/paths.py` | Locating the central store, runs, sessions, studies, protected campaigns, and installed packages. |

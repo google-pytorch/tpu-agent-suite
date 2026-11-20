@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hillclimber Campaign Config",
+  "description": "Static campaign identity metadata passed to hc.py campaign open.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "target_model",
+    "engine",
+    "accelerator"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "pattern": "\\S"
+    },
+    "owner": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 65536,
+      "pattern": "\\S"
+    },
+    "target_model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "pattern": "\\S"
+    },
+    "engine": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "pattern": "\\S"
+    },
+    "accelerator": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "pattern": "\\S"
+    }
+  }
+}

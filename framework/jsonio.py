@@ -31,7 +31,7 @@ def load_json(path: Path) -> Any:
     """Load JSON content from a file with descriptive error handling."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise errors.TpuAgentSuiteError(
             f"cannot read JSON {path}: {exc}") from exc
 
@@ -47,8 +47,6 @@ def load_json_or_empty(path: Path) -> dict[str, Any]:
     try:
         data = load_json(path)
     except (errors.TpuAgentSuiteError, OSError, ValueError):
-        # ValueError also covers a file that is not valid UTF-8, which
-        # load_json lets through.
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -109,8 +107,8 @@ def format_json(value: Any) -> str:
     )
 
 
-def write_text_atomic(path: Path, text: str, *, mkdir: bool = True) -> None:
-    """Replace a file's contents with `text` so no reader sees a partial write."""
+def write_bytes_atomic(path: Path, data: bytes, *, mkdir: bool = True) -> None:
+    """Replace a file's contents with `data` so no reader sees a partial write."""
     if mkdir:
         path.parent.mkdir(parents=True, exist_ok=True)
     # Write-then-rename: readers see either the old document or the new one,
@@ -119,7 +117,7 @@ def write_text_atomic(path: Path, text: str, *, mkdir: bool = True) -> None:
     tmp_path = path.with_name(
         f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.write_bytes(data)
         try:
             # Carry the mode over: renaming would otherwise hand the file
             # whatever the umask gave the scratch file. Masked to permission
@@ -130,6 +128,11 @@ def write_text_atomic(path: Path, text: str, *, mkdir: bool = True) -> None:
         os.replace(tmp_path, path)
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def write_text_atomic(path: Path, text: str, *, mkdir: bool = True) -> None:
+    """Replace a file's contents with `text` so no reader sees a partial write."""
+    write_bytes_atomic(path, text.encode("utf-8"), mkdir=mkdir)
 
 
 def write_json(path: Path, value: Any) -> None:

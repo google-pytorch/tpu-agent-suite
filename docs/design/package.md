@@ -293,7 +293,7 @@ flowchart LR
 - Everything a prose unit reads or runs is installed once per version, in the
   central store, and shared by every workspace.
 - Things that do not depend on the package version live beside the central
-  store in `~/.tpu-agent-suite/`: `runs/` and `studies/`.
+  store in `~/.tpu-agent-suite/`: `runs/`, `studies/`, and `campaigns/`.
 - Each workspace keeps its own compute settings and install record directly
   in `.tpu-agent-suite/`, as `environment.json` and `ownership.json`; it holds one
   package at a time.

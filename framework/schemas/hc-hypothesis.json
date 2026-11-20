@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hillclimber Hypothesis",
+  "description": "Optimization hypothesis payload passed to hc.py hypothesis add.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "lever_kind",
+    "target_scope",
+    "claim",
+    "short_claim"
+  ],
+  "properties": {
+    "lever_kind": {
+      "type": "string",
+      "enum": [
+        "kernel",
+        "sharding",
+        "collective",
+        "quantization",
+        "offload",
+        "runtime_config",
+        "compiler_flag"
+      ]
+    },
+    "target_scope": {
+      "type": "string",
+      "enum": [
+        "canonical_ops",
+        "redundant_relayout",
+        "step"
+      ]
+    },
+    "target_canonical_ops": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "layer_kind",
+          "operator"
+        ],
+        "properties": {
+          "layer_kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "pattern": "\\S"
+          },
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "target_relayout_edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "producer",
+          "consumer"
+        ],
+        "properties": {
+          "producer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "layer_kind",
+                  "operator"
+                ],
+                "properties": {
+                  "layer_kind": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536,
+                    "pattern": "\\S"
+                  },
+                  "operator": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536,
+                    "pattern": "\\S"
+                  }
+                }
+              }
+            ]
+          },
+          "consumer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "layer_kind",
+                  "operator"
+                ],
+                "properties": {
+                  "layer_kind": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536,
+                    "pattern": "\\S"
+                  },
+                  "operator": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536,
+                    "pattern": "\\S"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "claim": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "pattern": "\\S"
+    },
+    "short_claim": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "\\S"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_type",
+          "locator",
+          "summary"
+        ],
+        "properties": {
+          "source_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "pattern": "\\S"
+          },
+          "locator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "pattern": "\\S"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "target_code_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 65536,
+        "pattern": "\\S"
+      }
+    }
+  }
+}
