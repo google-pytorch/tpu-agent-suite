@@ -13,42 +13,14 @@
 # limitations under the License.
 """Unit tests for valid_tool_calls verifier."""
 
-import importlib.util
-import json
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
-def _load_verifier_module():
-    """Loads valid_tool_calls.py with an identity @criterion decorator for testing."""
-    rk = types.ModuleType("rewardkit")
-
-    def _criterion(fn=None, *, description: str | None = None):
-
-        def _decorator(func):
-            func._criterion_description = description
-            return func
-
-        if fn is not None:
-            return _decorator(fn)
-        return _decorator
-
-    rk.criterion = _criterion  # type: ignore[attr-defined]
-    with patch.dict(sys.modules, {"rewardkit": rk}):
-        script_path = Path(__file__).resolve().parent / "valid_tool_calls.py"
-        spec = importlib.util.spec_from_file_location("valid_tool_calls",
-                                                      script_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-
-valid_tool_calls_mod = _load_verifier_module()
+from eval.tests.verifiers import helpers
+from eval.verifiers.efficiency_metrics import \
+    valid_tool_calls as valid_tool_calls_mod
 
 
 class ValidToolCallsTest(unittest.TestCase):
@@ -479,36 +451,19 @@ class ValidToolCallsTest(unittest.TestCase):
         self.assertEqual(outcomes, [("bash", True), ("bash", False)])
 
     def test_load_verifier_params_from_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            params_path = Path(tmp) / "verifier_params.json"
-            folder_key = Path(valid_tool_calls_mod.__file__).parent.name
-            params_path.write_text(
-                json.dumps({folder_key: {
-                    "min_ratio": 0.75
-                }}),
-                encoding="utf-8",
-            )
-            orig_is_file = Path.is_file
-            orig_read_text = Path.read_text
+        folder_key = Path(valid_tool_calls_mod.__file__).parent.name
+        with helpers.harness() as harness:
+            harness.write_params({folder_key: {"min_ratio": 0.75}})
+            self.assertEqual(valid_tool_calls_mod._load_verifier_params(),
+                             {"min_ratio": 0.75})
 
-            with (
-                    patch.object(
-                        Path,
-                        "is_file",
-                        lambda self: True if str(self) ==
-                        "/tests/verifier_params.json" else orig_is_file(self),
-                    ),
-                    patch.object(
-                        Path,
-                        "read_text",
-                        lambda self, *a, **kw: orig_read_text(
-                            params_path, *a, **kw)
-                        if str(self) == "/tests/verifier_params.json" else
-                        orig_read_text(self, *a, **kw),
-                    ),
-            ):
-                loaded = valid_tool_calls_mod._load_verifier_params()
-                self.assertEqual(loaded, {"min_ratio": 0.75})
+    def test_trajectory_read_from_the_harness_logs(self) -> None:
+        with helpers.harness() as harness:
+            self.assertEqual(
+                valid_tool_calls_mod.valid_tool_calls(harness.workspace), 0.0)
+            harness.write_trajectory({"steps": []})
+            self.assertEqual(
+                valid_tool_calls_mod.valid_tool_calls(harness.workspace), 1.0)
 
 
 if __name__ == "__main__":

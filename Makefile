@@ -124,6 +124,7 @@ test-knowledge-base:
 # dependency, so discovering the whole directory errors on collection rather
 # than skipping. Install harbor and run the directory directly to get those as well.
 test-eval:
+	$(PYTHON) -m unittest discover -s eval/tests/verifiers -t . -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_antigravity_session_supervisor.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_attention_analyze.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_claude_session_supervisor.py" -v

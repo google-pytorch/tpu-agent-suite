@@ -1,0 +1,259 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Trajectory helpers for tpu-model-onboarding's preflight sequence.
+
+Shared by the preflight-* verifiers, which declare the `@criterion` functions
+each task scores.
+
+preflight-check.md runs four steps in order: resolve the name
+(`--resolve`), the Hub-side checks on the host (`--hub_only`), the image
+probe on the accelerator (`image_probe.py` through `compute run`), and the
+full check where transformers is installed. These checks read which of those
+commands ran, where, and in what order. An agent often chains steps in one
+shell call, so each call is read statement by statement.
+
+The commands run inside the tpu-model-onboarding subagent. Harbor's Claude Code
+trajectory includes subagent steps, in time order. Its Antigravity trajectory
+holds only the main session, so the checks also read Antigravity's own
+per-session step transcripts, a subagent's included. Tool names and argument
+keys are matched for Claude Code, Antigravity and Codex alike. Prose -- the verdict and how it is reported -- is the judge's to
+score.
+"""
+
+import glob
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+_CMD_TOOLS = {
+    "bash", "run_shell_command", "run_command", "execute_command", "sh",
+    "terminal", "exec", "shell"
+}
+_CMD_KEYS = ("command", "commandline", "cmd", "command_line")
+_SUBAGENT_TOOLS = {
+    "agent", "task", "invoke_subagent", "subagent", "delegate", "spawn_agent"
+}
+# Where each harness names the agent a delegation starts.
+_TARGET_KEYS = ("subagent_type", "subagent", "agent_name", "type_name",
+                "typename", "role")
+# Antigravity's step transcripts, one per session, subagents' included.
+_AGY_HOME_TRANSCRIPTS = "/root/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript*.jsonl"
+
+_PREFLIGHT = "preflight_check.py"
+_PROBE = "image_probe.py"
+# `{{runtime}} compute` renders as `compute --package <tag>`, so options can
+# stand between `compute` and `run`.
+_COMPUTE_RUN = re.compile(
+    r"\bcompute(?:\s+--?[\w-]+(?:(?:=|\s+)(?!-)\S+)?)*\s+run\b")
+_INSTALL_TRANSFORMERS = re.compile(
+    r"\b(pip3?|uv\s+pip)\s+install\b[^\n;&|]*\btransformers\b")
+# One shell call often runs several steps; these split it into statements.
+_STATEMENT_BREAK = re.compile(r"\n|&&|\|\||;")
+# NAME=value, the value bare or quoted: R="python3 runtime.py compute ...".
+_ASSIGNMENT = re.compile(
+    r"""^(?:export\s+)?([A-Za-z_]\w*)=(?:"([^"]*)"|'([^']*)'|(\S*))$""")
+_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+
+
+def _logs_dir() -> Path:
+    """The run's logs as the harness lays them out: $LOGS_DIR, else /logs."""
+    return Path(os.environ.get("LOGS_DIR") or "/logs")
+
+
+def _trajectory_path() -> Path:
+    """The agent's trajectory, where the harness writes it."""
+    return _logs_dir() / "agent" / "trajectory.json"
+
+
+def _load_trajectory(path: str | Path) -> dict[str, Any] | None:
+    """Load an ATIF trajectory JSON file. Returns None on error."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def load_trajectory() -> dict[str, Any]:
+    """The run's trajectory, from where the harness wrote it."""
+    trajectory = _load_trajectory(_trajectory_path())
+    return {} if trajectory is None else trajectory
+
+
+def load_agy_transcripts() -> list[dict[str, Any]]:
+    """Tool calls from Antigravity's step transcripts, file by file in order."""
+    calls: list[dict[str, Any]] = []
+    paths = sorted({
+        p
+        for pattern in (
+            _AGY_HOME_TRANSCRIPTS,
+            f"{glob.escape(str(_logs_dir()))}/agent/**/transcript*.jsonl")
+        for p in glob.glob(pattern, recursive=True)
+    })
+    for path in paths:
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                calls.extend(tc for tc in record.get("tool_calls") or []
+                             if isinstance(tc, dict))
+    return calls
+
+
+def _call(name: Any, args: Any) -> tuple[str, dict[str, Any]]:
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {"raw": args}
+    return str(name or "").lower(), args if isinstance(args, dict) else {}
+
+
+def tool_calls() -> list[tuple[str, dict[str, Any]]]:
+    """(lower-cased tool name, arguments) for every call.
+
+    The trajectory's calls in order, then Antigravity's transcripts' calls,
+    each transcript in its own order. Preflight runs in one subagent, so the
+    order of its commands is kept either way.
+    """
+    raw: list[dict[str, Any]] = []
+    trajectory = load_trajectory()
+    for step in trajectory.get("steps") or []:
+        if isinstance(step, dict):
+            raw.extend(tc for tc in step.get("tool_calls") or []
+                       if isinstance(tc, dict))
+    raw.extend(load_agy_transcripts())
+    return [
+        _call(
+            tc.get("function_name") or tc.get("name"),
+            tc.get("arguments") or tc.get("args") or tc.get("input"))
+        for tc in raw
+    ]
+
+
+def statements(command: str) -> list[str]:
+    """The statements of one shell call, in order.
+
+    Line continuations are joined, and a variable set by an assignment
+    (`S=.../preflight_check.py`, or quoted, `R="python3 runtime.py compute"`)
+    is expanded in the statements after it, so `python3 $S --resolve=...`
+    still names the script and `$R run ...` still runs on the accelerator.
+    """
+    env: dict[str, str] = {}
+    found = []
+    for part in _STATEMENT_BREAK.split(command.replace("\\\n", " ")):
+        part = _VARIABLE.sub(
+            lambda m: env.get(m.group(1) or m.group(2), m.group(0)),
+            part.strip())
+        assigned = _ASSIGNMENT.match(part)
+        if assigned:
+            env[assigned.group(1)] = next(g for g in assigned.groups()[1:]
+                                          if g is not None)
+        elif part:
+            found.append(part)
+    return found
+
+
+def commands() -> list[str]:
+    """Every shell statement the agent, or a subagent, ran, in order."""
+    found = []
+    for name, args in tool_calls():
+        if name in _CMD_TOOLS:
+            for k, v in args.items():
+                if k.lower() in _CMD_KEYS and v:
+                    found += statements(str(v))
+    return found
+
+
+def delegation_targets() -> list[str]:
+    """The agent each delegation started, in order; "" when none is named."""
+    targets = []
+    for name, args in tool_calls():
+        if name not in _SUBAGENT_TOOLS:
+            continue
+        named = [
+            str(v) for k, v in args.items()
+            if k.lower() in _TARGET_KEYS and isinstance(v, str) and v
+        ]
+        # Antigravity starts several at once, as a list of subagents.
+        for sub in args.get("Subagents") or args.get("subagents") or []:
+            if isinstance(sub, dict):
+                named += [
+                    str(v) for k, v in sub.items()
+                    if k.lower() in _TARGET_KEYS and isinstance(v, str) and v
+                ]
+        targets += [n.lower().replace("_", "-") for n in named] or [""]
+    return targets
+
+
+def first_index(cmds: list[str], matches) -> int | None:
+    """Position of the first command `matches` accepts, if any."""
+    return next((i for i, c in enumerate(cmds) if matches(c)), None)
+
+
+def is_resolve(cmd: str) -> bool:
+    return _PREFLIGHT in cmd and "--resolve" in cmd
+
+
+def is_hub_only(cmd: str) -> bool:
+    return _PREFLIGHT in cmd and "--hub_only" in cmd
+
+
+def is_full_check(cmd: str) -> bool:
+    """The full check: a --model run that is neither --hub_only nor --resolve."""
+    return (_PREFLIGHT in cmd and "--model" in cmd and "--hub_only" not in cmd
+            and "--resolve" not in cmd)
+
+
+def on_accelerator(cmd: str) -> bool:
+    return bool(_COMPUTE_RUN.search(cmd))
+
+
+def is_probe(cmd: str) -> bool:
+    return _PROBE in cmd and on_accelerator(cmd)
+
+
+def installed_transformers(cmd: str) -> bool:
+    return bool(_INSTALL_TRANSFORMERS.search(cmd))
+
+
+def artifact(name_glob: str, nested: bool = False) -> list[Path]:
+    """Artifact files of this run matching `name_glob`.
+
+    At the artifacts root, where another agent reads them, unless `nested`:
+    then in any directory under it too, for a file only its writer reads.
+    """
+    pattern = f"**/{name_glob}" if nested else name_glob
+    root = glob.escape(str(_logs_dir() / "artifacts"))
+    return sorted(
+        Path(p) for p in glob.glob(f"{root}/{pattern}", recursive=True)
+        if Path(p).is_file())
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}

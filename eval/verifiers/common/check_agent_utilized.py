@@ -14,6 +14,7 @@
 """RewardKit verifier to check if an agent utilized a subagent."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -28,22 +29,40 @@ def _load_trajectory(path: str | Path) -> dict[str, Any] | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
 
 
+def _logs_dir() -> Path:
+    """The run's logs as the harness lays them out: $LOGS_DIR, else /logs."""
+    return Path(os.environ.get("LOGS_DIR") or "/logs")
+
+
+def _tests_dir() -> Path:
+    """The task's tests directory: $TESTS_DIR, else /tests."""
+    return Path(os.environ.get("TESTS_DIR") or "/tests")
+
+
+def _trajectory_path() -> Path:
+    """The agent's trajectory, where the harness writes it."""
+    return _logs_dir() / "agent" / "trajectory.json"
+
+
 def _load_verifier_params() -> dict[str, Any]:
-    p = Path("/tests/verifier_params.json")
-    if not p.is_file():
-        return {}
+    """This verifier's table in the task's verifier_params.json, else {}.
+
+    The table is named after the folder this verifier is staged in.
+    """
+    path = _tests_dir() / "verifier_params.json"
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        key = Path(__file__).parent.name
-        val = data.get(key, data)
-        return val if isinstance(val, dict) else data
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    params = data.get(Path(__file__).parent.name)
+    return params if isinstance(params, dict) else {}
 
 
 def _collect_tool_calls(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -58,12 +77,10 @@ def _collect_tool_calls(data: dict[str, Any]) -> list[dict[str, Any]]:
 @criterion(description="Verify that a subagent was invoked during execution")
 def check_agent_utilized(workspace: Path) -> bool:
     """Checks Harbor's standardized ATIF trajectory for subagent invocation."""
-    traj = _load_trajectory("/logs/agent/trajectory.json") or _load_trajectory(
-        "/logs/trajectory.json")
+    traj = _load_trajectory(_trajectory_path())
     if not traj:
-        print(
-            "check_agent_utilized: [FAIL] No trajectory found at /logs/agent/trajectory.json"
-        )
+        print("check_agent_utilized: [FAIL] No trajectory found at "
+              f"{_trajectory_path()}")
         return False
 
     target_agent = _load_verifier_params().get("target_agent")

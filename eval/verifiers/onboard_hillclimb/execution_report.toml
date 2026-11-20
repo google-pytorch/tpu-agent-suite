@@ -1,0 +1,53 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reported only (no weight in the reward): one judge that explains the run.
+# Its value is in the `reasoning` of each criterion in
+# /logs/verifier/reward-details.json (aggregate_reward.py also prints it to
+# the verifier log): the routing the agent chose, every step it performed, and
+# an explanation of what went wrong, if anything did.
+#
+# Expected routing (package/skills/tpu-agent/SKILL.md): the
+# onboarding goes to tpu-model-onboarding; the instruction then requires an
+# XProf profile (tpu-diagnostics) and a custom Pallas kernel for the
+# bottleneck op (tpu-kernel-development). tpu-performance-optimization only when a study is named.
+
+[judge]
+judge = "vertex_ai/gemini-3.8-flash"
+reasoning_effort = "high"
+atif-trajectory = "/logs/agent/trajectory.json"
+timeout = 600
+
+[[criterion]]
+name = "routing"
+type = "binary"
+weight = 1.0
+description = "Explain the routing: list, in order, every delegation the agent made (receiving agent or skill, what it was asked to do, and what it returned), with Step IDs. Pass if the onboarding of the requested model to vLLM on TPU went to tpu-model-onboarding and no optimization started before it returned a deployed and verified model; the profiling of the running server under peak baseline concurrency went to tpu-diagnostics, with the server (or its launch recipe) and output throughput as the metric to optimize; the custom Pallas kernel for the bottleneck op the profile identified went to tpu-kernel-development, with the source file of that op; and tpu-performance-optimization was never invoked. Otherwise fail, and say which hand-off went wrong and why. If the run had no delegating agents at all, fail and say so."
+
+[[criterion]]
+name = "steps"
+type = "numeric"
+min = 0.0
+max = 10.0
+weight = 0.0
+description = "Explain the steps the agent performed, in order and with Step IDs: the onboarding (vLLM version, image digest, parallelism chosen, the TPU type and topology the server actually ran on, the completion request and the response); the baseline benchmark suite (for each ISL/OSL combination, the concurrencies swept and the peak output tokens per second); the XProf capture and the bottleneck op it identified, with its share of TPU execution time; the Pallas kernel authored for it and its parity result (L-infinity, L2, NaNs/Infs) on the profiled shapes and dtypes; every autotune variant (tile shape or memory pipeline configuration) and its measured time; how the kernel was integrated into the vLLM serving process; the optimized benchmark suite and the speedup per regime; the experiment log (whether every hypothesis arm was recorded, and kept up to date as the run went), and the artifacts organization step. Score with the number of distinct kernel variants (tile shapes or memory pipeline configurations) that were run and measured on physical TPU hardware; reruns of the same variant do not count."
+
+[[criterion]]
+name = "errors"
+type = "binary"
+weight = 1.0
+description = "Explain everything that went wrong, with Step IDs: failed or refused job submissions, crashes, out-of-memory errors, timeouts, wrong hardware (a TPU type or topology other than the one the run was configured for: GKE_TPU_ACCELERATOR and GKE_TPU_TOPOLOGY in the agent's environment), serving with anything other than vLLM, use of torch_xla or the tpu-inference repo, bad or degenerate output, kernel parity failures, a kernel that never ran inside the vLLM serving process, benchmark points that failed or were dropped, request failures in the optimized suite, optimization claimed from disqualified levers alone (compiler or runtime flags), discarded kernel candidates, questions that blocked on the user, jobs or port forwards left running at the end, cluster jobs missing from job_log.md (or recorded there without their start time, or without their termination time when the agent terminated them), job names not prefixed golden-, benchmark configs not run as their own kubectl job, inspecting cluster jobs the agent did not start, and tuning started before onboarding (the onboarded vLLM server and its baseline) was finished. For each, give the error message, the likely cause, and whether and how the agent recovered. Pass if the run ended with no unrecovered error (the model was served with vLLM and benchmarked on both ISL/OSL combinations, the kernel passed parity and ran inside vLLM, and the optimized suite completed with zero request failures outside the bottleneck regime, and everything deployed was torn down); otherwise fail and name the error that stopped the run."
+
+[scoring]
+aggregation = "weighted_mean"

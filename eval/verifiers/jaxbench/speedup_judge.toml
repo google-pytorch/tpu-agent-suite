@@ -1,0 +1,26 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[judge]
+judge = "vertex_ai/gemini-3.8-flash"
+atif-trajectory = "/logs/agent/trajectory.json"
+timeout = 600
+
+[[criterion]]
+description = "The agent executed timed benchmarks measuring p50 execution latency on Cloud TPU hardware and demonstrated a measurable speedup multiplier over the reference baseline."
+type = "binary"
+weight = 1.0
+
+[scoring]
+aggregation = "weighted_mean"

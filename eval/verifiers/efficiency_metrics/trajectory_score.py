@@ -13,8 +13,6 @@
 # limitations under the License.
 """RewardKit verifier to extract agent runtime, turns, and total tokens and compute P50-shifted Log-Weighted AUC."""
 
-from __future__ import annotations
-
 import json
 import math
 import os
@@ -69,37 +67,54 @@ def compute_p50_shifted_log_auc(
     return round(float(score), 4)
 
 
-def load_stats(stats_path: Path | None = None) -> dict[str, float]:
-    """Loads P50 median (grace) and ceiling values from stats.txt."""
-    stats = dict(DEFAULT_STATS)
-    candidates: list[Path] = []
-    if stats_path is not None:
-        candidates.append(Path(stats_path))
-    candidates.extend([
-        Path(__file__).resolve().parent / "stats.txt",
-        Path("/tests/efficiency/stats.txt"),
-    ])
+def _logs_dir() -> Path:
+    """The run's logs as the harness lays them out: $LOGS_DIR, else /logs."""
+    return Path(os.environ.get("LOGS_DIR") or "/logs")
 
-    for cand in candidates:
-        if cand.is_file():
-            try:
-                for raw_line in cand.read_text(encoding="utf-8").splitlines():
-                    line = raw_line.split("#", 1)[0].strip()
-                    if not line or "=" not in line:
-                        continue
-                    key, val = line.split("=", 1)
-                    try:
-                        stats[key.strip()] = float(val.strip())
-                    except ValueError:
-                        pass
-                break
-            except OSError:
-                pass
+
+def _tests_dir() -> Path:
+    """The task's tests directory: $TESTS_DIR, else /tests."""
+    return Path(os.environ.get("TESTS_DIR") or "/tests")
+
+
+def _trajectory_path() -> Path:
+    """The agent's trajectory, where the harness writes it."""
+    return _logs_dir() / "agent" / "trajectory.json"
+
+
+def _load_verifier_params() -> dict[str, Any]:
+    """This verifier's table in the task's verifier_params.json, else {}.
+
+    The table is named after the folder this verifier is staged in.
+    """
+    path = _tests_dir() / "verifier_params.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    params = data.get(Path(__file__).parent.name)
+    return params if isinstance(params, dict) else {}
+
+
+def _is_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def load_stats() -> dict[str, float]:
+    """Loads P50 median (grace) and ceiling values from verifier params."""
+    stats = dict(DEFAULT_STATS)
+    params = _load_verifier_params()
+    for key in stats:
+        if _is_number(params.get(key)):
+            stats[key] = float(params[key])
     return stats
 
 
 def _load_trajectory(path: str | Path) -> dict[str, Any] | None:
-    """Loads an ATIF trajectory JSON file. Returns None on error."""
+    """Load an ATIF trajectory JSON file. Returns None on error."""
     p = Path(path)
     if not p.exists():
         return None
@@ -109,27 +124,9 @@ def _load_trajectory(path: str | Path) -> dict[str, Any] | None:
         return None
 
 
-def _find_trajectory(workspace: Path | None = None) -> dict[str, Any] | None:
-    """Finds and loads the ATIF trajectory JSON from standard candidate locations."""
-    traj_candidates: list[Path] = []
-    if os.environ.get("ATIF_TRAJECTORY"):
-        traj_candidates.append(Path(os.environ["ATIF_TRAJECTORY"]))
-    if os.environ.get("TRAJECTORY_PATH"):
-        traj_candidates.append(Path(os.environ["TRAJECTORY_PATH"]))
-    # Harness-owned paths only: a trajectory.json in the workspace is the
-    # agent's to write, so it cannot be what scores the agent.
-    del workspace
-    traj_candidates.extend([
-        Path("/logs/agent/trajectory.json"),
-        Path("/logs/trajectory.json"),
-    ])
-
-    for cand in traj_candidates:
-        if cand and cand.exists():
-            traj = _load_trajectory(cand)
-            if traj:
-                return traj
-    return None
+def _find_trajectory() -> dict[str, Any] | None:
+    """Loads the ATIF trajectory the harness wrote, if there is one."""
+    return _load_trajectory(_trajectory_path()) or None
 
 
 def _parse_iso(ts: str) -> float | None:
@@ -190,9 +187,11 @@ def extract_trajectory_metrics(traj: dict[str, Any]) -> dict[str, float]:
 
 def agent_runtime_auc(workspace: Path) -> float:
     """Calculates P50-shifted Log-Weighted AUC for agent runtime in minutes."""
-    traj = _find_trajectory(workspace)
+    traj = _find_trajectory()
     if not traj:
-        print("agent_runtime_auc: [FAIL] No trajectory found in candidates")
+        print(
+            f"agent_runtime_auc: [FAIL] No trajectory found at {_trajectory_path()}"
+        )
         return 0.0
 
     stats = load_stats()
@@ -211,9 +210,11 @@ def agent_runtime_auc(workspace: Path) -> float:
 
 def total_tokens_auc(workspace: Path) -> float:
     """Calculates P50-shifted Log-Weighted AUC for total tokens (input + output, in millions)."""
-    traj = _find_trajectory(workspace)
+    traj = _find_trajectory()
     if not traj:
-        print("total_tokens_auc: [FAIL] No trajectory found in candidates")
+        print(
+            f"total_tokens_auc: [FAIL] No trajectory found at {_trajectory_path()}"
+        )
         return 0.0
 
     stats = load_stats()
@@ -232,9 +233,11 @@ def total_tokens_auc(workspace: Path) -> float:
 
 def agent_turns_auc(workspace: Path) -> float:
     """Calculates P50-shifted Log-Weighted AUC for agent turns."""
-    traj = _find_trajectory(workspace)
+    traj = _find_trajectory()
     if not traj:
-        print("agent_turns_auc: [FAIL] No trajectory found in candidates")
+        print(
+            f"agent_turns_auc: [FAIL] No trajectory found at {_trajectory_path()}"
+        )
         return 0.0
 
     stats = load_stats()

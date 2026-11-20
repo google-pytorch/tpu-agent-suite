@@ -17,8 +17,6 @@ Applies an exponential decay penalty for every framework-directed turn (F):
     framework_directed_penalty = gamma ** F
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re
@@ -71,41 +69,52 @@ _CONTEXT_INTERVENTION_KEYS = (
 _BLOCKING_DECISIONS = {"deny", "block", "cancel", "continue", "retry"}
 
 
-def _find_and_load_trajectory(workspace: Path | None) -> dict[str, Any] | None:
-    """Finds and loads the ATIF trajectory JSON from standard candidate paths."""
-    candidates: list[Path] = []
-    for env_var in ("ATIF_TRAJECTORY", "TRAJECTORY_PATH"):
-        if os.environ.get(env_var):
-            candidates.append(Path(os.environ[env_var]))
-    # Harness-owned paths only: a trajectory.json in the workspace is the
-    # agent's to write, so it cannot be what scores the agent.
-    del workspace
-    candidates.extend([
-        Path("/logs/agent/trajectory.json"),
-        Path("/logs/trajectory.json"),
-    ])
+def _logs_dir() -> Path:
+    """The run's logs as the harness lays them out: $LOGS_DIR, else /logs."""
+    return Path(os.environ.get("LOGS_DIR") or "/logs")
 
-    for path in candidates:
-        if path and path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-            except (json.JSONDecodeError, OSError):
-                continue
-    return None
+
+def _tests_dir() -> Path:
+    """The task's tests directory: $TESTS_DIR, else /tests."""
+    return Path(os.environ.get("TESTS_DIR") or "/tests")
+
+
+def _trajectory_path() -> Path:
+    """The agent's trajectory, where the harness writes it."""
+    return _logs_dir() / "agent" / "trajectory.json"
 
 
 def _load_verifier_params() -> dict[str, Any]:
-    p = Path("/tests/verifier_params.json")
-    if not p.is_file():
-        return {}
+    """This verifier's table in the task's verifier_params.json, else {}.
+
+    The table is named after the folder this verifier is staged in.
+    """
+    path = _tests_dir() / "verifier_params.json"
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        val = data.get(Path(__file__).parent.name, data)
-        return val if isinstance(val, dict) else data
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    params = data.get(Path(__file__).parent.name)
+    return params if isinstance(params, dict) else {}
+
+
+def _load_trajectory(path: str | Path) -> dict[str, Any] | None:
+    """Load an ATIF trajectory JSON file. Returns None on error."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _find_and_load_trajectory() -> dict[str, Any] | None:
+    """Loads the ATIF trajectory the harness wrote, if it is a JSON object."""
+    data = _load_trajectory(_trajectory_path())
+    return data if isinstance(data, dict) else None
 
 
 def _extract_text(content: Any) -> str:
@@ -242,11 +251,10 @@ def _collect_framework_directed_turns(
 )
 def framework_directed_penalty(workspace: Path) -> float:
     """Calculates framework-directed turn penalty from Harbor's ATIF trajectory."""
-    traj = _find_and_load_trajectory(workspace)
+    traj = _find_and_load_trajectory()
     if not traj:
-        print(
-            "framework_directed_penalty: [FAIL] No trajectory found in candidates"
-        )
+        print("framework_directed_penalty: [FAIL] No trajectory found at "
+              f"{_trajectory_path()}")
         return 0.0
 
     gamma = float(_load_verifier_params().get("gamma", DEFAULT_GAMMA))
