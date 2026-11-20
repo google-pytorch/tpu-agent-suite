@@ -29,6 +29,10 @@ on these kernels:
 -   `bandwidthUtils: [0, 0, 0]`
 -   `rawBytesAccessedArray: [0, 0, 0]`
 
+Which hardware counters can and cannot be trusted once you read the LLO counter planes instead
+(`COUNT_CYCLES`, `COUNT_MXU_BUSY_*`, the determinism control): see
+[xprof-counters-that-mislead](xprof-counters-that-mislead.md).
+
 Attempts to manually inject LLO trace markers (e.g., the hallucinated
 `tpu.vtrace` concept) will fail with unregistered dialect errors during
 compilation. Because internal resource utilization breakdowns are unavailable,

@@ -101,6 +101,10 @@ in the second costs only the benefit of the reference.
 ├── ideas_ledger.json            # Phase 0.7, the triaged borrowable ideas
 │
 ├── tpu_kernel_debug_history.md   # failure log
+├── hw_probes/                   # hardware probe answers, one <name>.txt each,
+│   └── cache/                   #   and their cache keyed by TPU type and
+│                                #   toolchain; written by hw_probe.py. Shared
+│                                #   by every iteration of this kernel.
 ├── iter1/                       # one directory per iteration
 │   ├── kernel_plan.md
 │   ├── optimized.py
@@ -993,6 +997,14 @@ Tokamax kernel. Skip steps 1 and 2 below and follow
         of `{previous_optimized_kernel}` or restart from scratch on original
         `{base_kernel_path}` if the previous kernel cannot be further improved,
         and save the optimization plan to `{kernel_plan_path}`.
+    -   **Check the plan is complete.** `read` `{kernel_plan_path}` and
+        confirm its "Design Method Sections" part (Section 8) has all six
+        required parts: cost classes, implementation affordances, unit
+        trading, contract questions, facts needed, and strategy rules
+        consulted. If any is missing,
+        revise the plan once, following the plan-kernel reference, to supply
+        them. Proceed after one revision either way, and note any part still
+        missing in `<work>/tpu_kernel_debug_history.md`.
 2.  **Implement the Kernel**:
     -   Read and follow
         {{reference:tpu-kernel-development/kernel-worker/implement-kernel.md}} yourself:

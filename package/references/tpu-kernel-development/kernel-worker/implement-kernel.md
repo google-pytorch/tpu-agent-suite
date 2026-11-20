@@ -6,6 +6,10 @@ scripts:
 - scripts/tpu-knowledge-base/kb_summarize.py
 - scripts/tpu-knowledge-base/rank.py
 references:
+- references/tpu-kernel-development/pallas_code_style.md
+- references/tpu-kernel-development/kernel_design_method.md
+- references/tpu-kernel-development/tpu_hardware_facts.md
+- references/tpu-kernel-development/design/sparsecore.md
 - references/tpu-kernel-development/concepts/grid_blockspec.md
 - references/tpu-kernel-development/concepts/matmul.md
 - references/tpu-kernel-development/concepts/pipelining.md
@@ -114,6 +118,20 @@ Implement the optimized Pallas kernel by:
 3.  **Implementing** the optimizations specified in the plan
 4.  **Following** the exact specifications from the plan (block sizes, grid
     configuration, memory layout, etc.)
+5.  **Writing it in the house style** of
+    {{reference:tpu-kernel-development/pallas_code_style.md}}: name dimensions
+    once, shape comments, extents derived from refs, and hardware constants
+    read from `pltpu.get_tpu_info()` / `pltpu.get_sublane_tiling(dtype)` at
+    run time, never hardcoded. A block size is a design choice, not a hardware
+    constant: keep it the ALL_CAPS module-level literal the plan
+    chose.
+6.  **Auditing affordances** against the plan's Section 8: every affordance
+    the plan marks `planned` (double-buffered critical-path transfers, async
+    writes waited as late as possible, a narrower tail-tile path, hoisted
+    per-call setup, a resident accumulator, `parallel` semantics on
+    independent axes, scalar-prefetched indices) must be visible in your code.
+    An affordance declared `planned` and missing from the code is a bug; see
+    {{reference:tpu-kernel-development/kernel_design_method.md}} §6 and §10.
 
 ### Critical Requirements
 
@@ -228,6 +246,11 @@ these Mosaic lowering constraints:
     respectively, or that they match the array dimensions exactly.
 -   **Rank Constraint**: The Pallas TPU lowering supports only blocks of rank
     **>= 1**. Do not generate zero-dimensional blocks.
+-   **More legality rules**: what may be a runtime value (DMA extents and
+    offsets, lane vs sublane indices), when a DMA must be waited, and
+    SparseCore memory-space rules are in
+    {{reference:tpu-kernel-development/tpu_hardware_facts.md}}. For a SparseCore
+    kernel, read {{reference:tpu-kernel-development/design/sparsecore.md}} first.
 
 ### Important Notes
 
@@ -402,6 +425,8 @@ Before you call `write`, verify your implementation has:
 -   ✅ `computation` function at module level
 -   ✅ Comprehensive shape and memory annotations
 -   ✅ Follows exact specifications from the plan
+-   ✅ Every affordance the plan marks `planned` is present in the code
+-   ✅ No hardcoded hardware constants (lane width, sublane tiling, VMEM size)
 -   ✅ Includes a `main()` function for testing
 
 **REMEMBER: The validation loop depends on seeing raw compilation errors. Do not

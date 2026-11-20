@@ -21,6 +21,9 @@ tpu_dependencies:
   - ml_dtypes
   - torch
   - tpu-info
+references:
+- references/tpu-kernel-development/tpu_hardware_facts.md
+- references/tpu-kernel-development/kernel_design_method.md
 ---
 
 # tpu-kernel-development
@@ -683,6 +686,19 @@ state.json.
     idea can be confirmed in an iteration that was slower for another reason.
     `inconclusive` is the honest verdict when the trace does not carry the
     quantity the claim names; use it rather than guessing."
+
+    **Always ask what binds.** Append to that request's `prompt`: "End with
+    a `## What binds` section that routes each recommendation by what
+    limits the kernel: relayouts or XLU transposes, a saturated VPU on the
+    critical path, DMA wait, register spills, or a ratio to the floor that
+    widens as work is removed (fixed cost binds, not the modelled
+    resource). Before putting any counter in a denominator, check it
+    against the counters that misreport in
+    `{{data:tpu-knowledge-base/pages/xprof-counters-that-mislead.md}}`, and
+    say when a conclusion rests on a fixed cost or bandwidth the trace did
+    not measure." The planner routes the next plan from that section with
+    the table in `{{reference:tpu-kernel-development/kernel_design_method.md}}`
+    §12, and measures any such fixed cost with a hardware probe.
 
     The next iteration's kernel-worker transcribes those verdicts into the ledger in
     its Phase 0.11. That is what makes the loop *learn* from a reference rather

@@ -21,10 +21,14 @@ or write them.
 | 1. Preserve the caller's inputs | ✓ | ✓ | — |
 | 2. Stop rather than guess, substitute or fabricate | ✓ | ✓ | ✓ |
 | 3. A missing measurement is `null` | ✓ | ✓ | ✓ |
+| 4. Hardware constants are read at run time | — | ✓ | — |
+| 5. Measured numbers come from this environment | ✓ | ✓ | ✓ |
 
 The kernel-worker follows its references in its own context, so a reference is
 bound by everything the kernel-worker is bound by. `analyze-cuda-reference`
-never builds inputs or sets tolerances, which is why rule 1 does not reach it.
+never builds inputs or sets tolerances, which is why rule 1 does not reach it,
+and only the kernel-worker writes kernel code, which is why rule 4 reaches
+nothing else.
 
 ## 1. Preserve the caller's inputs
 
@@ -80,3 +84,35 @@ never builds inputs or sets tolerances, which is why rule 1 does not reach it.
     `"Infinity"`, meaning "no kernel that beat the baseline kept yet", as `tpu-kernel-development`'s initial state
     defines. Compare it as numeric infinity. Never write `"Infinity"` anywhere
     else, and never into a result.
+
+## 4. Hardware constants are read at run time
+
+-   Never hardcode a hardware constant (lane width, sublane tiling, VMEM
+    capacity, core count) in generated kernel code. Read it from
+    `pltpu.get_tpu_info()` / `pltpu.get_sublane_tiling(dtype)` at run time,
+    as the Pallas code style reference (`pallas_code_style.md`, which the
+    implement-kernel reference names) describes. A block size is a design
+    choice, not a hardware constant.
+-   Reading at run time decides where a constant comes from, not how far to
+    trust it. These calls report what the toolchain is told, not a
+    measurement: `get_tpu_info()` describes one TensorCore, not the chip;
+    `get_sublane_tiling` is a formula in jax source that can disagree with
+    the layout XLA picks; `vmem_capacity_bytes` is physical VMEM, above the
+    default scoped limit a kernel compiles under. When a design depends on
+    one of them, check it with its hardware probe under rule 5
+    (`tpu_info_scaling_denominator`, `sublane_tiling_by_dtype`,
+    `vmem_scratch_bisect`). What each field means: `tpu_hardware_facts.md`
+    §§ 1, 4 and 6.
+
+## 5. Measured numbers come from this environment
+
+-   A measured hardware or toolchain number (a cost, a bandwidth, a
+    capacity, whether a construct lowers) may be quoted only from a hardware
+    probe run in this environment through `hw_probe.py`, citing its file
+    under `<work>/hw_probes/`, or from this run's own test and profile
+    results. Never carry a number from memory, from another TPU, or from
+    another toolchain.
+-   The design references give rules and the probe that measures each
+    number, not the numbers. A figure from a knowledge page or the hardware
+    page is a specification: it may size a design, but rule 3 still holds --
+    it is never a measurement.

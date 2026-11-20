@@ -2,6 +2,7 @@
 scripts:
 - scripts/tpu-kernel-development/search_api.py
 - scripts/tpu-kernel-development/ledger.py
+- scripts/tpu-kernel-development/hw_probe.py
 - scripts/tpu-knowledge-base/kb_lookup.py
 - scripts/tpu-knowledge-base/catalog.py
 - scripts/tpu-knowledge-base/kb_summarize.py
@@ -12,9 +13,15 @@ references:
 - references/tpu-kernel-development/concepts/grid_blockspec.md
 - references/tpu-kernel-development/concepts/matmul.md
 - references/tpu-kernel-development/concepts/pipelining.md
+- references/tpu-kernel-development/tpu_hardware_facts.md
+- references/tpu-kernel-development/kernel_design_method.md
+- references/tpu-kernel-development/hw_probe_catalog.md
+- references/tpu-kernel-development/design/
 ---
 
 # Plan the kernel
+
+Strategy rules are knowledge-base pages. `strat-sc-04` and the like below are their lookup keys (`python3 {{script:tpu-knowledge-base/kb_lookup.py}} strat-sc-04`); the `kernel-strategies` page (`python3 {{script:tpu-knowledge-base/kb_lookup.py}} kernel-strategies`) is the table of all of them.
 
 The kernel-worker reads this in Phase 1 step 1 to create or revise a detailed
 optimization plan for a Pallas kernel. You write the plan yourself, in this
@@ -164,6 +171,27 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
         only works for the exact numbers the harness happens to use. The
         harness's job is to sample representative cases, not to define the
         universe of valid inputs.
+3.  **Design method and hardware facts.** Read
+    {{reference:tpu-kernel-development/tpu_hardware_facts.md}} whole, then
+    {{reference:tpu-kernel-development/kernel_design_method.md}}, then
+    the table of strategy rules, the `kernel-strategies` page (`python3 {{script:tpu-knowledge-base/kb_lookup.py}} kernel-strategies`), and open only the rules
+    whose row matches this kernel, by key (`python3 {{script:tpu-knowledge-base/kb_lookup.py}} strat-mla-11 strat-sc-08`). Work the method into the
+    plan's required **Section 8** (cost classes, affordances, unit trading,
+    the 16 contract questions, facts needed, strategy rules consulted). For each bottleneck you
+    identify, also read its design reference (see **Design References**
+    below).
+4.  **Facts needed -- measure, never assume.** Any hardware or toolchain
+    number the plan depends on (VMEM ceiling, per-call or per-step cost,
+    achieved bandwidth, whether a construct lowers) comes from a hardware
+    probe run in this environment, not from memory or a past run. A spec
+    figure from the hardware page sizes a design; it is a ceiling, not a
+    measurement. Find the probe in
+    {{reference:tpu-kernel-development/hw_probe_catalog.md}} and run it
+    through `{{script:tpu-kernel-development/hw_probe.py}}` (see **Hardware
+    Probes** below). At most 4 uncached hardware probes per plan; cached
+    results do not count against it. Cite each answer by its file under `<work>/hw_probes/`.
+    A hardware probe answers a fact about the target; it never times this
+    kernel, which only the test harness does.
 
 **For REVISIONS / NEXT ITERATION Plans:**
 
@@ -173,6 +201,23 @@ Identify whether you are creating a **NEW plan** (Iteration 0) or performing a *
     an XProf finding only from a file you actually read -- a citation to
     evidence that was never produced reads later as a measurement.
 2.  **Review execution results:** Analyze `{previous_compilation_status}`, `{previous_testing_status}` and `{previous_profile_summary}` to identify what failed or what performance bottlenecks remain.
+    -   Route each bottleneck the profile summary names by what binds, using
+        the routing table in
+        {{reference:tpu-kernel-development/kernel_design_method.md}} §12
+        (relayouts → layout or a unit trade; saturated VPU on the critical
+        path → unit trading; DMA wait → buffering depth and async writes;
+        spills → tile size; a ratio to the floor that *widens* as work is
+        removed → fixed cost binds, not the modelled resource).
+    -   Check any counter you quote against the `xprof-counters-that-mislead`
+        page (`python3 {{script:tpu-knowledge-base/kb_lookup.py}} xprof-counters-that-mislead`) before putting it
+        in a denominator.
+    -   When a conclusion hinges on a fixed cost or a bandwidth not measured
+        on this TPU, measure it: hardware probes `dispatch_floor` (per-call
+        and per-step cost), `pallas_call_intercept_chained_clock` or
+        `hbm_bandwidth_arms`.
+    -   When a measured number contradicted a modelled one the previous plan
+        relied on, Section 8 opens with the `modelled → measured` table
+        ({{reference:tpu-kernel-development/kernel_design_method.md}} §13).
 3.  **Decide Optimization Base — an explicit numerical rule, not a judgement
     call.**
 
@@ -400,6 +445,22 @@ should be structured as a markdown document with the following sections:
 -   Proposed block sizes (bM, bK, bN, etc.)
 -   Memory layout strategy (HBM, VMEM, SMEM usage)
 -   Justification based on TPU specs
+-   **Choosing a block size or chunk knob.** No phase tunes it after you, so
+    the value you write is the value that ships:
+    -   **Every value you weigh must move the knob's work driver.** Compute
+        what each value changes (grid steps, tiles, bytes moved, DMA count)
+        from the same code that builds the kernel; two values with the same
+        driver are the same choice. See M6 in
+        {{reference:tpu-kernel-development/kernel_design_method.md}}.
+    -   **A knob that sets grid-truncation granularity has an interior
+        optimum**, not a direction: weigh both sides of it. See
+        `strat-mla-02`.
+    -   **Do not shorten the axis that carries a knob's cost** to reason
+        about it on a smaller problem: the trend will not extrapolate. See
+        `strat-mla-03`.
+    -   **A module-level constant must pay on the shapes you did not
+        measure**: price it on every case in `get_inputs()`, not on one. See
+        `strat-mla-10`.
 
 ## 4. TPU-Specific Optimizations
 
@@ -432,6 +493,33 @@ should be structured as a markdown document with the following sections:
     HBM to VMEM`, `# Load from VMEM to registers`)
 -   Rationale for block dimensions and tiling choices
 -   Explanation of any non-obvious indexing or memory access patterns
+
+## 8. Design Method Sections (required)
+
+Required in every plan, new or revised, after the plan's other sections. The
+formats are in {{reference:tpu-kernel-development/kernel_design_method.md}}
+§5–§9. A plan missing any of these is incomplete: Phase 1's completeness
+check sends it back for one revision before the kernel is implemented.
+
+-   **Cost classes**: all eight rows, each `examined: <work> → <critical-path
+    contribution>` or `UNEXAMINED: <why>`.
+-   **Implementation affordances**: every row scored `planned`,
+    `NA: <reason>` or `absent: <reason>`.
+-   **Unit trading**: one row per VPU/XLU pass on the critical path, ending in
+    a candidate, "linear part too small to pay", or "no formulation found".
+-   **Contract questions**: all 16 (L1–L7, W1–W3, T1–T5, R1), each answered,
+    marked `NA: <reason>`, or answered by a hardware probe you ran.
+    `unmodelled` is not an answer.
+-   **Facts needed**: each fact the plan relies on, with its source: a
+    source-read rule from the references above, or a hardware probe output
+    file under `<work>/hw_probes/`.
+-   **Strategy rules consulted**: every strategy rule you opened, by key
+    (`strat-mla-11`), each `applied: <where in this plan>` or
+    `NA: <why it does not fit>`; or `none matched: <the table rows you
+    considered>`. This is the record of which rules a plan used.
+-   **For revisions**: when a measured number contradicted a modelled one the
+    previous plan relied on, open this section with a `modelled → measured`
+    table and recompute what depended on it.
 
 ### Tool Usage & Knowledge Retrieval Strategy
 
@@ -487,6 +575,64 @@ Use the `write` tool to save your plan to `{kernel_plan_path}`.
 
 IMPORTANT: You MUST consult the `kernel-optimization-index` page and load the required concept/hardware pages while creating your plan to ensure accuracy. Do not rely on pre-trained knowledge alone - always verify with current documentation. CRITICAL: Do not use the `search` tool as a substitute for reading the `kernel-optimization-index` page or running `{{script:tpu-kernel-development/search_api.py}}` anywhere during the kernel optimization process.
 
+### Design References
+
+Read these by path, as Step 2 says:
+
+*   **Hardware facts**: {{reference:tpu-kernel-development/tpu_hardware_facts.md}}
+    (what `get_tpu_info()` describes, legality rules, what may be traced,
+    SparseCore architecture). Read whole.
+*   **Design method**: {{reference:tpu-kernel-development/kernel_design_method.md}}
+    (system context, two floors, cost classes, affordances, unit trading, the
+    16 contract questions, measurement rules, routing from the profile).
+*   **Hardware probe catalog**: {{reference:tpu-kernel-development/hw_probe_catalog.md}}
+    (which probe answers which design question, and how to read its verdict).
+*   **Strategy rules**: knowledge-base pages; the `kernel-strategies` page (`python3 {{script:tpu-knowledge-base/kb_lookup.py}} kernel-strategies`) lists them all
+    (one row per rule; open only the matching rules).
+*   **By topic** (read the one matching each bottleneck):
+    fusion boundary {{reference:tpu-kernel-development/design/fusion_boundary.md}};
+    partitioning (grid, blocks, what fits) {{reference:tpu-kernel-development/design/partitioning.md}};
+    pipelining (bandwidth, DMA, `emit_pipeline`) {{reference:tpu-kernel-development/design/pipelining.md}};
+    layout and precision {{reference:tpu-kernel-development/design/layout_precision.md}};
+    compute units (MXU/VPU) {{reference:tpu-kernel-development/design/compute_units.md}};
+    algorithm changes {{reference:tpu-kernel-development/design/algorithm.md}};
+    precomputation and metadata (SMEM, scalar prefetch) {{reference:tpu-kernel-development/design/precomputation.md}};
+    SparseCore {{reference:tpu-kernel-development/design/sparsecore.md}};
+    cross-area moves {{reference:tpu-kernel-development/design/cross_area_moves.md}}.
+
+### Hardware Probes
+
+A hardware probe measures one fact about the target TPU or toolchain instead
+of assuming it. Run them through
+`{{script:tpu-kernel-development/hw_probe.py}}`, never with a script of your
+own:
+
+```bash
+python3 {{script:tpu-kernel-development/hw_probe.py}} list
+python3 {{script:tpu-kernel-development/hw_probe.py}} build \
+  --pick <probe_name> [--pick <probe_name>] \
+  --work <work> --output <work>/hw_probes/job.py
+{{runtime}} compute run --code <work>/hw_probes/job.py --timeout 900
+python3 {{script:tpu-kernel-development/hw_probe.py}} record \
+  --stdout <work>/hw_probes/job.out --work <work>
+```
+
+`list` runs here and touches no device. `build` serves cached answers and
+always writes a job; when every answer was cached, the job runs only the two
+stamp probes, which confirm the cached answers belong to this TPU and
+toolchain. Run it either way, save the job's stdout to
+`<work>/hw_probes/job.out`, verbatim, and `record` it: each answer lands in
+`<work>/hw_probes/<probe_name>.txt`. A `STALE:` line from `record` means a
+cached answer was measured on another chip or toolchain and was removed:
+run `build` again for it. Only `PASS` and `UNSUPPORTED` are cached; a `FAIL`
+or `INVALID` is filed for this plan and re-measured the next time it is
+picked. To re-measure an answer you doubt, pass `--refresh <probe_name>`
+instead of `--pick`.
+Names are exact; find them in
+{{reference:tpu-kernel-development/hw_probe_catalog.md}}. Read the verdict
+(`PASS`, `FAIL`, `UNSUPPORTED`, `INVALID`) before the number: an `INVALID`
+probe withheld its number on purpose. Never pass `--allow-destructive`.
+
 ### Output Requirement
 
 **For NEW plans:**
@@ -518,8 +664,9 @@ The older `{tpu_specs}` placeholder is not populated by anything and never
 was — read state instead.
 
 There is no fallback. Phase 0 step 3 stops the run when the chip cannot be
-resolved, so do not probe the target yourself, do not run `jax.devices()`
-locally, and do not assume a generation.
+resolved, so do not resolve the chip yourself, do not run `jax.devices()`
+locally, and do not assume a generation. Hardware probes measure facts about
+the resolved target; they never replace `state.tpu_spec`.
 
 If neither state nor the runtime can tell you, name the chip explicitly in the
 plan and say that you assumed it, rather than planning against an unstated

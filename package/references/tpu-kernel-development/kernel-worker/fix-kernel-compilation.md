@@ -1,12 +1,16 @@
 ---
 scripts:
 - scripts/tpu-kernel-development/search_api.py
+- scripts/tpu-kernel-development/hw_probe.py
 - scripts/tpu-knowledge-base/kb_lookup.py
 - scripts/tpu-knowledge-base/catalog.py
 - scripts/tpu-knowledge-base/kb_summarize.py
 - scripts/tpu-knowledge-base/rank.py
 references:
 - references/tpu-kernel-development/concepts
+- references/tpu-kernel-development/tpu_hardware_facts.md
+- references/tpu-kernel-development/design/sparsecore.md
+- references/tpu-kernel-development/hw_probe_catalog.md
 ---
 
 # Fix kernel compilation
@@ -66,6 +70,19 @@ Use `read` on the router and the pages and references named in this prompt EXTEN
         where `<api_name>` is the API you want to search. Run this command
         every time these instructions say to "query".
 
+3.  `shell`: To run a lowering hardware probe through
+    `{{script:tpu-kernel-development/hw_probe.py}}`, which settles whether a
+    construct lowers at all on this TPU and toolchain, instead of guessing
+    from the error.
+
+    *   Lowering and legality probes live in the `lowering`, `hardware` and
+        `sparsecore` groups;
+        {{reference:tpu-kernel-development/hw_probe_catalog.md}} lists each
+        with its question and the three steps (`build`, `compute run`,
+        `record`) that run one. Use one when the error is about whether an
+        op, dtype or index form is supported, not about your usage of it.
+        Never pass `--allow-destructive`.
+
 IMPORTANT: You MUST consult the `kernel-optimization-index` page and load the required concept/hardware pages while diagnosing and fixing compilation errors to ensure accuracy. Do not rely on pre-trained knowledge alone - always verify with current documentation.
 
 --------------------------------------------------------------------------------
@@ -107,6 +124,24 @@ understand:
 **Learn from previous fix attempts:** If previous attempts show a pattern (e.g.,
 "Fix: Changed block size" but error persists), this suggests the approach isn't
 working and you need a different strategy.
+
+### Step 2.4: Check the Known Legality Rules and Error Catalogue
+
+Before changing code, check whether the error is a known rule:
+
+-   {{reference:tpu-kernel-development/tpu_hardware_facts.md}} covers
+    block-shape legality, what may be a runtime value (DMA extents and
+    offsets, lane vs sublane indices), and DMAs that must be waited.
+-   For a SparseCore kernel,
+    {{reference:tpu-kernel-development/design/sparsecore.md}} has a table of
+    error messages and the fix for each.
+-   **If an error message names a compiler flag** (for example
+    `needs_layout_passes`), retry with that flag before concluding the
+    construct is unsupported.
+-   A rejected construct is a fact about your usage until an upstream test
+    (via `{{script:tpu-kernel-development/search_api.py}}`) or a lowering
+    probe (via `{{script:tpu-kernel-development/hw_probe.py}}`) shows it
+    failing too.
 
 ### Step 2.5: MANDATORY Research (DO THIS BEFORE WRITING ANY CODE)
 

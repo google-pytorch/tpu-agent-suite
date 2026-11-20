@@ -794,3 +794,15 @@
 {"task": "general", "kind": "question", "query": "moe tp decode row buckets 80 tokens unfused fallback tpu7x serving hill climb", "want": ["vllm-torchtpu-serving-hillclimb"]}
 {"task": "general", "kind": "question", "query": "closed queueing network xpyd throughput interactivity predictor", "want": ["vllm-torchtpu-serving-hillclimb"]}
 {"task": "general", "kind": "question", "query": "early stop losing aiperf benchmark arm at 10 minutes equal elapsed time", "want": ["vllm-torchtpu-serving-hillclimb"]}
+{"task": "kernel-strategies", "kind": "term", "query": "kernel-strategies", "want": ["kernel-strategies"]}
+{"task": "kernel-strategies", "kind": "term", "query": "strat-sc-08", "want": ["strat-sc-08"]}
+{"task": "kernel-strategies", "kind": "term", "query": "STRAT-MLA-02", "want": ["strat-mla-02"]}
+{"task": "kernel-strategies", "kind": "question", "query": "which strategy rules apply to my pallas kernel", "want": ["kernel-strategies"]}
+{"task": "kernel-strategies", "kind": "question", "query": "prove the load is the bottleneck before restructuring the transfer", "want": ["strat-sc-08"]}
+{"task": "kernel-strategies", "kind": "question", "query": "should I pad gather indices with a constant", "want": ["strat-mla-05"]}
+{"task": "kernel-strategies", "kind": "question", "query": "removing spills did not speed up a VALU bound kernel", "want": ["strat-mla-15"]}
+{"task": "kernel-strategies", "kind": "question", "query": "the correctness oracle needs a positive control", "want": ["strat-sc-11"]}
+{"task": "kernel-strategies", "kind": "question", "query": "sparsecore bandwidth depends on row width", "want": ["strat-mla-06"]}
+{"task": "kernel-strategies", "kind": "question", "query": "ratio to the roofline floor widens as work is removed", "want": ["strat-mla-07"]}
+{"task": "kernel-strategies", "kind": "question", "query": "localize the fixed cost before building a grid lever", "want": ["strat-mla-11"]}
+{"task": "kernel-strategies", "kind": "question", "query": "barrier the loop carry on sparsecore", "want": ["strat-sc-03"]}
