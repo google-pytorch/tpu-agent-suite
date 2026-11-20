@@ -469,8 +469,9 @@ How the sweep works:
     `--seed`.
     `--max-model-len` lets it skip a shape that cannot fit before giving it a
     server. On a cluster that stops jobs after a fixed time (the section
-    above), add `--server-budget-s` at about 75% of the limit; each leader's
-    age comes from its job record:
+    above), add `--server-budget-s` at about 75% of the limit; each server's
+    budget counts from the start of its job's current run, as `job status`
+    reports it, so a server Kueue preempted and readmitted has it again:
 
     ```bash
     W=<bench_work>/sweep && mkdir -p "$W" && nohup python3 \

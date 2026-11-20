@@ -95,9 +95,12 @@ marks each `kept`, and `cleanup` cancels them.
 
 On a cluster that stops jobs a fixed time after they start, pass
 `--server-budget-s`, the part of that limit a server may spend serving shapes:
-a server takes no new shape once its budget is spent, counted from its job's
-start (for a leader, as `job list` records it; `--leader-age-s` when it has
-none), and the shapes left go to the others.
+a server takes no new shape once its budget is spent, and the shapes left go
+to the others. The budget counts from the start of its job's current run, as
+`job status` reports it before each shape: Kubernetes restarts that clock when
+Kueue readmits a job it preempted, as the cluster's limit restarts. When
+`job status` reports no start, it counts from the submit (for a leader, as
+`job list` records it; `--leader-age-s` when it has none).
 
 Only gke_job runs servers side by side here; a server on any other backend
 is refused. Its sweep is serving_benchmark.py's, run once with every shape
@@ -510,7 +513,10 @@ class Compute:
 def age_s(start_time: str | None) -> float | None:
     """Seconds since an ISO-8601 `start_time`, or None if it cannot be read."""
     try:
-        started = datetime.datetime.fromisoformat(str(start_time))
+        # Kubernetes writes UTC as `Z`, which fromisoformat reads only on
+        # Python 3.11 and later.
+        started = datetime.datetime.fromisoformat(
+            str(start_time).replace("Z", "+00:00"))
     except ValueError:
         return None
     if started.tzinfo is None:
@@ -650,6 +656,8 @@ class Sweep:
     def next_shape(self, server: dict[str, Any]) -> str | None:
         """The next shape for `server`, or None when it should take no more."""
         budget = self.args.server_budget_s
+        if budget and self.queue and not self.stop.is_set():
+            self.count_from_start(server)
         with self.lock:
             if self.stop.is_set() or not self.queue:
                 return None
@@ -657,6 +665,25 @@ class Sweep:
                 server["state"] = "budget spent"
                 return None
             return self.queue.pop(0)
+
+    def count_from_start(self, server: dict[str, Any]) -> None:
+        """Count `server`'s budget from its job's start, as `job status` has it.
+
+        That is the start of the job's current run (gke_job reports the Job's
+        startTime, which Kubernetes resets when Kueue readmits a job it
+        preempted), so a requeued server is not taken for one that has spent
+        its budget. Unread, the count stays as it was.
+        """
+        rc, body = self.compute("job",
+                                "status",
+                                "--job-id",
+                                server["job_id"],
+                                profile=server["profile"],
+                                timeout=300)
+        age = age_s(body.get("start_time")) if rc == 0 else None
+        if age is not None:
+            with self.lock:
+                server["_since"] = time.monotonic() - age
 
     def set_shape(self, sid: str, **fields: Any) -> None:
         with self.lock:
@@ -1529,7 +1556,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     r.add_argument("--leader-age-s",
                    type=float,
                    default=0.0,
-                   help="a leader's time running when its record has none")
+                   help="a leader's time running when neither its record nor "
+                   "`job status` has its start")
     r.add_argument("--shape-timeout", type=float, default=4 * 3600.0)
     r.add_argument("--out-dir", required=True)
     r.add_argument(

@@ -135,14 +135,21 @@ class FakeCompute:
         for job_id in ("lead-1", "lead-2"):
             self.add_server(job_id)
 
-    def add_server(self, job_id, serve=True, start_time=None):
+    def add_server(self,
+                   job_id,
+                   serve=True,
+                   start_time=None,
+                   running_since=None):
+        """A server of this run: `start_time` as its record has it (its
+        submit), `running_since` as `job status` has it (its current run)."""
         self.records[job_id] = {
             "name": job_id,
             "client": False,
             "argv": [],
             "serve": serve,
             "status": "RUNNING",
-            "start_time": start_time
+            "start_time": start_time,
+            "running_since": running_since,
         }
 
     def __call__(self, *args, profile=None, timeout=None, tail=None):
@@ -161,7 +168,10 @@ class FakeCompute:
             with self.lock:
                 self.cancelled.append(job_id)
         elif action == "status":
-            return 0, {"status": job.get("status", "RUNNING")}
+            return 0, {
+                "status": job.get("status", "RUNNING"),
+                "start_time": job.get("running_since"),
+            }
         return 0, {"job_id": job_id}
 
     def jobs(self, profile=None):
@@ -636,6 +646,43 @@ class TestRun(SweepCase):
                 self.assertEqual(servers["leader"]["state"], "budget spent")
                 self.assertEqual({s["server"]
                                   for s in sweep.shapes.values()}, {"s2"})
+
+    def test_a_requeued_server_counts_its_budget_from_its_restart(self):
+        """The budget counts from the start `job status` reports.
+
+        Kueue preempted a server and started it again, which gave it a new
+        time limit; counted from its submit, the sweep skipped the shapes
+        left after the requeue.
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        old = (now - datetime.timedelta(hours=2)).isoformat()
+        # As Kubernetes writes it.
+        fresh = (now -
+                 datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cases = [
+            # (record's start, job status's start, the leader's last state)
+            (old, fresh, "serving"),
+            (fresh, old, "budget spent"),
+        ]
+        for record_start, running_since, state in cases:
+            with self.subTest(state):
+                self.make_slots(1)
+                fake = FakeCompute(delay=0.01)
+                fake.add_server("lead-1",
+                                start_time=record_start,
+                                running_since=running_since)
+                sweep = self.sweep(self.plan(), fake, "--server-budget-s",
+                                   "3600", "--max-servers", "1")
+                merged = self.run_quietly(sweep)
+                servers = {s["label"]: s for s in merged["servers"]}
+                self.assertEqual(servers["leader"]["state"], state)
+                done = {
+                    sid
+                    for sid, shape in sweep.shapes.items()
+                    if shape["state"] == "done"
+                }
+                want = set(sweep.shapes) if state == "serving" else set()
+                self.assertEqual(done, want)
 
     def test_a_backend_that_cannot_serve_side_by_side_is_refused(self):
         self.make_slots(2)
