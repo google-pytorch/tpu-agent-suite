@@ -642,7 +642,9 @@ class Sweep:
             raise ValueError(f"--patch names {', '.join(clash)} twice, or as "
                              "a --server-input: rename one")
         listing = self.out / "vllm_patches.txt"
-        write_atomic(listing, "".join(n + "\n" for n in names))
+        # World-readable: compute's kubectl may run as another user, and it
+        # reads every --input to build the server's ConfigMap.
+        write_atomic(listing, "".join(n + "\n" for n in names), mode=0o644)
         inputs = [f"{p}:{n}" for p, n in zip(self.args.patch, names)]
         if "apply_vllm_patch.sh" not in taken - {"vllm_patches.txt"}:
             inputs.append(f"{APPLIER}:apply_vllm_patch.sh")

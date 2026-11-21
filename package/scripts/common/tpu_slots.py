@@ -130,11 +130,18 @@ def active_run_id() -> str | None:
     return None
 
 
-def write_atomic(path: Path, text: str) -> None:
+def write_atomic(path: Path, text: str, mode: int | None = None) -> None:
+    """`text` into `path` whole, or not at all.
+
+    The file is 0600, as mkstemp creates it, unless `mode` is given: a file
+    another user must read needs it, since the rename keeps the mode.
+    """
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

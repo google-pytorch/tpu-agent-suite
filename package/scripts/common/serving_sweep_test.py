@@ -909,6 +909,24 @@ class TestPatchesAndPins(SweepCase):
                 unittest.mock.patch("sys.stderr", new=io.StringIO()):
             self.sweep(self.plan(), fake, "--patch", str(first))
 
+    def test_the_patch_list_is_readable_by_another_user(self):
+        """compute's kubectl may run as another user, reading every --input.
+
+        The list was left 0600, as mkstemp creates it, so building the first
+        server's ConfigMap failed with permission denied.
+        """
+        self.make_slots(1)
+        patch = self.patches("01-rpa.patch")[0]
+        sweep = self.sweep(self.plan(),
+                           FakeCompute(delay=0.01),
+                           "--patch",
+                           str(patch),
+                           leader=())
+        self.assertEqual(self.run_quietly(sweep)["status"], "ok")
+        listing = sweep.out / "vllm_patches.txt"
+        self.assertEqual(listing.read_text(), "01-rpa.patch\n")
+        self.assertEqual(listing.stat().st_mode & 0o777, 0o644)
+
     def test_no_patch_leaves_the_outputs_as_they_were(self):
         self.make_slots(2)
         sweep = self.sweep(self.plan(), FakeCompute(delay=0.01))
