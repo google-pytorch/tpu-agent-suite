@@ -30,35 +30,44 @@ and the suite are built.
 
 ---
 
-## Quickstart
+## Quickstart (Building from Source)
+
+> Installing a pre-compiled release archive instead? Skip straight to **[`docs/install.md`](docs/install.md)**.
 
 ### 1. Prerequisites
 
-- Python 3.12+ and the host-side packages the agents run with, XProf among
-  them, in a virtualenv (`pip install -r package/requirements-client.txt`;
-  see [docs/install.md](docs/install.md#1-host-prerequisites)). PyYAML alone
-  builds and installs the package, but leaves the agents without XProf.
-- Standalone CLI tools (backend-dependent):
-  - **`gcloud`** ([Google Cloud CLI](https://cloud.google.com/sdk/docs/install)) for Cloud TPU VMs, GCS staging, and GCP credentials (`gcloud auth login && gcloud auth application-default login`)
-  - **`kubectl`** ([Kubernetes CLI](https://kubernetes.io/docs/tasks/tools/)) and **`gke-gcloud-auth-plugin`** (`gcloud components install gke-gcloud-auth-plugin`) for GKE Pod and Job workloads (`gcloud container clusters get-credentials <CLUSTER_NAME> --region=<REGION>`)
+Create and activate a **Python 3.12+** virtual environment and install the host-side packages (includes `pyyaml` for building plus `xprof` and the host runtime dependencies; see [`docs/install.md`](docs/install.md#1-host-prerequisites)):
 
-The installer checks only the host-side Python packages. The first session
-sets up your backend and checks its tools, credentials and target (see
-[docs/install.md](docs/install.md#check-the-setup)).
+```bash
+python3.12 -m venv ~/.venv/tpu-agent-suite   # or: uv venv ~/.venv/tpu-agent-suite --python 3.12
+source ~/.venv/tpu-agent-suite/bin/activate
+python3 -m pip install -r package/requirements-client.txt   # or: uv pip install -r package/requirements-client.txt
+```
+
+Standalone CLI tools (backend-dependent; checked during your first session — see [`docs/install.md`](docs/install.md#check-the-setup)):
+
+- **`gcloud`** ([Google Cloud CLI](https://cloud.google.com/sdk/docs/install)) for Cloud TPU VMs, GCS staging, and GCP credentials (`gcloud auth login && gcloud auth application-default login`)
+- **`kubectl`** ([Kubernetes CLI](https://kubernetes.io/docs/tasks/tools/)) and **`gke-gcloud-auth-plugin`** (`gcloud components install gke-gcloud-auth-plugin`) for GKE Pod and Job workloads (`gcloud container clusters get-credentials <CLUSTER_NAME> --region=<REGION>`)
 
 ### 2. Build
 
-Compile the canonical agent package into native distributions for every supported harness:
+Compile the canonical agent package into native distributions for every supported harness (`claude-code`, `codex`, `antigravity`, and `cursor`):
 
 ```bash
 make build
 ```
 
-This writes `dist/<harness>/tpu-agent-suite/` for `claude-code`, `codex`, `antigravity`, and `cursor`.
+This writes `dist/<harness>/tpu-agent-suite/` (run `make archives` if you also want standalone `dist/archives/tpu-agent-suite-<harness>-v<version>.tar.gz` archives).
 
 ### 3. Install
 
-See [`docs/install.md`](docs/install.md) ([headless / CI](docs/install.md#headless-installs-ci-containers)).
+With `~/.venv/tpu-agent-suite` activated, install the compiled distribution for your harness into a project workspace (or omit `--destination` and pass `--scope user` to install globally):
+
+```bash
+python3 dist/<harness>/tpu-agent-suite/framework/installer.py install --destination /path/to/project
+```
+
+For TPU target setup, upgrades, uninstalling, and [headless / CI](docs/install.md#headless-installs-ci-containers) installs, see [`docs/install.md`](docs/install.md).
 
 ### 4. Use
 

@@ -1,26 +1,38 @@
 # Installing TPU agent suite
 
-This guide covers installing TPU agent suite into your workspace and
-configuring TPU hardware compute targets. Download the pre-compiled
-`tpu-agent-suite-<harness>-v<version>.tar.gz` archive (`claude-code` or
-`antigravity`) from the release locations at the top of
-[`README.md`](../README.md) (to build from source, including for `codex` or
-`cursor`, see
+This guide covers obtaining or building a TPU agent suite distribution,
+installing it into your workspace, and configuring TPU hardware compute targets.
+You can install either from a pre-compiled
+`tpu-agent-suite-<harness>-v<version>.tar.gz` release archive (`claude-code` or
+`antigravity`; see the release locations at the top of
+[`README.md`](../README.md)) or from a local `make build` in a repository clone
+(all harnesses, including `codex` and `cursor`; see
 [developing.md](https://github.com/google-pytorch/tpu-agent-suite/blob/main/docs/developing.md#building-a-package)).
 
 ## Quickstart (< 5 minutes)
 
+Pick **Option A** (release archive) or **Option B** (repository clone) to set
+`DIST_DIR`, then run steps 2–3:
+
 ```bash
-# 1. Extract the release archive for your harness (claude-code or antigravity)
+# 1a. Option A — Pre-compiled release archive (claude-code or antigravity):
 tar -xzf tpu-agent-suite-<harness>-v<version>.tar.gz
+DIST_DIR=tpu-agent-suite-<harness>-v<version>
 
-# 2. Create a Python 3.12+ virtual environment and install host dependencies
-python3 -m venv ~/.venv/tpu-agent-suite
+# 1b. Option B — Build from a repository clone (requires Python 3.12+ and pyyaml):
+python3.12 -m venv ~/.venv/tpu-agent-suite   # or: uv venv ~/.venv/tpu-agent-suite --python 3.12
 source ~/.venv/tpu-agent-suite/bin/activate
-python3 -m pip install -r tpu-agent-suite-<harness>-v<version>/requirements-client.txt
+python3 -m pip install pyyaml                # or: uv pip install pyyaml
+make build
+DIST_DIR=dist/<harness>/tpu-agent-suite
 
-# 3. Install into a project workspace (or omit --destination and pass --scope user)
-python3 tpu-agent-suite-<harness>-v<version>/framework/installer.py install \
+# 2. Activate your Python 3.12+ virtual environment and install host dependencies:
+python3.12 -m venv ~/.venv/tpu-agent-suite   # skip if already created in 1b
+source ~/.venv/tpu-agent-suite/bin/activate
+python3 -m pip install -r "$DIST_DIR/requirements-client.txt"   # or: uv pip install -r "$DIST_DIR/requirements-client.txt"
+
+# 3. Install into a project workspace (or omit --destination and pass --scope user):
+python3 "$DIST_DIR/framework/installer.py" install \
     --destination /path/to/project
 ```
 
@@ -37,18 +49,23 @@ for framework internals, see
 The host is the machine your harness (Claude Code, Codex, Antigravity, or
 Cursor) runs on: a workstation or the TPU VM itself.
 
-1. **Python 3.12+**: `python3 --version`.
-2. **Host-side agent dependencies**: create a
-   [virtual environment](https://docs.python.org/3/library/venv.html) and
-   install the distribution's `requirements-client.txt` into it:
+1. **Python 3.12+**: `python3 --version` (plus `pyyaml` if building from source
+   with `make build`).
+2. **Host-side agent dependencies**: create and activate a Python 3.12+
+   [virtual environment](https://docs.python.org/3/library/venv.html), then
+   install the distribution's `requirements-client.txt` (where `DIST_DIR` is
+   `tpu-agent-suite-<harness>-v<version>` from a release archive or
+   `dist/<harness>/tpu-agent-suite` from `make build`):
 
    ```bash
-   python3 -m pip install -r tpu-agent-suite-<harness>-v<version>/requirements-client.txt
+   python3.12 -m venv ~/.venv/tpu-agent-suite   # or: uv venv ~/.venv/tpu-agent-suite --python 3.12
+   source ~/.venv/tpu-agent-suite/bin/activate
+   python3 -m pip install -r "$DIST_DIR/requirements-client.txt"   # or: uv pip install -r "$DIST_DIR/requirements-client.txt"
    ```
 
-   Keep this environment activated whenever you run sessions with the suite
-   (the installer itself runs on standard-library Python and warns if host
-   dependencies are missing).
+   Keep this environment activated (`source .../activate` on `PATH`) whenever
+   you install or run sessions with the suite: both `installer.py`'s host check
+   and the runtime resolve `python3` from `PATH`.
 
 3. **Standalone CLI tools** (backend-dependent):
    - **`gcloud`** ([Google Cloud CLI](https://cloud.google.com/sdk/docs/install)):
@@ -85,10 +102,11 @@ sets up your backend and checks its tools, credentials and target; see
 
 ### Install
 With your virtual environment activated, run the distribution's self-contained
-installer:
+installer (`DIST_DIR` set to `tpu-agent-suite-<harness>-v<version>` or
+`dist/<harness>/tpu-agent-suite`):
 
 ```bash
-python3 tpu-agent-suite-<harness>-v<version>/framework/installer.py install --destination /path/to/project
+python3 "$DIST_DIR/framework/installer.py" install --destination /path/to/project
 ```
 
 *To install globally across all projects for that harness, omit `--destination` and pass `--scope user`.*
@@ -96,12 +114,16 @@ python3 tpu-agent-suite-<harness>-v<version>/framework/installer.py install --de
 The installer will not overwrite unmanaged existing files or files modified locally by the user unless `--force` is specified.
 
 ### Upgrade
-Extract the new release archive and run `installer.py install` again (`--upgrade`
-is enabled by default):
+Extract the new release archive (or run `git pull && make build`) and run
+`installer.py install` again (`--upgrade` is enabled by default):
 
 ```bash
+# Release archive:
 tar -xzf tpu-agent-suite-<harness>-v<new-version>.tar.gz
 python3 tpu-agent-suite-<harness>-v<new-version>/framework/installer.py install --destination /path/to/project
+
+# Or from a repository clone after `git pull && make build`:
+python3 dist/<harness>/tpu-agent-suite/framework/installer.py install --destination /path/to/project
 ```
 
 Running `installer.py install` on an existing install upgrades in place and retains existing `environment.json` configuration without wiping run history.
@@ -195,10 +217,11 @@ wait on stdin.
 
 The installer sets up no compute. To have a profile ready before the first
 session, create it with the runtime after the install, the same way a session
-does:
+does (`DIST_DIR` set to `tpu-agent-suite-<harness>-v<version>` or
+`dist/<harness>/tpu-agent-suite`):
 
 ```bash
-python3 tpu-agent-suite-<harness>-v<version>/framework/installer.py install \
+python3 "$DIST_DIR/framework/installer.py" install \
     --destination /path/to/project --non-interactive
 cd /path/to/project
 python3 ~/.tpu-agent-suite/packages/tpu-agent-suite@<version>/framework/runtime.py \
@@ -322,7 +345,12 @@ and the TPU workload dependencies.
 > prior to `torch_tpu`.
 
 ```bash
-# On the TPU VM (for gce_tpu_vm, first: gcloud compute tpus tpu-vm ssh <TPU_NAME> --zone=<ZONE>)
+# For gce_tpu_vm (from your workstation first): copy requirements-tpu.txt to the VM, then SSH in
+gcloud compute tpus tpu-vm scp "$DIST_DIR/requirements-tpu.txt" <TPU_NAME>:~/requirements-tpu.txt --zone=<ZONE>
+gcloud compute tpus tpu-vm ssh <TPU_NAME> --zone=<ZONE>
+# (For `local`, you are already on the TPU VM — copy "$DIST_DIR/requirements-tpu.txt" to ~/requirements-tpu.txt)
+
+# On the TPU VM:
 sudo apt update && sudo apt install -y python3.12 python3.12-venv
 python3.12 -m venv ~/tpu_venv && source ~/tpu_venv/bin/activate
 pip install --upgrade pip
@@ -331,7 +359,7 @@ pip install --upgrade pip
 pip install torch_tpu
 
 # 2. Install TPU workload dependencies
-pip install -r tpu-agent-suite-<harness>-v<version>/requirements-tpu.txt
+pip install -r ~/requirements-tpu.txt
 
 # 3. Verify TPU hardware and driver visibility
 tpu-info
