@@ -15,10 +15,21 @@
 
 set -euo pipefail
 
-# One sandbox at a time, so the name is fixed rather than a flag. The tmux
-# session that drives it takes the same name.
-readonly CONTAINER_NAME="tpu-sandcastle"
-readonly TMUX_SESSION="tpu-sandcastle"
+# One sandbox per name. SANDCASTLE_NAME, read from the environment this script
+# is called with (not env.txt), names the container and the tmux session that
+# drives it, so several sandboxes can run side by side on one host; re-running
+# with a name replaces only that sandbox. The name is also the sandbox's
+# kube-gate trial id (step 9) unless SANDBOX_TRIAL_ID says otherwise.
+readonly CONTAINER_NAME="${SANDCASTLE_NAME:-tpu-sandcastle}"
+readonly TMUX_SESSION="$CONTAINER_NAME"
+# Valid for docker (2+ chars), tmux (no '.' or ':') and Kubernetes label values
+# (<=63 chars, alphanumeric endpoints, for the default kube-gate trial id).
+if [[ ! "$CONTAINER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,61}[A-Za-z0-9]$ ]]; then
+  echo "ERROR: SANDCASTLE_NAME='$CONTAINER_NAME' is not a usable name: use" \
+    "2-63 letters, digits, '-' and '_', starting and ending with a letter or" \
+    "digit." >&2
+  exit 2
+fi
 
 # Where the sandbox keeps its own files inside the container.
 readonly SANDBOX_ROOT="/root/sandbox"
@@ -155,8 +166,8 @@ Launch an isolated container environment for Claude Code or Antigravity.
 The container runs as a daemon and you get a bash shell into it inside a tmux
 session, with the config's environment loaded and the CLIs installed. Detach
 with Ctrl-b d and whatever is running keeps running; re-run this script, or
-`tmux attach -t tpu-sandcastle`, to get back to it. Pass `-- COMMAND` to run
-one thing instead of taking a shell.
+`tmux attach -t tpu-sandcastle` (the SANDCASTLE_NAME you gave, if any), to get
+back to it. Pass `-- COMMAND` to run one thing instead of taking a shell.
 
 Installing the package is yours to do, from the shell:
   install_claude   install for Claude Code
@@ -180,10 +191,18 @@ Options:
                       the whole package. Not with a baseline config.
   --help, -h          Show this help message
 
+Environment:
+  SANDCASTLE_NAME     Name of the container and of its tmux session
+                      (default tpu-sandcastle). Give each sandbox its own
+                      name to run several side by side.
+  SANDBOX_TRIAL_ID    kube-gate trial id, which scopes the cluster objects
+                      the sandbox can see (default: the sandbox's name)
+
 Examples:
   ./eval/sandbox.sh -c claude-code/agent-suite
   ./eval/sandbox.sh -c agy/agent-suite -t xprof-attention/kernel-tuning
   ./eval/sandbox.sh --baseline
+  SANDCASTLE_NAME=sandcastle-b ./eval/sandbox.sh -c claude-code/agent-suite -d
 HELP
       exit 0
       ;;
@@ -917,8 +936,9 @@ if [ -n "$STALE_STATUS" ]; then
   docker rm -f "$CONTAINER_NAME" >/dev/null
 fi
 # A leftover session is a window onto a container that no longer exists, and
-# `new-session -A` below would attach to it.
-if tmux kill-session -t "$TMUX_SESSION" 2>/dev/null; then
+# `new-session -A` below would attach to it. The leading '=' forces an exact
+# match so tmux does not fall back to prefix matching and kill another sandbox.
+if tmux kill-session -t "=$TMUX_SESSION" 2>/dev/null; then
   echo "    Killed the stale tmux session '$TMUX_SESSION'"
 fi
 
@@ -940,10 +960,11 @@ docker run -d \
 # The same kube-gate setup a Harbor trial gets (adapter/kube_gate_setup.sh):
 # the agent user, the kubectl wrapper and its sudo rule, the credentials in
 # /etc/kube-gate. /usr/libexec has to exist before `docker cp` writes the
-# wrapper into it.
+# wrapper into it. The trial id defaults to the sandbox's name: sandboxes that
+# shared one would see, and could reap, each other's jobs.
 docker exec "$CONTAINER_NAME" mkdir -p /usr/libexec
 docker cp "$SCRIPT_DIR/kubectl_wrapper.py" "$CONTAINER_NAME:/usr/libexec/kubectl-wrapper" >/dev/null
-docker exec -i -e KUBE_GATE_TRIAL_ID="${SANDBOX_TRIAL_ID:-tpu-sandcastle}" \
+docker exec -i -e KUBE_GATE_TRIAL_ID="${SANDBOX_TRIAL_ID:-$CONTAINER_NAME}" \
   "$CONTAINER_NAME" bash -s < "$SCRIPT_DIR/adapter/kube_gate_setup.sh"
 
 # env.txt, bootstrap.sh, the prompt and the compiled dists, copied rather than

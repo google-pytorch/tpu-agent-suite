@@ -389,6 +389,60 @@ class TestSandbox(unittest.TestCase):
         # a window onto the container this run just replaced.
         self.assertTrue([c for c in self._calls() if "kill-session" in c])
 
+    def _gate_trial_ids(self) -> list[str]:
+        return [
+            c.split("KUBE_GATE_TRIAL_ID=", 1)[1].split()[0]
+            for c in self._calls() if "KUBE_GATE_TRIAL_ID=" in c
+        ]
+
+    def test_the_default_name_is_tpu_sandcastle(self):
+        proc = self._run(_CONFIG_BASELINE)
+
+        self.assertEqual(proc.returncode, 0, self._explain(proc))
+        runs = [c for c in self._calls() if c.startswith("docker run -d ")]
+        self.assertIn("--name tpu-sandcastle ", runs[0])
+        self.assertIn("tmux kill-session -t =tpu-sandcastle", self._calls())
+        self.assertEqual(self._gate_trial_ids(), ["tpu-sandcastle"])
+
+    def test_sandcastle_name_names_the_container_session_and_trial(self):
+        """Two sandboxes on one host need two containers, sessions and trials."""
+        proc = self._run(_CONFIG_BASELINE, SANDCASTLE_NAME="sandcastle-b")
+
+        self.assertEqual(proc.returncode, 0, self._explain(proc))
+        runs = [c for c in self._calls() if c.startswith("docker run -d ")]
+        self.assertIn("--name sandcastle-b ", runs[0])
+        self.assertIn("tmux kill-session -t =sandcastle-b", self._calls())
+        self.assertEqual(self._gate_trial_ids(), ["sandcastle-b"])
+        # Nothing touches the default sandbox, which may be someone's run.
+        self.assertFalse([c for c in self._calls() if "tpu-sandcastle" in c],
+                         self._calls())
+
+    def test_sandbox_trial_id_still_overrides_the_name(self):
+        proc = self._run(_CONFIG_BASELINE,
+                         SANDCASTLE_NAME="sandcastle-b",
+                         SANDBOX_TRIAL_ID="trial-x")
+
+        self.assertEqual(proc.returncode, 0, self._explain(proc))
+        self.assertEqual(self._gate_trial_ids(), ["trial-x"])
+
+    def test_a_name_docker_or_tmux_would_change_is_refused(self):
+        bad_names = (
+            "bad.name",
+            "a:b",
+            "-lead",
+            "with space",
+            "a",
+            "trail-",
+            "trail_",
+            "a" * 64,
+        )
+        for bad in bad_names:
+            proc = self._run(_CONFIG_BASELINE, SANDCASTLE_NAME=bad)
+
+            self.assertEqual(proc.returncode, 2, self._explain(proc))
+            self.assertIn("SANDCASTLE_NAME", proc.stderr)
+            self.assertFalse(self._calls(), self._calls())
+
     def test_the_package_override_is_rejected(self):
         """The config decides the arm; an override contradicts it."""
         proc = self._run(_CONFIG_BUNDLE, "--package", "tpu-hello-world")

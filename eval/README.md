@@ -110,6 +110,19 @@ multi-hour agent run needs, and it means a dropped ssh session costs you the
 view rather than the work. Re-running `sandbox.sh` removes the previous
 container first, so export anything you want to keep before you do.
 
+To run several sandboxes side by side, give each its own name with
+`SANDCASTLE_NAME`; it names both the container and its tmux session, and
+re-running with a name replaces only that sandbox:
+
+```bash
+SANDCASTLE_NAME=sandcastle-a ./eval/sandbox.sh -c claude-code/agent-suite --sleep
+SANDCASTLE_NAME=sandcastle-b ./eval/sandbox.sh -c claude-code/agent-suite --sleep
+tmux attach -t sandcastle-b
+```
+
+The name is also the sandbox's kube-gate trial id (set `SANDBOX_TRIAL_ID` to
+override it), so one sandbox cannot see or reap another's jobs.
+
 Nothing is installed for you. From the shell:
 
 | Command | What it does |
