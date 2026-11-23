@@ -3523,6 +3523,197 @@ class TestRunSuiteOption(unittest.TestCase):
             self.assertEqual(
                 (env_art / "sub" / "trace.xplane.pb").read_bytes(), b"xplane")
 
+    def test_sitecustomize_omits_oversized_traces_and_xprof_spills(
+            self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+
+        from eval.adapter import sitecustomize
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_art = root / "runs" / "r1" / "artifacts" / "diag"
+            run_art.mkdir(parents=True)
+            (run_art / "small.xplane.pb").write_bytes(b"small")
+            (run_art / "huge.xplane.pb").write_bytes(b"x" * 2048)
+            (run_art / "report.json").write_text('{"ok": true}\n',
+                                                 encoding="utf-8")
+            spill_dir = run_art / "xprof_spill_123"
+            spill_dir.mkdir()
+            (spill_dir / "chunk.bin").write_bytes(b"y" * 2048)
+
+            env_art = root / "logs" / "artifacts"
+            direct_diag = env_art / "direct"
+            direct_diag.mkdir(parents=True)
+            (direct_diag / "direct_huge.xplane.pb").write_bytes(b"z" * 4096)
+            (direct_diag / "keep.md").write_text("# Summary\n",
+                                                 encoding="utf-8")
+
+            async def _exec(cmd: str, **_kw):
+                subprocess.run(["sh", "-c", cmd], check=True)
+                return SimpleNamespace(return_code=0)
+
+            class DummyTrial:
+                agent_environment = SimpleNamespace(exec=_exec)
+                agent_env_paths = SimpleNamespace(artifacts_dir=env_art)
+
+                async def _collect_artifacts_phased(self, **_kw) -> None:
+                    pass
+
+            with patch.object(sitecustomize, "SUITE_RUNS_DIR",
+                              str(root / "runs")), \
+                    patch.object(sitecustomize, "MAX_STAGED_TRACE_BYTES", 1024), \
+                    patch.object(sitecustomize,
+                                 "MAX_STAGED_RANK0_XPLANE_BYTES", 1024):
+                sitecustomize._patch_trial_stage_suite_artifacts(DummyTrial)
+                asyncio.run(
+                    DummyTrial._collect_artifacts_phased(DummyTrial(),
+                                                         artifacts_dir=root /
+                                                         "out"))
+
+            # Small xplane trace and JSON/MD summaries stay intact.
+            self.assertEqual(
+                (env_art / "diag" / "small.xplane.pb").read_bytes(), b"small")
+            self.assertEqual(
+                (env_art / "diag" / "report.json").read_text(encoding="utf-8"),
+                '{"ok": true}\n')
+            self.assertEqual(
+                (direct_diag / "keep.md").read_text(encoding="utf-8"),
+                "# Summary\n")
+
+            # Oversized traces (in runs/ and directly under /logs/artifacts) are
+            # replaced with lightweight .omitted.json metadata; spills are skipped.
+            self.assertFalse((env_art / "diag" / "huge.xplane.pb").exists())
+            omitted_staged = json.loads(
+                (env_art / "diag" /
+                 "huge.xplane.pb.omitted.json").read_text(encoding="utf-8"))
+            self.assertEqual(omitted_staged["size_bytes"], 2048)
+            # Original trace inside runs/ remains untouched on the pod.
+            self.assertTrue((run_art / "huge.xplane.pb").is_file())
+            self.assertFalse((env_art / "diag" / "xprof_spill_123").exists())
+
+            self.assertFalse((direct_diag / "direct_huge.xplane.pb").exists())
+            omitted_direct = json.loads(
+                (direct_diag / "direct_huge.xplane.pb.omitted.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(omitted_direct["size_bytes"], 4096)
+
+    def test_sitecustomize_keeps_rank0_xplane_traces_up_to_their_own_cap(
+            self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+
+        from eval.adapter import sitecustomize
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prof = root / "runs" / "r1" / "artifacts" / "prof"
+            prof.mkdir(parents=True)
+            sizes = {
+                "rank0_host-a.xplane.pb": 2048,  # rank 0, under its cap: kept
+                "host-a.xplane.pb": 2048,  # no rank: treated as rank 0, kept
+                "rank1_host-a.xplane.pb": 2048,  # other rank: small cap
+                "rank0_host-b.xplane.pb": 8192,  # rank 0 over its own cap
+                "host-a.op_stats.pb": 2048,  # not an xplane: small cap
+            }
+            for name, size in sizes.items():
+                (prof / name).write_bytes(b"x" * size)
+            env_art = root / "logs" / "artifacts"
+            direct = env_art / "direct"
+            direct.mkdir(parents=True)
+            (direct / "rank0_host-c.xplane.pb").write_bytes(b"y" * 2048)
+            (direct / "rank3_host-c.xplane.pb").write_bytes(b"y" * 2048)
+
+            async def _exec(cmd: str, **_kw):
+                subprocess.run(["sh", "-c", cmd], check=True)
+                return SimpleNamespace(return_code=0)
+
+            class DummyTrial:
+                agent_environment = SimpleNamespace(exec=_exec)
+                agent_env_paths = SimpleNamespace(artifacts_dir=env_art)
+
+                async def _collect_artifacts_phased(self, **_kw) -> None:
+                    pass
+
+            with patch.object(sitecustomize, "SUITE_RUNS_DIR",
+                              str(root / "runs")), \
+                    patch.object(sitecustomize, "MAX_STAGED_TRACE_BYTES", 1024), \
+                    patch.object(sitecustomize,
+                                 "MAX_STAGED_RANK0_XPLANE_BYTES", 4096):
+                sitecustomize._patch_trial_stage_suite_artifacts(DummyTrial)
+                asyncio.run(
+                    DummyTrial._collect_artifacts_phased(DummyTrial(),
+                                                         artifacts_dir=root /
+                                                         "out"))
+
+            staged = env_art / "prof"
+            for kept in ("rank0_host-a.xplane.pb", "host-a.xplane.pb"):
+                self.assertEqual((staged / kept).stat().st_size, 2048, kept)
+            omitted = {
+                "rank1_host-a.xplane.pb": 1024,
+                "rank0_host-b.xplane.pb": 4096,
+                "host-a.op_stats.pb": 1024,
+            }
+            for name, cap in omitted.items():
+                self.assertFalse((staged / name).exists(), name)
+                sidecar = staged / (name + ".omitted.json")
+                meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                self.assertEqual(meta["size_bytes"], sizes[name])
+                self.assertEqual(meta["max_staged_trace_bytes"], cap)
+            self.assertTrue((direct / "rank0_host-c.xplane.pb").is_file())
+            self.assertFalse((direct / "rank3_host-c.xplane.pb").exists())
+            self.assertTrue(
+                (direct / "rank3_host-c.xplane.pb.omitted.json").is_file())
+
+    def test_sitecustomize_staging_preserves_dir_symlinks_and_skips_fifos(
+            self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+
+        from eval.adapter import sitecustomize
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_art = root / "runs" / "r1" / "artifacts"
+            real_dir = run_art / "real_dir"
+            real_dir.mkdir(parents=True)
+            (real_dir / "keep.txt").write_text("ok\n", encoding="utf-8")
+            os.symlink("real_dir", run_art / "link_dir")
+            os.mkfifo(run_art / "named.pipe")
+            (run_art / "huge.pt.trace.json.zst").write_bytes(b"z" * 2048)
+            env_art = root / "logs" / "artifacts"
+
+            async def _exec(cmd: str, **_kw):
+                subprocess.run(["sh", "-c", cmd], check=True)
+                return SimpleNamespace(return_code=0)
+
+            class DummyTrial:
+                agent_environment = SimpleNamespace(exec=_exec)
+                agent_env_paths = SimpleNamespace(artifacts_dir=env_art)
+
+                async def _collect_artifacts_phased(self, **_kw) -> None:
+                    pass
+
+            with patch.object(sitecustomize, "SUITE_RUNS_DIR",
+                              str(root / "runs")), \
+                    patch.object(sitecustomize, "MAX_STAGED_TRACE_BYTES", 1024), \
+                    patch.object(sitecustomize,
+                                 "MAX_STAGED_RANK0_XPLANE_BYTES", 1024):
+                sitecustomize._patch_trial_stage_suite_artifacts(DummyTrial)
+                asyncio.run(
+                    DummyTrial._collect_artifacts_phased(DummyTrial(),
+                                                         artifacts_dir=root /
+                                                         "out"))
+
+            self.assertEqual((env_art / "real_dir" /
+                              "keep.txt").read_text(encoding="utf-8"), "ok\n")
+            self.assertTrue((env_art / "link_dir").is_symlink())
+            self.assertEqual(os.readlink(env_art / "link_dir"), "real_dir")
+            self.assertFalse((env_art / "named.pipe").exists())
+            self.assertFalse((env_art / "huge.pt.trace.json.zst").exists())
+            self.assertTrue(
+                (env_art / "huge.pt.trace.json.zst.omitted.json").is_file())
+
 
 class TestRunSuiteAndSitecustomizeProvenance(unittest.TestCase):
     """Tests for suite verifier routing, env clearing, and upload-time provenance."""

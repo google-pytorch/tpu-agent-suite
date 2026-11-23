@@ -107,6 +107,22 @@ fi
 
 if find "$ARTIFACTS_DIR" -name '*.xplane.pb' -type f 2>/dev/null | grep -q .; then
   XPROF_ON_DISK=yes
+elif python3 - "$ARTIFACTS_DIR" <<'PYEOF'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+ok = False
+if root.is_dir():
+    for p in root.rglob("*.xplane.pb.omitted.json"):
+        try:
+            if int(json.loads(p.read_text(encoding="utf-8")).get("size_bytes", 0)) > 0:
+                ok = True
+                break
+        except Exception:
+            pass
+sys.exit(0 if ok else 1)
+PYEOF
+then
+  XPROF_ON_DISK=yes
 else
   XPROF_ON_DISK=no
 fi

@@ -280,6 +280,7 @@ if DockerEnvironment is not None and not getattr(
 # into 64 KiB frames, and require tar's exit status so truncated transfers fail
 # and retry cleanly.
 _DOWNLOAD_ATTEMPTS = 3
+_DOWNLOAD_IDLE_TIMEOUT_SEC = 120.0
 _UPLOAD_ATTEMPTS = 3
 _UPLOAD_CHUNK_BYTES = 64 * 1024
 _UPLOAD_DRAIN_TIMEOUT_SEC = 30.0
@@ -287,36 +288,61 @@ _UPLOAD_DRAIN_TIMEOUT_SEC = 30.0
 if GKEEnvironment is not None and stream is not None and not getattr(
         GKEEnvironment, "_eval_gke_download_patched", False):
     import asyncio
-    import io
     import shlex
     import tarfile
+    import tempfile
     import time
 
-    from harbor.environments.tar_transfer import (extract_dir_from_bytes,
-                                                  pack_dir_to_bytes)
+    from harbor.environments.tar_transfer import (extract_dir_from_file,
+                                                  pack_dir_to_file)
 
     class _TarExitError(RuntimeError):
         """tar ran to completion and failed: retrying would not help."""
 
-    def _validate_tar_bytes(raw: bytes) -> bytes:
-        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
-            tar.getmembers()
+    def _validate_tar_file(archive_path: Path) -> None:
+        size = archive_path.stat().st_size
+        with tarfile.open(archive_path, mode="r:") as tar:
+            for _ in tar:
+                pass
             last_end = tar.offset
-        if len(raw) - last_end < 1024 or any(raw[last_end:last_end + 1024]):
+        if size - last_end < 1024:
             raise tarfile.ReadError(
                 "incomplete tar archive (missing EOF blocks)")
-        return raw
+        with archive_path.open("rb") as fh:
+            fh.seek(last_end)
+            if any(fh.read(1024)):
+                raise tarfile.ReadError(
+                    "incomplete tar archive (missing EOF blocks)")
 
-    def _read_tar_bytes(self, resp, command: list[str]) -> bytes:
-        stdout = bytearray()
+    def _read_tar_to_file(self, resp, command: list[str],
+                          archive_path: Path) -> None:
         stderr = bytearray()
+        bytes_written = 0
+        deadline = time.monotonic() + _DOWNLOAD_IDLE_TIMEOUT_SEC
         try:
-            while resp.is_open():
-                resp.update(timeout=1)
-                if resp.peek_stdout():
-                    stdout += resp.read_stdout()
-                if resp.peek_stderr():
-                    stderr += resp.read_stderr()
+            with archive_path.open("wb") as out:
+                while resp.is_open():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Timed out after {_DOWNLOAD_IDLE_TIMEOUT_SEC}s"
+                            f" of inactivity reading `{' '.join(command)}`"
+                            f" in pod {self.pod_name}")
+                    resp.update(timeout=1)
+                    progressed = False
+                    if resp.peek_stdout():
+                        chunk = resp.read_stdout()
+                        if chunk:
+                            out.write(chunk)
+                            bytes_written += len(chunk)
+                            progressed = True
+                    if resp.peek_stderr():
+                        err_chunk = resp.read_stderr()
+                        if err_chunk:
+                            stderr += err_chunk
+                            progressed = True
+                    if progressed:
+                        deadline = (time.monotonic() +
+                                    _DOWNLOAD_IDLE_TIMEOUT_SEC)
             # Raises when the stream closed before tar's exit status arrived.
             return_code = self._exec_return_code(resp)
         finally:
@@ -326,28 +352,31 @@ if GKEEnvironment is not None and stream is not None and not getattr(
             # GNU tar exits 1 ("Some files differed" / "file changed as we read
             # it") when a live log or SQLite WAL file is appended to during
             # archiving. The tar stream on stdout is still valid and complete.
-            if return_code == 1 and stdout:
+            if return_code == 1 and bytes_written > 0:
                 self.logger.warning(
                     f"[GKE-Download-Adapter] `{' '.join(command)}` exited 1"
                     f" (live file modified during read) in pod"
-                    f" '{self.pod_name}'; keeping {len(stdout)} archive bytes:"
-                    f" {err_text}")
-                return _validate_tar_bytes(bytes(stdout))
+                    f" '{self.pod_name}'; keeping {bytes_written} archive"
+                    f" bytes: {err_text}")
+                _validate_tar_file(archive_path)
+                return
             raise _TarExitError(
                 f"`{' '.join(command)}` exited {return_code} in pod"
                 f" {self.pod_name}: {err_text}")
-        return _validate_tar_bytes(bytes(stdout))
+        _validate_tar_file(archive_path)
 
-    def _write_tar_bytes(self, resp, tar_data: bytes,
-                         command: list[str]) -> None:
+    def _write_tar_from_file(self, resp, archive_path: Path,
+                             command: list[str]) -> None:
         stderr = bytearray()
         try:
-            mv = memoryview(tar_data)
-            for offset in range(0, len(mv), _UPLOAD_CHUNK_BYTES):
-                resp.write_stdin(bytes(mv[offset:offset +
-                                          _UPLOAD_CHUNK_BYTES]))
-                if resp.peek_stderr():
-                    stderr += resp.read_stderr()
+            with archive_path.open("rb") as fh:
+                while True:
+                    chunk = fh.read(_UPLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    resp.write_stdin(chunk)
+                    if resp.peek_stderr():
+                        stderr += resp.read_stderr()
             resp.close_channel(0)
             deadline = time.monotonic() + _UPLOAD_DRAIN_TIMEOUT_SEC
             while resp.is_open():
@@ -369,7 +398,8 @@ if GKEEnvironment is not None and stream is not None and not getattr(
                 f" {self.pod_name}: {stderr.decode('utf-8', 'replace').strip()}"
             )
 
-    async def _download_tar(self, command: list[str]) -> bytes:
+    async def _download_tar_to_file(self, command: list[str],
+                                    archive_path: Path) -> None:
         await self._ensure_client()
         for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
             try:
@@ -386,8 +416,9 @@ if GKEEnvironment is not None and stream is not None and not getattr(
                     binary=True,
                     _preload_content=False,
                 )
-                return await asyncio.to_thread(_read_tar_bytes, self, resp,
-                                               command)
+                await asyncio.to_thread(_read_tar_to_file, self, resp, command,
+                                        archive_path)
+                return
             except Exception as e:
                 if isinstance(e,
                               _TarExitError) or attempt == _DOWNLOAD_ATTEMPTS:
@@ -399,7 +430,8 @@ if GKEEnvironment is not None and stream is not None and not getattr(
                 await asyncio.sleep(2**attempt)
         raise AssertionError("unreachable")
 
-    async def _upload_tar(self, tar_data: bytes, target_dir: str) -> None:
+    async def _upload_tar_file(self, archive_path: Path,
+                               target_dir: str) -> None:
         await self._ensure_client()
         command = ["tar", "xf", "-", "-C", target_dir]
         dir_created = False
@@ -427,8 +459,8 @@ if GKEEnvironment is not None and stream is not None and not getattr(
                     binary=True,
                     _preload_content=False,
                 )
-                await asyncio.to_thread(_write_tar_bytes, self, resp, tar_data,
-                                        command)
+                await asyncio.to_thread(_write_tar_from_file, self, resp,
+                                        archive_path, command)
                 return
             except Exception as e:
                 if isinstance(e, _TarExitError) or attempt == _UPLOAD_ATTEMPTS:
@@ -450,9 +482,14 @@ if GKEEnvironment is not None and stream is not None and not getattr(
                                        target_dir: Path | str):
         if self._compose_mode:
             return await _orig_gke_download_dir(self, source_dir, target_dir)
-        tar_data = await _download_tar(
-            self, ["sh", "-c", f"cd {shlex.quote(source_dir)} && tar cf - ."])
-        extract_dir_from_bytes(tar_data, target_dir)
+        with tempfile.TemporaryDirectory(prefix="harbor-dl-") as tmp_dir:
+            archive_path = Path(tmp_dir) / "archive.tar"
+            await _download_tar_to_file(
+                self,
+                ["sh", "-c", f"cd {shlex.quote(source_dir)} && tar cf - ."],
+                archive_path)
+            await asyncio.to_thread(extract_dir_from_file, archive_path,
+                                    target_dir)
 
     @functools.wraps(_orig_gke_download_file)
     async def _binary_gke_download_file(self, source_path: str,
@@ -462,16 +499,19 @@ if GKEEnvironment is not None and stream is not None and not getattr(
                                                  target_path)
         target_path = Path(target_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        tar_data = await _download_tar(self, ["tar", "cf", "-", source_path])
-        with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r") as tar:
-            for member in tar.getmembers():
-                if member.name == source_path or member.name.startswith(
-                        source_path.lstrip("/")):
-                    member.name = target_path.name
-                    tar.extract(member,
-                                path=str(target_path.parent),
-                                filter="data")
-                    break
+        with tempfile.TemporaryDirectory(prefix="harbor-dl-") as tmp_dir:
+            archive_path = Path(tmp_dir) / "archive.tar"
+            await _download_tar_to_file(self, ["tar", "cf", "-", source_path],
+                                        archive_path)
+            with tarfile.open(archive_path, mode="r:") as tar:
+                for member in tar:
+                    if member.name == source_path or member.name.startswith(
+                            source_path.lstrip("/")):
+                        member.name = target_path.name
+                        tar.extract(member,
+                                    path=str(target_path.parent),
+                                    filter="data")
+                        break
 
     @functools.wraps(_orig_gke_upload_dir)
     async def _chunked_gke_upload_dir(self, source_dir: Path | str,
@@ -482,10 +522,16 @@ if GKEEnvironment is not None and stream is not None and not getattr(
         if not source_dir.is_dir():
             self.logger.warning(f"No files to upload from {source_dir}")
             return
-        tar_data = pack_dir_to_bytes(source_dir).getvalue()
-        await _upload_tar(self, tar_data, target_dir)
+        with tempfile.TemporaryDirectory(prefix="harbor-ul-") as tmp_dir:
+            archive_path = Path(tmp_dir) / "archive.tar"
+            await asyncio.to_thread(pack_dir_to_file,
+                                    source_dir,
+                                    archive_path,
+                                    compress=False)
+            archive_size = archive_path.stat().st_size
+            await _upload_tar_file(self, archive_path, target_dir)
         self.logger.debug(
-            f"Successfully uploaded {source_dir} ({len(tar_data)} bytes) to"
+            f"Successfully uploaded {source_dir} ({archive_size} bytes) to"
             f" {target_dir}")
 
     @functools.wraps(_orig_gke_upload_file)
@@ -494,11 +540,12 @@ if GKEEnvironment is not None and stream is not None and not getattr(
         if self._compose_mode:
             return await _orig_gke_upload_file(self, source_path, target_path)
         source_path = Path(source_path)
-        tar_buffer = io.BytesIO()
-        with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
-            tar.add(str(source_path), arcname=Path(target_path).name)
-        target_dir = str(Path(target_path).parent)
-        await _upload_tar(self, tar_buffer.getvalue(), target_dir)
+        with tempfile.TemporaryDirectory(prefix="harbor-ul-") as tmp_dir:
+            archive_path = Path(tmp_dir) / "archive.tar"
+            with tarfile.open(archive_path, mode="w") as tar:
+                tar.add(str(source_path), arcname=Path(target_path).name)
+            target_dir = str(Path(target_path).parent)
+            await _upload_tar_file(self, archive_path, target_dir)
 
     GKEEnvironment.download_dir = _binary_gke_download_dir
     GKEEnvironment.download_file = _binary_gke_download_file
@@ -1091,27 +1138,157 @@ _patch_trial_agent_user(_HarborTrial)
 # the top-level `tpu-agent` router has `tools: [read, ask]` so it cannot shell
 # out to copy them into Harbor's `/logs/artifacts/`.
 #
-# Intercepting `Trial._collect_artifacts_phased` copies each run's `artifacts/`
+# Intercepting `Trial._collect_artifacts_phased` stages each run's `artifacts/`
 # directory into `agent_env_paths.artifacts_dir` (`/logs/artifacts`) inside the
-# agent container right after the agent completes and before Harbor:
+# agent container right after the agent completes (skipping `xprof_spill_*`
+# entries and replacing oversized raw profiler traces with lightweight
+# `.omitted.json` sidecars: 512 MiB cap for rank-0/unranked `.xplane.pb`, 64 MiB
+# for other ranks and raw trace formats) before Harbor:
 #   1. collects task-declared artifacts,
 #   2. downloads `/logs/artifacts` to `<trial_dir>/artifacts/logs/artifacts/`,
 #   3. uploads `/logs/artifacts` into a separate verifier container (if used),
 #   4. runs the verifier (`test.sh`, `check.py`, `judge.toml`).
 SUITE_RUNS_DIR = "/root/.tpu-agent-suite/runs"
 DEFAULT_ENV_ARTIFACTS_DIR = "/logs/artifacts"
-STAGE_ARTIFACTS_TIMEOUT_SEC = 60
+MAX_STAGED_TRACE_BYTES = 64 * 1024 * 1024
+# Rank-0 (or unranked) `.xplane.pb` captures are the ones a reviewer opens in
+# XProf, and a phased capture on one host is 50-150 MB, so the 64 MiB cap
+# dropped exactly the traces worth keeping. They get their own, larger cap;
+# other ranks and the other raw trace formats keep MAX_STAGED_TRACE_BYTES.
+MAX_STAGED_RANK0_XPLANE_BYTES = 512 * 1024 * 1024
+# Staging now copies those rank-0 traces too (several GB over a long
+# campaign). A timeout leaves whatever was not yet copied out of the trial,
+# with only a warning, so allow well over the expected copy time.
+STAGE_ARTIFACTS_TIMEOUT_SEC = 600
+
+_STAGE_SUITE_ARTIFACTS_PY = """
+import fnmatch, json, os, shutil, stat, sys
+from pathlib import Path
+
+runs_dir = Path(sys.argv[1])
+target_dir = Path(sys.argv[2])
+max_bytes = int(sys.argv[3])
+max_rank0_xplane_bytes = int(sys.argv[4])
+trace_globs = (
+    "*.xplane.pb",
+    "*.op_stats*.pb",
+    "*.pt.trace.json*",
+    "*events.out.tfevents*",
+)
+
+def trace_cap(path: Path):
+    # None for a file that is not a raw trace. Profilers name per-device
+    # captures rank<N>_<host>.xplane.pb; rank 0, or a capture with no rank,
+    # is the one XProf opens, so it gets the larger cap.
+    name = path.name
+    if name.endswith(".omitted.json"):
+        return None
+    if not any(fnmatch.fnmatch(name, pat) for pat in trace_globs):
+        return None
+    if name.endswith(".xplane.pb") and (name.startswith("rank0_")
+                                        or not name.startswith("rank")):
+        return max_rank0_xplane_bytes
+    return max_bytes
+
+def is_oversized_trace(path: Path, size: int) -> bool:
+    cap = trace_cap(path)
+    return cap is not None and size > cap
+
+def write_omitted(dst: Path, size: int) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    meta = dst.with_name(dst.name + ".omitted.json")
+    meta.write_text(
+        json.dumps({
+            "omitted_file": dst.name,
+            "size_bytes": size,
+            "max_staged_trace_bytes": trace_cap(dst),
+        }) + "\\n",
+        encoding="utf-8",
+    )
+
+def copy_symlink(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.is_symlink() or dst.is_file():
+        dst.unlink()
+    elif dst.is_dir():
+        shutil.rmtree(dst)
+    os.symlink(os.readlink(src), dst)
+
+if runs_dir.is_dir():
+    for run_entry in sorted(runs_dir.iterdir()):
+        art_dir = run_entry / "artifacts"
+        if not art_dir.is_dir():
+            continue
+        for root, dirs, files in os.walk(art_dir):
+            rel_root = Path(root).relative_to(art_dir)
+            dst_root = target_dir / rel_root
+            kept_dirs = []
+            for d in dirs:
+                if d.startswith("xprof_spill_"):
+                    continue
+                src_d = Path(root) / d
+                if src_d.is_symlink():
+                    try:
+                        copy_symlink(src_d, dst_root / d)
+                    except OSError:
+                        pass
+                    continue
+                kept_dirs.append(d)
+            dirs[:] = kept_dirs
+            for fname in files:
+                if fname.startswith("xprof_spill_"):
+                    continue
+                src_file = Path(root) / fname
+                dst_file = dst_root / fname
+                try:
+                    if src_file.is_symlink():
+                        copy_symlink(src_file, dst_file)
+                        continue
+                    st = src_file.stat()
+                    if not stat.S_ISREG(st.st_mode):
+                        continue
+                    if is_oversized_trace(src_file, st.st_size):
+                        write_omitted(dst_file, st.st_size)
+                        continue
+                    dst_root.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_file, dst_file)
+                except OSError:
+                    continue
+
+if target_dir.is_dir():
+    for root, dirs, files in os.walk(target_dir):
+        for d in list(dirs):
+            if d.startswith("xprof_spill_"):
+                shutil.rmtree(Path(root) / d, ignore_errors=True)
+                dirs.remove(d)
+        for fname in files:
+            fpath = Path(root) / fname
+            try:
+                if fpath.is_symlink():
+                    continue
+                if fname.startswith("xprof_spill_"):
+                    fpath.unlink(missing_ok=True)
+                    continue
+                st = fpath.stat()
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if is_oversized_trace(fpath, st.st_size):
+                    write_omitted(fpath, st.st_size)
+                    fpath.unlink(missing_ok=True)
+            except OSError:
+                continue
+""".strip()
 
 
 def _stage_suite_artifacts_command(
         runs_dir: str = SUITE_RUNS_DIR,
-        target_dir: str = DEFAULT_ENV_ARTIFACTS_DIR) -> str:
-    quoted_runs = shlex.quote(runs_dir)
-    quoted_target = shlex.quote(target_dir)
-    return ("for d in " + quoted_runs + "/*/artifacts; do "
-            '[ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] || continue; '
-            f"mkdir -p {quoted_target} && cp -rf \"$d\"/. {quoted_target}/; "
-            "done")
+        target_dir: str = DEFAULT_ENV_ARTIFACTS_DIR,
+        max_trace_bytes: int = MAX_STAGED_TRACE_BYTES,
+        max_rank0_xplane_bytes: int = MAX_STAGED_RANK0_XPLANE_BYTES) -> str:
+    return ("python3 -c " + shlex.quote(_STAGE_SUITE_ARTIFACTS_PY) + " " +
+            shlex.quote(runs_dir) + " " + shlex.quote(target_dir) + " " +
+            shlex.quote(str(int(max_trace_bytes))) + " " +
+            shlex.quote(str(int(max_rank0_xplane_bytes))))
 
 
 def _patch_trial_stage_suite_artifacts(trial_cls: object) -> None:
@@ -1143,7 +1320,9 @@ def _patch_trial_stage_suite_artifacts(trial_cls: object) -> None:
                     env_artifacts or DEFAULT_ENV_ARTIFACTS_DIR))
             try:
                 result = await env.exec(
-                    _stage_suite_artifacts_command(SUITE_RUNS_DIR, target_dir),
+                    _stage_suite_artifacts_command(
+                        SUITE_RUNS_DIR, target_dir, MAX_STAGED_TRACE_BYTES,
+                        MAX_STAGED_RANK0_XPLANE_BYTES),
                     user="root",
                     timeout_sec=STAGE_ARTIFACTS_TIMEOUT_SEC,
                 )

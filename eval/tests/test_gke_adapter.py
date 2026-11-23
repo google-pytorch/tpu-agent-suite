@@ -451,6 +451,47 @@ class TestGkeDownloadAdapter(unittest.TestCase):
                 asyncio.run(env.upload_dir(src_dir, "/logs/agent"))
         self.assertTrue(all(s.closed for s in streams))
 
+    def test_download_dir_idle_deadline_raises_timeout_and_closes_streams(
+            self) -> None:
+        data, _ = _agent_dir_tar()
+        streams = [
+            _FakeExecStream([data[:512]], _SUCCESS, hang_on_drain=True)
+            for _ in range(_ADAPTER._DOWNLOAD_ATTEMPTS)
+        ]
+        env = _make_env()
+        with patch.object(_ADAPTER, "stream", side_effect=streams), \
+                patch.object(_ADAPTER, "_DOWNLOAD_IDLE_TIMEOUT_SEC", 0.01), \
+                patch.object(_ADAPTER.asyncio, "sleep") as mock_sleep:
+            mock_sleep.return_value = None
+            with self.assertRaises(TimeoutError):
+                asyncio.run(env.download_dir("/logs/artifacts", self.temp_dir))
+        self.assertTrue(all(s.closed for s in streams))
+
+    def test_download_dir_streams_through_temp_file_without_leaking_temp_dir(
+            self) -> None:
+        data, _ = _agent_dir_tar()
+        seen_archives: list[Path] = []
+        orig_extract = _ADAPTER.extract_dir_from_file
+
+        def _spy_extract(archive_path: Path | str, target_dir: Path | str):
+            p = Path(archive_path)
+            self.assertTrue(p.is_file())
+            seen_archives.append(p)
+            return orig_extract(archive_path, target_dir)
+
+        env = _make_env()
+        with patch.object(_ADAPTER,
+                          "stream",
+                          return_value=_FakeExecStream([data], _SUCCESS)), \
+                patch.object(_ADAPTER,
+                             "extract_dir_from_file",
+                             side_effect=_spy_extract):
+            asyncio.run(env.download_dir("/logs/artifacts", self.temp_dir))
+
+        self.assertEqual(len(seen_archives), 1)
+        self.assertFalse(seen_archives[0].exists())
+        self.assertTrue((self.temp_dir / "session_supervisor.log").is_file())
+
 
 _real_sleep = asyncio.sleep
 

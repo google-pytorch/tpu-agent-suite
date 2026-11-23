@@ -111,6 +111,20 @@ ARTIFACTS="${ARTIFACTS_DIR:-/logs/artifacts}"
 XPLANES=0
 if [ -d "$ARTIFACTS" ]; then
   XPLANES="$(find "$ARTIFACTS" -name '*.xplane.pb' -size +0 2>/dev/null | wc -l | tr -d '[:space:]')"
+  OMITTED_XPLANES="$(python3 - "$ARTIFACTS" <<'PYEOF'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+n = 0
+for p in root.rglob("*.xplane.pb.omitted.json"):
+    try:
+        if int(json.loads(p.read_text(encoding="utf-8")).get("size_bytes", 0)) > 0:
+            n += 1
+    except Exception:
+        pass
+print(n)
+PYEOF
+)"
+  XPLANES=$((XPLANES + OMITTED_XPLANES))
 fi
 
 XPROF_OK=no
