@@ -45,6 +45,7 @@ from eval.job_naming import (check_version_drift, load_verifier_versions,
 from eval.mount_advisor import (DEFAULT_AGENT_PERSONA, MountUpdates,
                                 SkillMountAdvisor)
 from eval.staging import stage_composite_package
+from eval.suite_to_harbor import suite_index, suite_to_harbor
 from eval.utils import (RELEASE_MANIFEST, find_repo_root, harness_for_config,
                         installs_at_user_scope, is_control_arm,
                         manifest_agents, package_identity, package_label,
@@ -187,59 +188,22 @@ def available_datasets() -> str:
                for p in DATASETS_DIR.iterdir() if p.is_dir())) or "(none)"
 
 
-def is_task_file(path: Path) -> bool:
-    """True for a suite YAML holding exactly one case.
-
-    Such files are the tasks of a suite directory: suites/cset/tpu_knowledge_qa/
-    is one Harbor dataset and each YAML inside it is one Harbor task.
-    """
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
-        return False
-    cases = (data.get("evaluation") or {}).get("cases") or []
-    return len(cases) == 1
-
-
 def available_suites() -> str:
-    """Suite names under eval/suites/, for error messages.
+    """Suite paths under eval/suites/ and the names suites declare, for errors.
 
     A directory of task files is listed once, as the directory, rather than
     once per task.
     """
-    if not SUITES_DIR.is_dir():
-        return "(none)"
-    names = set()
-    for p in SUITES_DIR.glob("**/*.yaml"):
-        suite = p.parent if is_task_file(p) else p.with_suffix("")
-        names.add(str(suite.relative_to(SUITES_DIR)))
-    return ", ".join(sorted(names)) or "(none)"
+    return ", ".join(sorted(suite_index.suite_names(SUITES_DIR))) or "(none)"
 
 
-def resolve_suite(spec: str) -> Path:
-    """Resolve a suite from name or path: a YAML file or a directory of them."""
-    cand_path = Path(spec)
-    if cand_path.is_file() or cand_path.is_dir():
-        return cand_path.resolve()
-
-    for cand in (
-            SUITES_DIR / spec,
-            SUITES_DIR / f"{spec}.yaml",
-            SUITES_DIR / f"{spec.removesuffix('.yaml')}.yaml",
-    ):
-        if cand.is_file() or cand.is_dir():
-            return cand.resolve()
-
-    raise RuntimeError(f"Suite '{spec}' not found.\n"
-                       f"Available suites: {available_suites()}")
+def _display_path(path: Path) -> Path:
+    return (path.relative_to(REPO_ROOT)
+            if path.is_relative_to(REPO_ROOT) else path)
 
 
-def compile_suite_if_needed(
-    suite: Path,
-    task_filter: str | None = None,
-) -> Path:
-    """Compile a suite into eval/.datasets/<sub_rel>/ on demand.
+def compile_suite_if_needed(suite: Path) -> Path:
+    """Compile a suite into eval/.datasets/<sub_rel>/.
 
     <sub_rel> is the suite's path under suites/ minus .yaml, so every suite
     file gets its own dataset even when several share a directory:
@@ -247,71 +211,17 @@ def compile_suite_if_needed(
 
     A suite directory compiles every YAML directly inside it into one dataset,
     one task per case: suites/cset/tpu_knowledge_qa/csat002.yaml ->
-    .datasets/cset/tpu_knowledge_qa/csat002/. The whole directory is always
-    compiled, so task_filter only narrows a single-file suite.
+    .datasets/cset/tpu_knowledge_qa/csat002/.
+
+    Every call clears the target folder and compiles the whole suite fresh.
 
     Returns the path to the target dataset directory under .datasets/.
     """
-    from eval.suite_to_harbor.suite_to_harbor import compile_suite
-
-    is_dir = suite.is_dir()
-    if is_dir:
-        sources = sorted(suite.glob("*.yaml"))
-        if not sources:
-            raise RuntimeError(
-                f"Suite directory {suite} holds no .yaml files.")
-        fallback = Path(suite.name)
-    else:
-        sources = [suite]
-        with open(suite, "r", encoding="utf-8") as f:
-            s_data = yaml.safe_load(f) or {}
-        fallback = Path(
-            s_data.get("name") or s_data.get("suite_name") or suite.stem)
-
-    try:
-        sub_rel = suite.relative_to(SUITES_DIR)
-        if not is_dir:
-            sub_rel = sub_rel.with_suffix("")
-    except ValueError:
-        sub_rel = fallback
-
-    target_dir = DOT_DATASETS_DIR / sub_rel
-
-    try:
-        suite_disp = str(suite.relative_to(REPO_ROOT))
-    except ValueError:
-        suite_disp = str(suite)
-    try:
-        target_disp = str(target_dir.relative_to(REPO_ROOT))
-    except ValueError:
-        target_disp = str(target_dir)
-
-    task_tomls = list(target_dir.glob("**/task.toml"))
-    # A directory's own mtime moves when a task file is added or removed.
-    suite_mtime = max(p.stat().st_mtime
-                      for p in sources + ([suite] if is_dir else []))
-    stale = any(suite_mtime > t.stat().st_mtime for t in task_tomls)
-    if not target_dir.is_dir() or not task_tomls or stale:
-        print(f"==> compiling suite {suite_disp} -> {target_disp}...")
-        if is_dir:
-            # Start clean so a deleted task file does not leave its task behind.
-            shutil.rmtree(target_dir, ignore_errors=True)
-            owners: dict[Path, Path] = {}
-            for src in sources:
-                for task_dir in compile_suite(src, target_dir) or []:
-                    if task_dir in owners:
-                        raise RuntimeError(
-                            f"{src.name} and {owners[task_dir].name} in "
-                            f"{suite_disp} both compile to task "
-                            f"{task_dir.name}")
-                    owners[task_dir] = src
-        else:
-            compile_suite(suite, target_dir, task_name_filter=task_filter)
-    elif (not is_dir and task_filter
-          and not any(t.parent.name == task_filter for t in task_tomls)):
-        print(f"==> compiling task {task_filter} from {suite_disp}...")
-        compile_suite(suite, target_dir, task_name_filter=task_filter)
-
+    target_dir = suite_index.suite_dataset_dir(suite, SUITES_DIR,
+                                               DOT_DATASETS_DIR)
+    print(f"==> compiling suite {_display_path(suite)} -> "
+          f"{_display_path(target_dir)}...")
+    suite_to_harbor.compile_suite_spec(suite, target_dir, clean=True)
     return target_dir
 
 
@@ -2014,7 +1924,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-s",
         "--suite",
         help=
-        ("YAML evaluation suite to run, by name under eval/suites/ or direct path. "
+        ("YAML evaluation suite to run, by path, by name under eval/suites/, or "
+         "by the name the suite declares. "
          "A directory of task YAMLs (e.g. cset/tpu_knowledge_qa) is one dataset. "
          "Automatically compiled to eval/.datasets/ on demand."),
     )
@@ -2026,8 +1937,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=("One or more tasks to run as a single job, by name under "
               "eval/datasets/, as <dataset>/<task>, or by path. Scope a "
               "bare name with --dataset or --suite when it exists in more "
-              "than one. A --suite file takes only one; a --suite "
-              "directory takes any number."),
+              "than one."),
     )
     parser.add_argument(
         "-d",
@@ -2133,7 +2043,7 @@ def _is_verification_enabled(
 def _resolve_suite_spec_path(suite_spec: str) -> Path | None:
     """Best-effort resolution of a CLI ``--suite`` argument to a file or directory."""
     try:
-        return resolve_suite(suite_spec)
+        return suite_index.resolve_suite(suite_spec, SUITES_DIR, REPO_ROOT)
     except Exception:
         pass
     for base in (Path(suite_spec), REPO_ROOT / suite_spec,
@@ -2658,13 +2568,8 @@ def main() -> None:
         target_suite_dir: Path | None = None
         tasks = task_specs(args.task)
         if args.suite:
-            suite = resolve_suite(args.suite)
-            if len(tasks) > 1 and not suite.is_dir():
-                raise RuntimeError("--suite takes a single --task with a "
-                                   f"suite file; got {len(tasks)}: "
-                                   f"{', '.join(tasks)}")
             target_suite_dir = compile_suite_if_needed(
-                suite, task_filter=tasks[0] if tasks else None)
+                suite_index.resolve_suite(args.suite, SUITES_DIR, REPO_ROOT))
 
         if args.skills and os.environ.get("GITHUB_RUN_ID"):
             raise RuntimeError(
@@ -3094,7 +2999,7 @@ def main() -> None:
             sys.exit(1)
         sys.exit(0)
 
-    except RuntimeError as e:
+    except (RuntimeError, suite_index.SuiteLookupError) as e:
         publish_github_step_summary(
             results_summary, upload_enabled=args.upload
         ) if "results_summary" in locals() else None

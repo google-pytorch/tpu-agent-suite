@@ -25,6 +25,8 @@ import tomllib
 import unittest
 from unittest import mock
 
+import yaml
+
 from eval.suite_to_harbor import schema, suite_to_harbor, template_generators
 
 Path = pathlib.Path
@@ -893,6 +895,110 @@ class CompilerUpgradeFeaturesTest(unittest.TestCase):
                 )
                 self.assertIn("harbor-rewardkit pytest", worker_df_out)
 
+    def _compile_custom_dockerfile_case(
+        self,
+        root: Path,
+        df_text: str,
+        *,
+        case_env: schema.CaseEnvironmentOverride | None = None,
+        suite_env: schema.EnvironmentConfig | None = None,
+        case_files: list[str] | None = None,
+    ) -> tuple[Path, Path]:
+        suite_dir = root / "suite"
+        custom_df = suite_dir / "assets" / "Dockerfile.custom"
+        custom_df.parent.mkdir(parents=True, exist_ok=True)
+        custom_df.write_text(df_text, encoding="utf-8")
+        case = schema.TestCase(
+            name="case_a",
+            prompt="Run sample task.",
+            workspace_files=case_files or [],
+            environment=case_env,
+        )
+        task_dir = suite_to_harbor.compile_case(
+            suite_name="sample_suite",
+            case=case,
+            env=suite_env or schema.EnvironmentConfig(),
+            eval_cfg=schema.EvaluationConfig(cases=[case]),
+            output_dir=root / "out",
+            source_root=suite_dir,
+        )
+        return custom_df, task_dir
+
+    def test_compile_case_copies_custom_dockerfile_verbatim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            df_text = ("FROM example.invalid/org/custom:v1\n"
+                       "WORKDIR /workspace\n"
+                       "RUN chmod 777 /workspace\n")
+            _, task_dir = self._compile_custom_dockerfile_case(
+                Path(tmp_dir),
+                df_text,
+                case_env=schema.CaseEnvironmentOverride(
+                    dockerfile="assets/Dockerfile.custom"),
+                suite_env=schema.EnvironmentConfig(
+                    base_image="example.invalid/org/default:v1",
+                    pip_packages=["sample-pkg"],
+                ),
+            )
+            self.assertEqual(
+                (task_dir / "environment" / "Dockerfile").read_text("utf-8"),
+                df_text,
+            )
+            self.assertFalse((task_dir / "environment" / "setup").exists())
+
+    def test_compile_case_custom_dockerfile_with_data_and_workdir(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            assets = root / "suite" / "assets"
+            assets.mkdir(parents=True)
+            (assets / "shared.txt").write_text("shared", encoding="utf-8")
+            (assets / "case.txt").write_text("case", encoding="utf-8")
+            df_text = "FROM example.invalid/org/custom:v1\nWORKDIR /app\n"
+            custom_df, task_dir = self._compile_custom_dockerfile_case(
+                root,
+                df_text,
+                suite_env=schema.EnvironmentConfig(
+                    dockerfile="assets/Dockerfile.custom",
+                    workdir="/app",
+                    workspace_files=["assets/shared.txt"],
+                ),
+                case_files=["assets/case.txt"],
+            )
+            self.assertEqual(
+                (task_dir / "environment" / "Dockerfile").read_text("utf-8"),
+                f"{df_text}\nCOPY --chmod=777 data/ /app/\n",
+            )
+            self.assertEqual(custom_df.read_text("utf-8"), df_text)
+            self.assertTrue((task_dir / "environment" / "data" / "assets" /
+                             "shared.txt").is_file())
+            self.assertTrue((task_dir / "environment" / "data" / "assets" /
+                             "case.txt").is_file())
+            parsed_toml = tomllib.loads(
+                (task_dir / "task.toml").read_text("utf-8"))
+            self.assertEqual(parsed_toml["environment"]["workdir"], "/app")
+            self.assertEqual(parsed_toml["artifacts"][0]["source"], "/app")
+            self.assertIn("WORKSPACE_DIR=/app",
+                          (task_dir / "tests" / "test.sh").read_text("utf-8"))
+
+    def test_compile_case_missing_custom_dockerfile_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            case = schema.TestCase(
+                name="case_a",
+                prompt="Run sample task.",
+                environment=schema.CaseEnvironmentOverride(
+                    dockerfile="assets/Dockerfile.missing"),
+            )
+            with self.assertRaises(FileNotFoundError):
+                suite_to_harbor.compile_case(
+                    suite_name="sample_suite",
+                    case=case,
+                    env=schema.EnvironmentConfig(),
+                    eval_cfg=schema.EvaluationConfig(cases=[case]),
+                    output_dir=root / "out",
+                    source_root=root,
+                )
+
     def test_verifier_env_merges_into_task_toml(self) -> None:
         case = schema.TestCase(
             name="case_a",
@@ -1439,6 +1545,74 @@ evaluation:
         self.assertIn("COPY data/ /", df)
         self.assertIn("pip install --no-cache-dir harbor-rewardkit pytest\n",
                       df)
+
+
+class CompileSuiteSpecTest(unittest.TestCase):
+
+    def test_clean_behavior_and_invalid_spec_preserves_output_dir(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            suite_file = root / "sample.yaml"
+            suite_file.write_text(
+                "evaluation:\n  cases:\n    - name: case-a\n      prompt: Go.\n",
+                encoding="utf-8",
+            )
+            out_dir = root / "out"
+            stale = out_dir / "stale_task" / "marker.txt"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("keep", encoding="utf-8")
+
+            # Invalid specs must not wipe existing output even with clean=True.
+            with self.assertRaises(ValueError):
+                suite_to_harbor.compile_suite_spec(root / "missing.yaml",
+                                                   out_dir,
+                                                   clean=True)
+            self.assertTrue(stale.is_file())
+
+            # Default clean=False preserves stale files; clean=True removes them.
+            self.assertEqual(
+                [
+                    p.name for p in suite_to_harbor.compile_suite_spec(
+                        suite_file, out_dir)
+                ],
+                ["case-a"],
+            )
+            self.assertTrue(stale.is_file())
+            suite_to_harbor.compile_suite_spec(suite_file, out_dir, clean=True)
+            self.assertFalse(stale.exists())
+            self.assertTrue((out_dir / "case-a" / "task.toml").is_file())
+
+    def test_rejects_task_collisions_and_attributes_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            intra = root / "intra.yaml"
+            intra.write_text(
+                "evaluation:\n  cases:\n"
+                "    - name: Case A\n      prompt: First.\n"
+                "    - name: case_a\n      prompt: Second.\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "case_a"):
+                suite_to_harbor.compile_suite_spec(intra, root / "out1")
+
+            dup_dir = root / "dup_suite"
+            dup_dir.mkdir()
+            for fname in ("one.yaml", "two.yaml"):
+                (dup_dir / fname).write_text(
+                    "evaluation:\n  cases:\n"
+                    "    - name: case-a\n      prompt: Do task.\n",
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(ValueError,
+                                        "both compile to task case-a"):
+                suite_to_harbor.compile_suite_spec(dup_dir, root / "out2")
+
+            broken = root / "broken.yaml"
+            broken.write_text("evaluation: [unclosed\n", encoding="utf-8")
+            with self.assertRaises(yaml.YAMLError) as ctx:
+                suite_to_harbor.compile_suite_spec(broken, root / "out3")
+            self.assertIn(f"Suite file: {broken}", ctx.exception.__notes__)
 
 
 if __name__ == "__main__":

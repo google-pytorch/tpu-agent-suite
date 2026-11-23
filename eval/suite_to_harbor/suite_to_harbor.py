@@ -35,7 +35,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import gcs_utils, schema, template_generators
+import yaml
+
+from eval.utils import find_repo_root
+
+from . import gcs_utils, schema, suite_index, template_generators
 
 resolve_path = schema.resolve_path
 
@@ -379,13 +383,33 @@ def _bundle_environment(
         source_root=source_root,
         case=case,
     )
+    env_dir = task_dir / "environment"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    if effective_env.dockerfile:
+        dockerfile_src = resolve_path(
+            effective_env.dockerfile,
+            source_root=source_root,
+        )
+        if dockerfile_src is None or not dockerfile_src.is_file():
+            raise FileNotFoundError(
+                f"Custom Dockerfile not found: {effective_env.dockerfile}")
+        dest_dockerfile = env_dir / "Dockerfile"
+        if has_data:
+            copy_dest = f"{effective_env.workdir.rstrip('/')}/"
+            base = dockerfile_src.read_text(encoding="utf-8").rstrip("\r\n")
+            dest_dockerfile.write_text(
+                f"{base}\n\nCOPY --chmod=777 data/ {copy_dest}\n",
+                encoding="utf-8",
+            )
+            return
+        shutil.copy2(dockerfile_src, dest_dockerfile)
+        return
+
     staged_setup = bundle_setup_scripts(
         env=effective_env,
         task_dir=task_dir,
         source_root=source_root,
     )
-    env_dir = task_dir / "environment"
-    env_dir.mkdir(parents=True, exist_ok=True)
     (env_dir / "Dockerfile").write_text(
         template_generators.generate_dockerfile(
             env=effective_env,
@@ -493,6 +517,7 @@ def _write_test_runner(
     tests_dir: Path,
     bundled_verifiers: Sequence[tuple[str, schema.ScriptCheck]],
     source_root: Path | None,
+    workdir: str = "/workspace",
 ) -> None:
     """Stages pre/post lifecycle hooks and writes executable tests/test.sh."""
     eff_pre_verify = (case.pre_verify
@@ -527,6 +552,7 @@ def _write_test_runner(
             pre_verify=staged_pre,
             post_verify=staged_post,
             pythonpath_dirs=pythonpath_dirs,
+            workdir=workdir,
         ),
         encoding="utf-8",
     )
@@ -548,6 +574,7 @@ def compile_case(
         shutil.rmtree(task_dir)
     task_dir.mkdir(parents=True, exist_ok=True)
 
+    effective_env = env.merged_with(case.environment)
     _write_task_files(
         suite_name=suite_name,
         case=case,
@@ -557,7 +584,7 @@ def compile_case(
         source_root=source_root,
     )
     _bundle_environment(
-        effective_env=env.merged_with(case.environment),
+        effective_env=effective_env,
         case=case,
         task_dir=task_dir,
         source_root=source_root,
@@ -590,6 +617,7 @@ def compile_case(
         tests_dir=tests_dir,
         bundled_verifiers=bundled_verifiers,
         source_root=source_root,
+        workdir=effective_env.workdir,
     )
 
     return task_dir
@@ -653,6 +681,56 @@ def compile_suite(
             source_root=source_root,
         ) for case in cases
     ]
+
+
+def compile_suite_spec(
+    spec: str | Path,
+    output_dir: str | Path,
+    *,
+    suites_dir: Path | None = None,
+    repo_root: Path | None = None,
+    allow_cwd: bool = True,
+    clean: bool = False,
+) -> list[Path]:
+    """Resolves and compiles a suite file, suite directory, or declared name."""
+    if isinstance(spec, Path):
+        resolved = spec
+    else:
+        eff_suites_dir = (suites_dir if suites_dir is not None else
+                          (repo_root or find_repo_root()) / "eval" / "suites")
+        resolved = suite_index.resolve_suite(
+            spec,
+            eff_suites_dir,
+            repo_root=repo_root,
+            allow_cwd=allow_cwd,
+        )
+
+    sources = suite_index.suite_sources(resolved)
+    out = Path(output_dir)
+    if clean and out.exists():
+        shutil.rmtree(out)
+
+    compiled: list[Path] = []
+    source_by_task: dict[Path, Path] = {}
+    for src in sources:
+        try:
+            task_dirs = compile_suite(src, out) or []
+        except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
+            exc.add_note(f"Suite file: {src}")
+            raise
+        for task_dir in task_dirs:
+            prev = source_by_task.get(task_dir)
+            if prev is not None:
+                if prev == src:
+                    raise ValueError(
+                        f"{src.name} defines multiple cases that compile to "
+                        f"task {task_dir.name}")
+                raise ValueError(
+                    f"{src.name} and {prev.name} in {resolved.name} "
+                    f"both compile to task {task_dir.name}")
+            source_by_task[task_dir] = src
+            compiled.append(task_dir)
+    return compiled
 
 
 def main(argv: Sequence[str] | None = None) -> int:

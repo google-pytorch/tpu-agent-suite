@@ -478,7 +478,9 @@ evaluation:
                 prompt_file="//tasks/TASK.md",
                 prompt_vars={"target": "example-target"},
             )
-            with mock.patch.object(schema, "_REPO_ROOT", suite_dir):
+            with mock.patch.object(schema,
+                                   "find_repo_root",
+                                   return_value=suite_dir):
                 self.assertEqual(tc_repo_root.resolve_prompt(),
                                  "# Task: example-target\nDo this step.")
 
@@ -640,6 +642,120 @@ evaluation:
                 reward_aggregation="unknown_strategy",  # type: ignore[arg-type]
                 cases=[schema.TestCase(name="c", prompt="p")],
             )
+
+    def test_environment_dockerfile_rejects_conflicting_fields(self) -> None:
+        for bad_kwargs in (
+            {
+                "dockerfile": "   "
+            },
+            {
+                "dockerfile": "assets/Dockerfile.custom",
+                "base_image": "example.invalid/org/img:v1",
+            },
+            {
+                "dockerfile": "assets/Dockerfile.custom",
+                "pip_packages": ["sample-pkg"],
+            },
+            {
+                "dockerfile": "assets/Dockerfile.custom",
+                "setup_scripts": ["assets/setup.sh"],
+            },
+        ):
+            with self.subTest(model="EnvironmentConfig", kwargs=bad_kwargs):
+                with self.assertRaises(pydantic.ValidationError):
+                    schema.EnvironmentConfig(**bad_kwargs)
+            with self.subTest(model="CaseEnvironmentOverride",
+                              kwargs=bad_kwargs):
+                with self.assertRaises(pydantic.ValidationError):
+                    schema.CaseEnvironmentOverride(**bad_kwargs)
+
+    def test_environment_dockerfile_allows_workdir_and_preserves_dockerfile_on_override(
+            self) -> None:
+        suite_env = schema.EnvironmentConfig(
+            dockerfile="assets/Dockerfile.suite",
+            workdir="/app",
+        )
+        self.assertEqual(suite_env.dockerfile, "assets/Dockerfile.suite")
+        self.assertEqual(suite_env.workdir, "/app")
+
+        case_override = schema.CaseEnvironmentOverride(
+            dockerfile="assets/Dockerfile.case",
+            workdir="/opt/work",
+        )
+        self.assertEqual(case_override.dockerfile, "assets/Dockerfile.case")
+        self.assertEqual(case_override.workdir, "/opt/work")
+
+        overridden = suite_env.merged_with(
+            schema.CaseEnvironmentOverride(workdir="/custom"))
+        self.assertEqual(overridden.dockerfile, "assets/Dockerfile.suite")
+        self.assertEqual(overridden.workdir, "/custom")
+
+        inherited = suite_env.merged_with(
+            schema.CaseEnvironmentOverride(memory_mb=8192))
+        self.assertEqual(inherited.dockerfile, "assets/Dockerfile.suite")
+        self.assertEqual(inherited.workdir, "/app")
+
+    def test_environment_merged_with_case_dockerfile_overrides_suite_builder(
+            self) -> None:
+        suite_env = schema.EnvironmentConfig(
+            base_image="example.invalid/org/img:v1",
+            pip_packages=["sample-pkg"],
+            setup_scripts=["assets/setup.sh"],
+            memory_mb=16384,
+            env_vars={"SUITE_VAR": "1"},
+        )
+        merged = suite_env.merged_with(
+            schema.CaseEnvironmentOverride(
+                dockerfile="assets/Dockerfile.custom",
+                env_vars={"CASE_VAR": "2"},
+            ))
+        self.assertEqual(merged.dockerfile, "assets/Dockerfile.custom")
+        self.assertEqual(merged.pip_packages, [])
+        self.assertEqual(merged.setup_scripts, [])
+        self.assertEqual(merged.memory_mb, 16384)
+        self.assertEqual(merged.env_vars, {"SUITE_VAR": "1", "CASE_VAR": "2"})
+
+    def test_environment_merged_with_suite_dockerfile_preserved_or_replaced(
+            self) -> None:
+        suite_env = schema.EnvironmentConfig(
+            dockerfile="assets/Dockerfile.suite",
+            memory_mb=8192,
+        )
+        kept = suite_env.merged_with(
+            schema.CaseEnvironmentOverride(env_vars={"CASE_VAR": "1"}))
+        self.assertEqual(kept.dockerfile, "assets/Dockerfile.suite")
+        self.assertEqual(kept.memory_mb, 8192)
+
+        replaced = suite_env.merged_with(
+            schema.CaseEnvironmentOverride(
+                base_image="example.invalid/org/img:v2"))
+        self.assertIsNone(replaced.dockerfile)
+        self.assertEqual(replaced.base_image, "example.invalid/org/img:v2")
+
+    def test_environment_merged_with_empty_lists_clears_suite_lists(
+            self) -> None:
+        suite_env = schema.EnvironmentConfig(
+            base_image="example.invalid/org/img:v1",
+            apt_packages=["sample-apt"],
+            pip_packages=["sample-pkg"],
+            setup_scripts=["assets/setup.sh"],
+            cpus=4,
+            memory_mb=8192,
+            workdir="/app",
+        )
+        merged = suite_env.merged_with(
+            schema.CaseEnvironmentOverride(
+                apt_packages=[],
+                pip_packages=[],
+                setup_scripts=[],
+            ))
+        self.assertEqual(merged.apt_packages, [])
+        self.assertEqual(merged.pip_packages, [])
+        self.assertEqual(merged.setup_scripts, [])
+        self.assertEqual(merged.base_image, "example.invalid/org/img:v1")
+        self.assertEqual(merged.cpus, 4)
+        self.assertEqual(merged.memory_mb, 8192)
+        self.assertEqual(merged.workdir, "/app")
 
 
 if __name__ == "__main__":

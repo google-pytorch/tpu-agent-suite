@@ -148,6 +148,5 @@ python3 eval/run.py -c claude-code/agent-suite-shared-capacity-remote \
   -s flag_optimization
 ```
 
-`eval/run.py` recompiles the suite when the YAML changes; after editing only
-an asset or the verifier, delete `eval/.datasets/flag_optimization/` first.
+`eval/run.py` recompiles the suite on every run.
 The `4x4x4` and `8x8x8` tasks hold 64 and 512 chips per Job.

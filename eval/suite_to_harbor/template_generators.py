@@ -386,14 +386,14 @@ def generate_test_sh(
         pre_verify: Sequence[str] = (),
         post_verify: Sequence[str] = (),
         pythonpath_dirs: Sequence[str] = (),
+        workdir: str = "/workspace",
 ) -> str:
     """Generates authoritative 3-phase executable tests/test.sh."""
     sections: list[str] = [
-        cleandoc("""
-            #!/bin/bash
-
-            export TESTS_DIR="${TESTS_DIR:-/tests}"
-            export WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
+        "#!/bin/bash\n\n"
+        'export TESTS_DIR="${TESTS_DIR:-/tests}"\n'
+        f'if [ -z "${{WORKSPACE_DIR:-}}" ]; then WORKSPACE_DIR={shlex.quote(workdir)}; fi\n'
+        "export WORKSPACE_DIR\n" + cleandoc("""
             export LOGS_DIR="${LOGS_DIR:-/logs}"
 
             mkdir -p "${LOGS_DIR}/verifier" 2>/dev/null || true

@@ -31,8 +31,6 @@ from eval.utils import find_repo_root
 
 from . import gcs_utils
 
-_REPO_ROOT = find_repo_root()
-
 DEFAULT_BASE_IMAGE = (
     "us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host:latest")
 
@@ -65,7 +63,7 @@ def resolve_path(
     clean_path = path_str.strip()
     if clean_path.startswith("gs://"):
         return gcs_utils.fetch_gcs_asset(clean_path, cache_root=cache_root)
-    eff_repo_root = (repo_root or _REPO_ROOT).resolve()
+    eff_repo_root = (repo_root or find_repo_root()).resolve()
     if clean_path.startswith("//"):
         rel = clean_path.removeprefix("//").lstrip("/")
         if not rel:
@@ -109,6 +107,15 @@ def _none_to_list(v: Any) -> Any:
 
 def _none_to_dict(v: Any) -> Any:
     return {} if v is None else v
+
+
+def _strip_nonempty(v: Any) -> Any:
+    if isinstance(v, str):
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Value must not be empty")
+        return stripped
+    return v
 
 
 _T = TypeVar("_T")
@@ -284,9 +291,24 @@ class ExpectationCriterion(StrictModel):
         raise TypeError(f"Cannot coerce {type(value)} to ExpectationCriterion")
 
 
+_DOCKERFILE_CONFLICT_FIELDS = (
+    "base_image",
+    "apt_packages",
+    "pip_packages",
+    "setup_scripts",
+)
+
+
 class CaseEnvironmentOverride(StrictModel):
     """Optional case-level overrides for container image, packages, and resources."""
 
+    dockerfile: str | None = pydantic.Field(
+        default=None,
+        description=(
+            "Path to a custom Dockerfile (suite-relative or // repo-relative) "
+            "used instead of generating one. When workspace_files are staged, "
+            "a COPY line into workdir is appended to the compiled copy."),
+    )
     base_image: str | None = pydantic.Field(
         default=None,
         description="Per-case base Docker image override.",
@@ -331,7 +353,11 @@ class CaseEnvironmentOverride(StrictModel):
     )
     workdir: str | None = pydantic.Field(
         default=None,
-        description="Per-case container working directory override.",
+        description=(
+            "Per-case container working directory override. When combined with "
+            "dockerfile, declares the container's existing working directory "
+            "for data staging, task.toml, and test.sh without rewriting the "
+            "Dockerfile."),
     )
     env_vars: dict[str, str] | None = pydantic.Field(
         default=None,
@@ -340,17 +366,13 @@ class CaseEnvironmentOverride(StrictModel):
             "written to task.toml's [environment.env]."),
     )
 
-    @pydantic.field_validator("base_image", "workdir", mode="before")
+    @pydantic.field_validator("dockerfile",
+                              "base_image",
+                              "workdir",
+                              mode="before")
     @classmethod
     def _validate_optional_nonempty_str(cls, v: Any) -> Any:
-        if v is None:
-            return None
-        if isinstance(v, str):
-            stripped = v.strip()
-            if not stripped:
-                raise ValueError("Value must not be empty")
-            return stripped
-        return v
+        return _strip_nonempty(v)
 
     @pydantic.field_validator(
         "apt_packages",
@@ -361,6 +383,19 @@ class CaseEnvironmentOverride(StrictModel):
     @classmethod
     def _coerce_optional_pkg_list(cls, v: Any) -> Any:
         return _clean_str_list(v, allow_none=True)
+
+    @pydantic.model_validator(mode="after")
+    def _validate_dockerfile_exclusivity(self) -> CaseEnvironmentOverride:
+        if self.dockerfile is not None:
+            conflicts = [
+                field for field in _DOCKERFILE_CONFLICT_FIELDS
+                if getattr(self, field) is not None
+            ]
+            if conflicts:
+                raise ValueError(
+                    "environment.dockerfile cannot be combined with "
+                    f"{', '.join(conflicts)} in the same environment block")
+        return self
 
 
 class TestCase(StrictModel):
@@ -548,6 +583,13 @@ class TestCase(StrictModel):
 class EnvironmentConfig(StrictModel):
     """Environment and container configuration."""
 
+    dockerfile: str | None = pydantic.Field(
+        default=None,
+        description=(
+            "Path to a custom Dockerfile (suite-relative or // repo-relative) "
+            "used instead of generating one. When workspace_files are staged, "
+            "a COPY line into workdir is appended to the compiled copy."),
+    )
     base_image: str = pydantic.Field(
         default=DEFAULT_BASE_IMAGE,
         description="Base Docker image.",
@@ -593,7 +635,11 @@ class EnvironmentConfig(StrictModel):
     )
     workdir: str = pydantic.Field(
         default="/workspace",
-        description="Working directory in container.",
+        description=(
+            "Working directory in container. When combined with dockerfile, "
+            "declares the container's existing working directory for data "
+            "staging, task.toml, and test.sh without rewriting the Dockerfile."
+        ),
     )
     env_vars: NonNullDict[str, str] = pydantic.Field(
         default_factory=dict,
@@ -602,15 +648,26 @@ class EnvironmentConfig(StrictModel):
             "task.toml's [environment.env]."),
     )
 
-    @pydantic.field_validator("base_image", "workdir", mode="before")
+    @pydantic.field_validator("dockerfile",
+                              "base_image",
+                              "workdir",
+                              mode="before")
     @classmethod
     def _validate_nonempty_str(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            stripped = v.strip()
-            if not stripped:
-                raise ValueError("Value must not be empty")
-            return stripped
-        return v
+        return _strip_nonempty(v)
+
+    @pydantic.model_validator(mode="after")
+    def _validate_dockerfile_exclusivity(self) -> EnvironmentConfig:
+        if self.dockerfile is not None:
+            conflicts = [
+                field for field in _DOCKERFILE_CONFLICT_FIELDS
+                if field in self.model_fields_set
+            ]
+            if conflicts:
+                raise ValueError(
+                    "environment.dockerfile cannot be combined with "
+                    f"{', '.join(conflicts)} in the same environment block")
+        return self
 
     def normalized_workspace_files(self) -> list[FileStaging]:
         """Returns suite-level workspace files coerced to FileStaging objects."""
@@ -623,9 +680,29 @@ class EnvironmentConfig(StrictModel):
         """Returns an EnvironmentConfig with non-None case overrides applied."""
         if override is None:
             return self
+        common: dict[str, Any] = {
+            "workspace_files": list(self.workspace_files),
+            "cpus": override.cpus or self.cpus,
+            "memory_mb": override.memory_mb or self.memory_mb,
+            "storage_mb": override.storage_mb or self.storage_mb,
+            "build_timeout_sec": override.build_timeout_sec
+            or self.build_timeout_sec,
+            "workdir": override.workdir or self.workdir,
+            "env_vars": {
+                **self.env_vars,
+                **(override.env_vars or {}),
+            },
+        }
+        # Check None explicitly; empty lists are valid overrides.
+        has_builder_override = any(
+            getattr(override, field) is not None
+            for field in _DOCKERFILE_CONFLICT_FIELDS)
+        if override.dockerfile is not None:
+            return EnvironmentConfig(dockerfile=override.dockerfile, **common)
+        if self.dockerfile is not None and not has_builder_override:
+            return EnvironmentConfig(dockerfile=self.dockerfile, **common)
         return EnvironmentConfig(
-            base_image=(override.base_image if override.base_image is not None
-                        else self.base_image),
+            base_image=override.base_image or self.base_image,
             apt_packages=(list(override.apt_packages) if override.apt_packages
                           is not None else list(self.apt_packages)),
             pip_packages=(list(override.pip_packages) if override.pip_packages
@@ -633,21 +710,7 @@ class EnvironmentConfig(StrictModel):
             setup_scripts=(list(override.setup_scripts)
                            if override.setup_scripts is not None else list(
                                self.setup_scripts)),
-            workspace_files=list(self.workspace_files),
-            cpus=override.cpus if override.cpus is not None else self.cpus,
-            memory_mb=(override.memory_mb
-                       if override.memory_mb is not None else self.memory_mb),
-            storage_mb=(override.storage_mb if override.storage_mb is not None
-                        else self.storage_mb),
-            build_timeout_sec=(override.build_timeout_sec
-                               if override.build_timeout_sec is not None else
-                               self.build_timeout_sec),
-            workdir=(override.workdir
-                     if override.workdir is not None else self.workdir),
-            env_vars=({
-                **self.env_vars,
-                **override.env_vars,
-            } if override.env_vars is not None else dict(self.env_vars)),
+            **common,
         )
 
 

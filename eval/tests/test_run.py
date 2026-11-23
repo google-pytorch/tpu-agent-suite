@@ -35,6 +35,7 @@ import yaml
 
 from eval.mount_advisor import MountUpdates
 from eval.staging import StagingResult
+from eval.suite_to_harbor import suite_index
 
 # Dynamically import eval/run.py
 _RUN_PY_PATH = Path(__file__).resolve().parent.parent / "run.py"
@@ -81,7 +82,6 @@ generate_job_name = _RUN_MOD.generate_job_name
 SUITES_DIR = _RUN_MOD.SUITES_DIR
 DOT_DATASETS_DIR = _RUN_MOD.DOT_DATASETS_DIR
 available_suites = _RUN_MOD.available_suites
-resolve_suite = _RUN_MOD.resolve_suite
 compile_suite_if_needed = _RUN_MOD.compile_suite_if_needed
 
 
@@ -2922,35 +2922,41 @@ class TestRunSuiteOption(unittest.TestCase):
         self.assertNotIn("cset/tpu_knowledge_qa/csat002", suites)
 
     def test_resolve_suite_directory(self) -> None:
-        resolved = resolve_suite("cset/tpu_knowledge_qa")
+        resolved = suite_index.resolve_suite("cset/tpu_knowledge_qa",
+                                             SUITES_DIR, _RUN_MOD.REPO_ROOT)
         self.assertTrue(resolved.is_dir())
         self.assertEqual(resolved,
                          (SUITES_DIR / "cset" / "tpu_knowledge_qa").resolve())
 
     def test_resolve_suite_bare_name(self) -> None:
-        resolved = resolve_suite("knowledgebase/tpu_knowledge_qa")
+        resolved = suite_index.resolve_suite("knowledgebase/tpu_knowledge_qa",
+                                             SUITES_DIR, _RUN_MOD.REPO_ROOT)
         self.assertTrue(resolved.is_file())
         self.assertEqual(resolved.stem, "tpu_knowledge_qa")
         self.assertEqual(resolved.suffix, ".yaml")
 
     def test_resolve_suite_with_extension(self) -> None:
-        resolved = resolve_suite("knowledgebase/tpu_knowledge_qa.yaml")
+        resolved = suite_index.resolve_suite(
+            "knowledgebase/tpu_knowledge_qa.yaml", SUITES_DIR,
+            _RUN_MOD.REPO_ROOT)
         self.assertTrue(resolved.is_file())
         self.assertEqual(resolved.name, "tpu_knowledge_qa.yaml")
 
     def test_resolve_suite_direct_path(self) -> None:
         suite_path = SUITES_DIR / "knowledgebase" / "tpu_knowledge_qa.yaml"
-        resolved = resolve_suite(str(suite_path))
+        resolved = suite_index.resolve_suite(str(suite_path), SUITES_DIR,
+                                             _RUN_MOD.REPO_ROOT)
         self.assertEqual(resolved, suite_path.resolve())
 
     def test_resolve_suite_unknown_raises(self) -> None:
-        with self.assertRaises(RuntimeError) as ctx:
-            resolve_suite("nonexistent_suite_name")
+        with self.assertRaises(suite_index.SuiteLookupError) as ctx:
+            suite_index.resolve_suite("nonexistent_suite_name", SUITES_DIR,
+                                      _RUN_MOD.REPO_ROOT)
         self.assertIn("Suite 'nonexistent_suite_name' not found",
                       str(ctx.exception))
         self.assertIn("Available suites:", str(ctx.exception))
 
-    def test_compile_suite_if_needed_compilation_and_caching(self) -> None:
+    def test_compile_suite_if_needed_compiles_on_every_call(self) -> None:
         mock_suites_root = self.temp_dir / "suites"
         mock_sub_dir = mock_suites_root / "test_cat"
         mock_sub_dir.mkdir(parents=True)
@@ -2977,24 +2983,13 @@ class TestRunSuiteOption(unittest.TestCase):
                              mock_dot_datasets / "test_cat" / "test_suite")
             self.assertEqual(mock_compile.call_count, 1)
 
-            # 2. Second call should reuse cached task.toml without recompiling
+            # 2. Second call clears stale tasks and compiles again
+            stale = target_dir / "old_task"
+            stale.mkdir()
             target_dir2 = compile_suite_if_needed(suite_yaml)
             self.assertEqual(target_dir2, target_dir)
-            self.assertEqual(mock_compile.call_count, 1)
-
-            # 3. Call with new task_filter not present should recompile
-            compile_suite_if_needed(suite_yaml, task_filter="another_task")
             self.assertEqual(mock_compile.call_count, 2)
-            mock_compile.assert_called_with(suite_yaml,
-                                            target_dir,
-                                            task_name_filter="another_task")
-
-            # 4. Touching suite_yaml should detect staleness and recompile
-            import time
-            time.sleep(0.01)
-            suite_yaml.touch()
-            compile_suite_if_needed(suite_yaml)
-            self.assertEqual(mock_compile.call_count, 3)
+            self.assertFalse(stale.exists())
 
     def test_compile_suite_if_needed_sibling_suites_are_independent(
             self) -> None:
@@ -3061,13 +3056,7 @@ class TestRunSuiteOption(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in target.iterdir()),
                              ["task_a", "task_b"])
 
-            # Cached: a task filter on a directory suite never recompiles.
-            compile_suite_if_needed(suite_dir, task_filter="task_a")
-            self.assertEqual(mock_compile.call_count, 2)
-
             # Removing a task file drops its compiled task.
-            import time
-            time.sleep(0.01)
             task_b.unlink()
             compile_suite_if_needed(suite_dir)
             self.assertEqual(mock_compile.call_count, 3)
@@ -3088,15 +3077,31 @@ class TestRunSuiteOption(unittest.TestCase):
              patch("eval.suite_to_harbor.suite_to_harbor.compile_suite"
                    ) as mock_compile:
             mock_compile.side_effect = lambda src, dst: [dst / "same"]
-            with self.assertRaises(RuntimeError) as ctx:
+            with self.assertRaises(ValueError) as ctx:
                 compile_suite_if_needed(suite_dir)
             self.assertIn("both compile to task same", str(ctx.exception))
+
+    def test_compile_suite_if_needed_out_of_tree_prefers_suite_name(
+            self) -> None:
+        suite_yaml = self.temp_dir / "external" / "custom.yaml"
+        suite_yaml.parent.mkdir(parents=True)
+        suite_yaml.write_text(
+            "name: secondary-name\nsuite_name: Primary-Suite\n",
+            encoding="utf-8",
+        )
+        mock_dot_datasets = self.temp_dir / ".datasets"
+        with patch.object(_RUN_MOD, "SUITES_DIR", self.temp_dir / "suites"), \
+             patch.object(_RUN_MOD, "DOT_DATASETS_DIR", mock_dot_datasets), \
+             patch("eval.suite_to_harbor.suite_to_harbor.compile_suite"):
+            target_dir = compile_suite_if_needed(suite_yaml)
+        self.assertEqual(target_dir, mock_dot_datasets / "Primary-Suite")
 
     def test_cset_task_files_compile_to_harbor_dataset(self) -> None:
         mock_dot_datasets = self.temp_dir / ".datasets"
         with patch.object(_RUN_MOD, "DOT_DATASETS_DIR", mock_dot_datasets):
             target = compile_suite_if_needed(
-                resolve_suite("cset/tpu_knowledge_qa"))
+                suite_index.resolve_suite("cset/tpu_knowledge_qa", SUITES_DIR,
+                                          _RUN_MOD.REPO_ROOT))
         self.assertEqual(target,
                          mock_dot_datasets / "cset" / "tpu_knowledge_qa")
         tasks = sorted(p.parent.name for p in target.glob("*/task.toml"))
@@ -3123,36 +3128,97 @@ class TestRunSuiteOption(unittest.TestCase):
         self.assertEqual(key, "tasks")
         self.assertEqual(entry["path"], str(t_dir.resolve()))
 
-    def test_main_with_suite_compiles_and_sets_dataset(self) -> None:
-        fake_target_dir = self.temp_dir / "fake_dataset"
-        fake_target_dir.mkdir()
-        t_dir = fake_target_dir / "task1"
-        t_dir.mkdir()
-        (t_dir / "task.toml").write_text("", encoding="utf-8")
-
+    def _run_main_with_suite(self, argv: list[str],
+                             target_dir: Path) -> MagicMock:
         dummy_kube = self.temp_dir / "kubeconfig"
         dummy_kube.write_text("apiVersion: v1\nclusters: []", encoding="utf-8")
         creds = _RUN_MOD.GkeCredentials(kubeconfig_path=dummy_kube,
                                         token="dummy-token")
-        with patch("sys.argv", [
-            "run.py", "-c", "claude-code/agent-suite", "-s",
-            "knowledgebase/tpu_knowledge_qa", "--no-upload", "--no-report"
-        ]), patch.dict(os.environ, {
-            "HOST_ADC": str(self.temp_dir / "adc.json")
-        }), patch.object(_RUN_MOD,
-                         "compile_suite_if_needed",
-                         return_value=fake_target_dir) as mock_compile, \
-           patch.object(_RUN_MOD, "check_dependencies"), \
-           patch.object(_RUN_MOD, "setup_host_auth"), \
-           patch.object(_RUN_MOD, "setup_gke_credentials_if_needed", return_value=creds), \
-           patch.object(_RUN_MOD, "setup_harbor_gke_kubeconfig_if_needed", return_value=dummy_kube), \
-           patch("subprocess.run") as mock_run:
+        with patch("sys.argv", argv), \
+             patch.dict(os.environ, {"HOST_ADC": str(self.temp_dir / "adc.json")}), \
+             patch.object(_RUN_MOD,
+                          "compile_suite_if_needed",
+                          return_value=target_dir) as mock_compile, \
+             patch.object(_RUN_MOD, "check_dependencies"), \
+             patch.object(_RUN_MOD, "setup_host_auth"), \
+             patch.object(_RUN_MOD, "setup_gke_credentials_if_needed", return_value=creds), \
+             patch.object(_RUN_MOD, "setup_harbor_gke_kubeconfig_if_needed", return_value=dummy_kube), \
+             patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             try:
                 _RUN_MOD.main()
             except SystemExit as e:
                 self.assertEqual(e.code, 0)
-            mock_compile.assert_called_once()
+            return mock_compile
+
+    def test_main_with_suite_compiles_and_sets_dataset(self) -> None:
+        fake_target_dir = self.temp_dir / "fake_dataset"
+        t_dir = fake_target_dir / "task1"
+        t_dir.mkdir(parents=True)
+        (t_dir / "task.toml").write_text("", encoding="utf-8")
+
+        mock_compile = self._run_main_with_suite([
+            "run.py", "-c", "claude-code/agent-suite", "-s",
+            "knowledgebase/tpu_knowledge_qa", "--no-upload", "--no-report"
+        ], fake_target_dir)
+        mock_compile.assert_called_once()
+
+    def test_main_with_suite_file_takes_several_tasks(self) -> None:
+        suite_file = self.temp_dir / "sample.yaml"
+        suite_file.write_text("suite_name: sample-suite\n", encoding="utf-8")
+        fake_target_dir = self.temp_dir / "fake_dataset"
+        for name in ("task1", "task2"):
+            (fake_target_dir / name).mkdir(parents=True)
+            (fake_target_dir / name / "task.toml").write_text("",
+                                                              encoding="utf-8")
+
+        with patch.object(_RUN_MOD, "apply_tasks",
+                          wraps=_RUN_MOD.apply_tasks) as mock_apply:
+            self._run_main_with_suite([
+                "run.py", "-c", "claude-code/agent-suite", "-s",
+                str(suite_file), "-t", "task1", "task2", "--no-upload",
+                "--no-report"
+            ], fake_target_dir)
+        mock_apply.assert_called_once_with(ANY, ["task1", "task2"],
+                                           dataset=str(fake_target_dir))
+
+    def test_main_exits_cleanly_on_unknown_suite(self) -> None:
+        cfg_file = self.temp_dir / "sample_cfg.yaml"
+        cfg_file.write_text("agents:\n  - name: claude-code\n",
+                            encoding="utf-8")
+        suites_dir = self.temp_dir / "suites"
+        suites_dir.mkdir()
+        stderr = io.StringIO()
+        with patch("sys.argv", [
+            "run.py", "-c", str(cfg_file), "-s", "nonexistent_suite_name",
+            "--no-upload", "--no-report"
+        ]), patch.object(_RUN_MOD, "SUITES_DIR", suites_dir), \
+           patch.object(_RUN_MOD, "check_dependencies"), \
+           patch.object(_RUN_MOD, "setup_host_auth"), \
+           contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                _RUN_MOD.main()
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("Error: Suite 'nonexistent_suite_name' not found",
+                      stderr.getvalue())
+
+    def test_main_propagates_suite_compile_error_with_note(self) -> None:
+        cfg_file = self.temp_dir / "sample_cfg.yaml"
+        cfg_file.write_text("agents:\n  - name: claude-code\n",
+                            encoding="utf-8")
+        broken_suite = self.temp_dir / "broken.yaml"
+        broken_suite.write_text("evaluation: [unclosed\n", encoding="utf-8")
+        with patch("sys.argv", [
+            "run.py", "-c", str(cfg_file), "-s", str(broken_suite),
+            "--no-upload", "--no-report"
+        ]), patch.object(_RUN_MOD, "DOT_DATASETS_DIR",
+                         self.temp_dir / ".datasets"), \
+           patch.object(_RUN_MOD, "check_dependencies"), \
+           patch.object(_RUN_MOD, "setup_host_auth"):
+            with self.assertRaises(yaml.YAMLError) as ctx:
+                _RUN_MOD.main()
+        self.assertIn(f"Suite file: {broken_suite.resolve()}",
+                      ctx.exception.__notes__)
 
     def test_main_exports_agy_adc_auth_when_configured(self):
         """When AGY_ADC_AUTH is declared in config environment.env, export it to harbor_env."""

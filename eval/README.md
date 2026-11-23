@@ -82,13 +82,19 @@ is optional, and no config carries a `tasks:` or `datasets:` key.
 # Several tasks as one Harbor job (one Hub link, one pass/fail)
 ./eval/run.py --config claude-code/agent-suite --task nightly-functional/smart-hf-search nightly-functional/remote-tpu-runner
 
+# A suite under eval/suites/, by path or by the name it declares, and some of its cases
+./eval/run.py --config claude-code/agent-suite --suite knowledgebase/tpu_knowledge_qa
+./eval/run.py --config claude-code/agent-suite --suite tpu-knowledge-qa --task csat006-vllm-kvcache-block-size
+
 # Anything unrecognised is passed straight to Harbor
 ./eval/run.py --config claude-code/agent-suite --dataset tpu-hello-world --verbose
 ```
 
 Configs resolve against `eval/configs/`, datasets against
-`eval/datasets/` or a path. `eval/configs/README.md` maps the
-`{scope}_{agent}_{launch}_{v}` naming onto what each config actually stages.
+`eval/datasets/` or a path, and suites by path or unique declared
+`suite_name`/`name` (if two suites declare the same name, pass the file path
+instead). `eval/configs/README.md` maps the `{scope}_{agent}_{launch}_{v}`
+naming onto what each config actually stages.
 
 ## Running One Task Without Harbor
 
