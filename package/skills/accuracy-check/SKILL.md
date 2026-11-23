@@ -3,6 +3,7 @@ name: accuracy-check
 description: Measures a model's accuracy on real hardware against a recorded baseline, using the eval recipe this skill ships and the protocol that produced that baseline, then reports whether the score clears the 1.5pp gate. Use before calling an optimization `accepted`, when asked to "run the accuracy check", "run MMLU-Pro", "check the eval score", "is this change quality-neutral", or to establish the correctness evidence a benchmarked run needs.
 scripts:
 - scripts/accuracy-check/eval_recipe.sh
+- scripts/common/serve_vllm.sh
 references:
 - references/common/accuracy-protocol.md
 ---
@@ -71,6 +72,7 @@ Then submit:
   --image <image> \
   --input <work>/vllm_server_cmd.txt:vllm_server_cmd.txt \
   --input <work>/eval_cmd.txt:eval_cmd.txt \
+  [--input {{script:common/serve_vllm.sh}}:serve_vllm.sh ...] \
   --output eval_out.tar.gz --output server.log \
   --name accuracy-check-<config> \
   -- SERVED_MODEL_NAME=<HF id> EVAL_TASKS=mmlu_pro EVAL_LIMIT=100
@@ -79,19 +81,24 @@ JOB_ID=$({{runtime}} compute job list --run-id <run_id> --json --no-refresh \
 ```
 
 Pass `EVAL_LIMIT=full` only when the caller asked for the full set. The recipe accepts only the
-keys `SERVED_MODEL_NAME`, `EVAL_TASKS`, `EVAL_LIMIT`, `SERVER_PORT`, `SERVER_WAIT_TIMEOUT_S` and
-`LM_EVAL_VERSION`, and exits non-zero on any other key.
+keys `SERVED_MODEL_NAME`, `EVAL_TASKS`, `EVAL_LIMIT`, `SERVER_PORT`, `SERVER_WAIT_TIMEOUT_S`,
+`LM_EVAL_VERSION` and `EVAL_COORD_PORT`, and exits non-zero on any other key.
 
-**The recipe is single-host.** The GLM-5.2 protocol needs two hosts. A 2-node run needs a
-multi-host backend and a recipe that creates the Ray workload itself; this skill does not ship
-one. Check the configured target with `{{runtime}} compute inspect --json`.
-If it cannot hold the model's baseline layout, report that as the blocker and stop. Do not run the
-model at a different layout and compare it to the baseline. A 2-node GLM-5.2 run must carry
-the values its baseline ran with:
+**Multi-host slices (`TPU_NUM_HOSTS > 1`).** On a multi-host `gke_job` Indexed Job, every host
+runs `vllm_server_cmd.txt` (typically via `serve_vllm.sh` with `TPU_MULTIHOST_BACKEND=mp` or
+`ray`, staged with `--input {{script:common/serve_vllm.sh}}:serve_vllm.sh` plus any helper scripts
+the command calls). Only host 0 waits on `/health`, sends the smoke check, runs `lm_eval`, and
+packs outputs; when host 0 finishes, it opens a brief TCP done-beacon on `EVAL_COORD_PORT`
+(default 8791) before stopping its server so worker pods shut down cleanly and exit 0. A worker
+whose server dies before host 0 signals done exits non-zero to fail the Job fast. Check the
+configured target with `{{runtime}} compute inspect --json`. If it cannot hold the model's baseline
+layout, report that as the blocker and stop. Do not run the model at a different layout and compare
+it to the baseline. To compare against the recorded 2-node GLM-5.2 baseline
+(`j-012c51a9-a247-4d76-914b`), carry its values:
 
 - `MODEL_ID=zai-org/GLM-5.2-FP8`, `SERVED_MODEL_NAME=zai-org/GLM-5.2-FP8`
 - `EVAL_TASKS=mmlu_pro`, `EVAL_LIMIT=100`
-- `VLLM_ENGINE_READY_TIMEOUT_S=9600`, and a server wait of the same length
+- `VLLM_ENGINE_READY_TIMEOUT_S=9600`, and `SERVER_WAIT_TIMEOUT_S=9600`
 - the server env `VLLM_DISABLE_COMPILE_CACHE=1 VLLM_WORKER_MULTIPROC_METHOD=spawn TORCHINDUCTOR_AUTOGRAD_CACHE=0`
 - `EVAL_CMD` = the GLM command from Step 1 of {{reference:common/accuracy-protocol.md}}
 
@@ -105,9 +112,12 @@ Two more parameters matter when porting a command from a dedicated recipe:
   `--port` in `VLLM_SERVER_CMD` must match. Porting GLM's command meant changing its 47903 to
   8000 (passing `SERVER_PORT=47903` would have worked equally).
 - **Server environment** — put it in the server command: `export A=1 B=2 && vllm serve …` inside
-  `VLLM_SERVER_CMD`. That has no limit on spaces in a value (`LIBTPU_INIT_ARGS`). An `export`
-  there is how `VLLM_ENGINE_READY_TIMEOUT_S=9600` is set. When you raise it, raise the recipe's
-  `SERVER_WAIT_TIMEOUT_S` (default 3600) to match, or the recipe stops waiting first.
+  `VLLM_SERVER_CMD`. That has no limit on spaces in a value (`LIBTPU_INIT_ARGS`). The recipe
+  defaults `VLLM_ENGINE_READY_TIMEOUT_S=3600`, `VLLM_ENGINE_ITERATION_TIMEOUT_S=1800` and
+  `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800` (matching `serve_vllm.sh`); any value exported in the
+  server command overrides them. An `export` there is how `VLLM_ENGINE_READY_TIMEOUT_S=9600` is
+  set. When you raise it, raise the recipe's `SERVER_WAIT_TIMEOUT_S` (default 3600) to match, or
+  the recipe stops waiting first.
 
 **The recipe guards `EVAL_CMD` before it starts the server.** It checks that the string mentions
 `base_url` and exits non-zero if not. It accepts both spellings, comma-kv **and** JSON.

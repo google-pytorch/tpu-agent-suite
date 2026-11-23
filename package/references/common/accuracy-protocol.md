@@ -142,6 +142,14 @@ Thinking is not explicitly disabled here, against a server running `--reasoning-
 With zero nulls there is no evidence this cost anything, and no evidence thinking was off — the
 chain of thought may have gone to `reasoning` rather than `content`. Say which you know.
 
+Only when there is no recorded baseline for the deployment config and you are establishing a fresh
+paired live baseline and candidate on a target whose pod time limit is shorter than ~4 h (never
+when comparing against the recorded baseline above), `num_concurrent=32` with the unmatched
+`until=["<|im_end|>"]` will exceed the pod cap before completing 1400 samples. In that fresh-pair
+case, omit the unmatched `until` (keeping the task default) and raise `num_concurrent` (for
+example, `256` on DP=16) identically across both live runs, include `--log_samples` to verify `0`
+null-content answers, and record the adjusted protocol in Step 5.
+
 ### Rules that apply to both
 
 - **Reuse the baseline's command; do not "improve" on it.** A candidate measured under a different

@@ -1,6 +1,7 @@
 ---
 scripts:
 - scripts/accuracy-check/eval_recipe.sh
+- scripts/common/serve_vllm.sh
 - scripts/common/tpu_slots.py
 - scripts/common/vllm_patches/apply_vllm_patch.sh
 ---
@@ -159,6 +160,13 @@ Two properties travel with the command, neither impugning the score:
 Thinking is not disabled here, against `--reasoning-parser=glm45`. With zero nulls there is no
 evidence it cost anything, and none that thinking was off. Say which you know.
 
+When running a fresh paired live baseline and stack eval (Step 0, no recorded baseline for this
+config) on a target whose pod time limit is shorter than ~4 h, `num_concurrent=32` with the
+unmatched `until=["<|im_end|>"]` will exceed the pod cap before completing 1400 samples. In that
+case, omit the unmatched `until` (keeping the task default) and raise `num_concurrent` (for
+example, `256` on DP=16) identically across both live arms, include `--log_samples` to verify `0`
+null-content answers, and record the adjusted protocol in Step 5.
+
 ### Rules for both
 
 - **Reuse the baseline's command; do not "improve" on it.** A stack measured under another command
@@ -199,7 +207,9 @@ arm's slot before claiming the next.
    - `eval_cmd.txt`: the Step 1 command for this model.
    - `vllm_server_cmd.txt`: `vllm_server_cmd`. With `plugin` or `patches`, prefix
      `bash apply_vllm_patch.sh <name> && ` once per patch, in order (`plugin.patch`, or each
-     `patches` file); an arm with neither runs the command as is.
+     `patches` file); an arm with neither runs the command as is. If `vllm_server_cmd` calls
+     `serve_vllm.sh` or other local helper scripts (such as a multi-host launch recipe), stage them
+     with `--input` too.
 3. **Confirm the image exists** before submitting: a digest that does not resolve reserves the
    slice and then fails to pull.
 4. **Submit** with the claim's profile, then `set-job` as agent.md "serve" step 2:
@@ -209,6 +219,7 @@ arm's slot before claiming the next.
      --recipe {{script:accuracy-check/eval_recipe.sh}} --interpreter bash --image <arm image> \
      --input <out>/<arm>/vllm_server_cmd.txt:vllm_server_cmd.txt \
      --input <out>/<arm>/eval_cmd.txt:eval_cmd.txt \
+     [--input {{script:common/serve_vllm.sh}}:serve_vllm.sh ...] \
      [--input <patch>:<name> ... \
       --input {{script:common/vllm_patches/apply_vllm_patch.sh}}:apply_vllm_patch.sh] \
      --output eval_out.tar.gz --output server.log --name <label>-<arm> \
@@ -216,24 +227,34 @@ arm's slot before claiming the next.
    ```
 
 The recipe accepts only `SERVED_MODEL_NAME`, `EVAL_TASKS`, `EVAL_LIMIT`, `SERVER_PORT`,
-`SERVER_WAIT_TIMEOUT_S` and `LM_EVAL_VERSION`, and exits non-zero on any other key.
+`SERVER_WAIT_TIMEOUT_S`, `LM_EVAL_VERSION` and `EVAL_COORD_PORT`, and exits non-zero on any other
+key.
 
 - **`SERVER_PORT`** (default 8000) builds `${EVAL_BASE_URL}`, so `--port` in the server command
   must match it.
-- **Server environment goes in the server command**: `export A=1 B=2 && vllm serve …`. That is how
-  `VLLM_ENGINE_READY_TIMEOUT_S=9600` is set; raise `SERVER_WAIT_TIMEOUT_S` (default 3600) to
-  match, or the recipe stops waiting first.
+- **Server environment goes in the server command**: `export A=1 B=2 && vllm serve …`. The recipe
+  defaults `VLLM_ENGINE_READY_TIMEOUT_S=3600`, `VLLM_ENGINE_ITERATION_TIMEOUT_S=1800` and
+  `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800` (matching `serve_vllm.sh`); any value exported in the
+  server command overrides them. That is how `VLLM_ENGINE_READY_TIMEOUT_S=9600` is set; raise
+  `SERVER_WAIT_TIMEOUT_S` (default 3600) to match, or the recipe stops waiting first.
 - **`EVAL_CMD` is run verbatim**, nothing appended. It must mention `base_url`, or the recipe
   exits before starting the server. Use `${EVAL_BASE_URL}` (the full `/v1/chat/completions` URL),
   `${EVAL_OUTPUT_DIR}`, `${EVAL_TASKS}`, `${EVAL_LIMIT_ARG}` and `${SERVED_MODEL_NAME}`.
 
-**The recipe is single-host.** The GLM-5.2 protocol needs two hosts and a recipe that creates the
-Ray workload; this agent ships none. If `compute inspect --json` shows the target cannot hold the
-baseline's layout, release the slot and return `blocked` with that reason; never run another
-layout and compare it. A 2-node GLM-5.2 run must carry its baseline's values:
-`SERVED_MODEL_NAME=zai-org/GLM-5.2-FP8`, `EVAL_LIMIT=100`, `VLLM_ENGINE_READY_TIMEOUT_S=9600` with
-a server wait of the same length, the server env `VLLM_DISABLE_COMPILE_CACHE=1
-VLLM_WORKER_MULTIPROC_METHOD=spawn TORCHINDUCTOR_AUTOGRAD_CACHE=0`, and the GLM `EVAL_CMD`.
+**Multi-host slices (`TPU_NUM_HOSTS > 1`).** On a multi-host `gke_job` Indexed Job, every host
+runs `vllm_server_cmd.txt` (typically via `serve_vllm.sh` with `TPU_MULTIHOST_BACKEND=mp` or
+`ray`, staged with `--input {{script:common/serve_vllm.sh}}:serve_vllm.sh` plus any helper scripts
+the command calls, and `apply_vllm_patch.sh` prefixed so patches apply on every host). Only host 0
+waits on `/health`, sends the smoke check, runs `lm_eval`, and packs outputs; when host 0 finishes,
+it opens a brief TCP done-beacon on `EVAL_COORD_PORT` (default 8791) before stopping its server so
+worker pods shut down cleanly and exit 0. If a worker's server dies before host 0 signals done, the
+worker exits non-zero to fail the Job fast. If `compute inspect --json` shows the target cannot
+hold the baseline's layout, release the slot and return `blocked` with that reason; never run
+another layout and compare it. To compare against the recorded 2-node GLM-5.2 baseline
+(`j-012c51a9-a247-4d76-914b`), carry its values: `SERVED_MODEL_NAME=zai-org/GLM-5.2-FP8`,
+`EVAL_LIMIT=100`, `VLLM_ENGINE_READY_TIMEOUT_S=9600` with `SERVER_WAIT_TIMEOUT_S=9600`, the server
+env `VLLM_DISABLE_COMPILE_CACHE=1 VLLM_WORKER_MULTIPROC_METHOD=spawn TORCHINDUCTOR_AUTOGRAD_CACHE=0`,
+and the GLM `EVAL_CMD`.
 
 ### Quoting
 
