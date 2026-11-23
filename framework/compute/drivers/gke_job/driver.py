@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -41,7 +42,8 @@ from .preflight import target_checks
 from .profile_settings import (MAX_JOB_NAME_LEN, GkeJobConfig, add_cli_flags,
                                config_from_params)
 from .records import delete_job, read_and_record_status, settle_record
-from .status import chips_in_use, job_pods, killed_message, pick_live_pod, wait
+from .status import (chips_in_use, is_deleting, job_pods, killed_message,
+                     pick_live_pod, wait)
 
 if TYPE_CHECKING:
     from .status import LastPoll
@@ -459,6 +461,15 @@ class GkeJobDriver(base.ComputeDriver):
             # Give the server an address now. A --serve one already has it.
             self._expose(self.config.colocate_with)
         hosts = job_hosts(self.config, placement)
+        # Wipe leftover local and staged-output files from an earlier finished
+        # Job under this same name before staging or applying the new Job.
+        stale_dir = jobs.jobs_dir() / name
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir, ignore_errors=True)
+            if clean_bucket:
+                gcs_staging.delete_staged_prefix(
+                    clean_bucket, f"{name}/out/",
+                    **self.storage.client_kwargs(True))
 
         try:
             # Inside the try, so a failure cleans up inputs already uploaded.
@@ -591,10 +602,15 @@ class GkeJobDriver(base.ComputeDriver):
         )
 
     def _name_unused(self, name: str) -> bool:
-        """Whether no Job or ConfigMap called `name` exists.
+        """Return whether no Job, ConfigMap, or sealed record holds `name`.
 
-        A failed lookup returns True; the ConfigMap create catches clashes.
+        A failed cluster lookup returns True; the ConfigMap create catches
+        clashes. A sealed record is always treated as taken so a new job never
+        collides with or is shadowed by protected storage.
         """
+        record = jobs.JobRecord.load(name)
+        if record is not None and record.is_sealed:
+            return False
         try:
             proc = self.kube.run(["get", "configmap,job", name] +
                                  self.kube.ns() +
@@ -611,8 +627,9 @@ class GkeJobDriver(base.ComputeDriver):
         Copying them lands the client on the server's node and makes Kueue
         admit it under the server's TPU flavor, not a CPU pool's.
         """
-        spec = (pick_live_pod(job_pods(self.kube, job_id))
-                or {}).get("spec", {})
+        live_pod = pick_live_pod(job_pods(self.kube, job_id))
+        spec = (live_pod.get("spec", {})
+                if live_pod and not is_deleting(live_pod) else {})
         if not spec.get("nodeName"):
             raise base.ComputeConfigError(
                 f"--colocate-with {job_id!r}: no scheduled pod. Wait for it "
@@ -745,7 +762,8 @@ class GkeJobDriver(base.ComputeDriver):
                           self.kube.ns()), self.config.kubeconfig)
         target = f"job/{job_id}"
         live_pod = pick_live_pod(job_pods(self.kube, job_id))
-        if live_pod and live_pod.get("status", {}).get("phase") == "Running":
+        if (live_pod and live_pod.get("status", {}).get("phase") == "Running"
+                and not is_deleting(live_pod)):
             pod_name = live_pod.get("metadata", {}).get("name")
             if pod_name:
                 target = f"pod/{pod_name}"

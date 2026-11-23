@@ -36,6 +36,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from framework import paths
 from framework.compute import ComputeConfigError
 from framework.compute.drivers import base, gcs_staging, gke_job, jobs
 
@@ -310,24 +311,103 @@ class TestGkeJobLogs(GkeJobLifecycleBase):
                     gke_job.log_retrieval.saved_log("run-1").exists())
 
     def test_a_requeued_job_not_started_again_has_no_log_yet(self):
-        """Readmitted, its new pod not started: nothing, not the old run's.
+        """Readmitted or suspended before the new pod runs: "", not old logs.
 
-        Neither the stopped pod's log nor the copy it uploaded on its way
-        out is this run's; kept as the Job's log, it would be read for good.
+        Neither a stopped/terminating pod's log nor the GCS copy an earlier run
+        uploaded is this run's; freezing it at `output.log` would return stale
+        logs for good.
         """
-        jobs.JobRecord.create(job_id="run-1", backend="gke_job", serve=True)
-        fake = self._requeued(
+        ts = "2026-01-01T01:30:00Z"
+        requeued = self._requeued(
             failed_pod(phase="Pending", node=None, name="run-1-new"),
             failed_pod(exit_code=143, name="run-1-old"))
-        fake.responses["logs pod/run-1-new"] = (
+        requeued.responses["logs pod/run-1-new"] = (
             1, "", 'container "workload" in pod "run-1-new" is waiting to '
             "start: ContainerCreating")
-        with patch.object(subprocess, "run", fake), \
-                patch.object(gcs_staging, "download_file_from_gcs") as download:
-            self.assertEqual(
-                make_driver(staging_bucket="gs://b").fetch_logs("run-1"), "")
-        download.assert_not_called()
-        self.assertFalse(gke_job.log_retrieval.saved_log("run-1").exists())
+        h0 = failed_pod(phase="Pending",
+                        node=None,
+                        name="run-1-0-new",
+                        created=ts,
+                        index=0)
+        h1 = failed_pod(phase="Running",
+                        node="n1",
+                        name="run-1-1-new",
+                        created=ts,
+                        index=1)
+        dying = failed_pod(phase="Running", name="run-1-old", deleting=True)
+        cases = [
+            ("container creating", requeued, None),
+            ("kueue suspended empty pods",
+             FakeKubectl({
+                 "get job": (0, job_json(suspend=True), ""),
+                 "get pods": (0, json.dumps({"items": []}), ""),
+                 "logs": (1, "", "error: no pods found for job/run-1"),
+             }), None),
+            ("multihost leader pending",
+             FakeKubectl({
+                 "get job": (0, job_json(hosts=2, active=2), ""),
+                 "get pods": (0, json.dumps({"items": [h0, h1]}), ""),
+                 "logs pod/run-1-0-new": (1, "", "ContainerCreating"),
+             }), None),
+            ("terminating pod while suspended",
+             FakeKubectl({
+                 "get job": (0, job_json(suspend=True), ""),
+                 "get pods": (0, json.dumps({"items": [dying]}), ""),
+                 "logs pod/run-1-old":
+                 (0, "Application startup complete.\n", ""),
+             }), "logs pod/run-1-old"),
+        ]
+        for label, fake, forbidden_cmd in cases:
+            with self.subTest(label), job_store():
+                jobs.JobRecord.create(job_id="run-1",
+                                      backend="gke_job",
+                                      serve=True)
+                with patch.object(subprocess, "run", fake), \
+                        patch.object(gcs_staging,
+                                     "download_file_from_gcs") as download:
+                    self.assertEqual(
+                        make_driver(
+                            staging_bucket="gs://b").fetch_logs("run-1"), "")
+                download.assert_not_called()
+                self.assertFalse(
+                    gke_job.log_retrieval.saved_log("run-1").exists())
+                if forbidden_cmd:
+                    self.assertIsNone(fake.find(forbidden_cmd))
+
+    def test_reused_job_name_clears_previous_saved_logs(self):
+        """Reusing a cancelled Job's name clears stale state; sealed names suffix."""
+        script = hello_script(self)
+        driver = make_driver(staging_bucket="gs://b", pod_service_account="sa")
+        jobs.JobRecord.create(job_id="run-1", backend="gke_job",
+                              serve=True).mark("CANCELLED")
+        saved = gke_job.log_retrieval.saved_log("run-1")
+        saved.write_text("stale log\n", encoding="utf-8")
+
+        with patch.object(subprocess, "run", FakeKubectl()), \
+                patch.object(gcs_staging, "delete_staged_prefix") as rm_gcs:
+            job_id = driver.submit(str(script), job_name="run-1", serve=True)
+        self.assertEqual(job_id, "run-1")
+        self.assertFalse(saved.exists())
+        rm_gcs.assert_called_once_with("b", "run-1/out/")
+
+        # A sealed record in protected storage is treated as taken and suffixed
+        # so an ordinary submit never wipes or gets shadowed by it.
+        with patch.dict(
+                os.environ,
+            {jobs.JOBS_DIR_ENV: str(paths.get_sealed_jobs_root())}):
+            sealed = jobs.JobRecord.create(job_id="sealed-1",
+                                           backend="gke_job")
+            sealed_log = sealed.directory / "output.log"
+            sealed_log.write_text("sealed log\n", encoding="utf-8")
+            sealed.mark("COMPLETED")
+        with patch.object(subprocess, "run", FakeKubectl()), \
+                patch.object(gcs_staging, "delete_staged_prefix") as rm_gcs, \
+                contextlib.redirect_stderr(io.StringIO()):
+            new_id = driver.submit(str(script), job_name="sealed-1")
+        self.assertRegex(new_id, r"^sealed-1-[0-9a-f]{6}$")
+        self.assertEqual(sealed_log.read_text(encoding="utf-8"),
+                         "sealed log\n")
+        rm_gcs.assert_not_called()
 
 
 class TestGkeJobArtifacts(GkeJobLifecycleBase):
@@ -430,15 +510,25 @@ class TestGkeJobPortForward(GkeJobLifecycleBase):
                                     remote_port=8000,
                                     job_id="my-job"), 0)
 
-        # No pod running: forward to the Job and let kubectl pick.
-        fake.responses["get pods"] = (0,
-                                      phase_pods(
-                                          ("job-pod-gone", "Succeeded")), "")
-        with patch.object(subprocess, "run", fake):
-            driver.port_forward(local_port=8080,
-                                remote_port=8000,
-                                job_id="my-job")
-        self.assertIsNotNone(fake.find("port-forward job/my-job"))
+        # No pod running (or only a terminating Running pod): forward to Job.
+        dying = json.dumps({
+            "items":
+            [failed_pod(phase="Running", name="job-pod-dying", deleting=True)]
+        })
+        for label, payload in (("succeeded",
+                                phase_pods(("job-pod-gone", "Succeeded"))),
+                               ("terminating", dying)):
+            with self.subTest(label):
+                pf_fake = FakeKubectl({
+                    "get pods": (0, payload, ""),
+                    "port-forward": (0, "Forwarding\n", ""),
+                })
+                with patch.object(subprocess, "run", pf_fake):
+                    driver.port_forward(local_port=8080,
+                                        remote_port=8000,
+                                        job_id="my-job")
+                self.assertIsNotNone(pf_fake.find("port-forward job/my-job"))
+                self.assertIsNone(pf_fake.find("job-pod-dying"))
 
 
 class TestGkeJobRun(unittest.TestCase):

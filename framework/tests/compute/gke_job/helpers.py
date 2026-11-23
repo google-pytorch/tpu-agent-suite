@@ -124,8 +124,10 @@ def hello_script(test: unittest.TestCase) -> Path:
     return script
 
 
-def job_json(**status: Any) -> str:
-    spec = {"suspend": status.pop("suspend", False)}
+def job_json(*, hosts: int = 1, **status: Any) -> str:
+    spec: dict[str, Any] = {"suspend": status.pop("suspend", False)}
+    if hosts > 1:
+        spec.update({"completionMode": "Indexed", "completions": hosts})
     return json.dumps({"spec": spec, "status": status})
 
 
@@ -137,7 +139,10 @@ def failed_pod(*,
                conditions: list[dict[str, Any]] | None = None,
                phase: str = "Failed",
                node: str | None = "gke-tpu-node-1",
-               name: str = "run-1-abcde") -> dict[str, Any]:
+               name: str = "run-1-abcde",
+               created: str | None = None,
+               index: int | None = None,
+               deleting: bool = False) -> dict[str, Any]:
     """A Job's pod as `kubectl get pods -o json` lists it.
 
     The container is terminated only when `exit_code` or
@@ -160,7 +165,14 @@ def failed_pod(*,
                                                                   conditions)):
         if value is not None:
             status[key] = value
-    pod: dict[str, Any] = {"metadata": {"name": name}, "status": status}
+    meta: dict[str, Any] = {"name": name}
+    if created is not None:
+        meta["creationTimestamp"] = created
+    if index is not None:
+        meta["labels"] = {gke_job.gke_common.COMPLETION_INDEX_KEY: str(index)}
+    if deleting:
+        meta["deletionTimestamp"] = created or "2026-01-01T01:00:00Z"
+    pod: dict[str, Any] = {"metadata": meta, "status": status}
     if node:
         pod["spec"] = {"nodeName": node}
     return pod

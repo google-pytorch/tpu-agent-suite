@@ -71,7 +71,8 @@ def live_status(kube: Kubectl,
     details: dict[str, Any] = {"namespace": kube.namespace}
     queued = bool(job.get("metadata", {}).get("labels", {}).get(QUEUE_LABEL))
 
-    pods = job_pods(kube, job_id)
+    all_pods = job_pods(kube, job_id)
+    pods = current_pods(all_pods)
     live_pod = pick_live_pod(pods)
     if live_pod:
         pod_name = live_pod.get("metadata", {}).get("name")
@@ -100,14 +101,18 @@ def live_status(kube: Kubectl,
         )
 
     if job_status.get("failed", 0):
-        pods = first_failures(pods)
-        end = pod_end(pods)
+        failed_pods = first_failures(pods)
+        if not (failed_pods and failed(failed_pods[0])):
+            # A --serve Job with backoffLimit > 0 can spawn a replacement pod
+            # before status is read; fall back to all pods for the exit reason.
+            failed_pods = first_failures(all_pods)
+        end = pod_end(failed_pods)
         if end.pod_reason:
             details["pod_reason"] = end.pod_reason
         error = termination_error(**end._asdict())
-        if hosts > 1 and pods and failed(pods[0]):
+        if hosts > 1 and failed_pods and failed(failed_pods[0]):
             # The other hosts are stopped with it; theirs isn't the failure.
-            details["failed_host"] = pod_index(pods[0])
+            details["failed_host"] = pod_index(failed_pods[0])
             error = f"host {details['failed_host']} of {hosts}: {error}"
         return base.AsynchronousExecutionResult(
             job_id=job_id,
@@ -252,18 +257,25 @@ def job_pods(kube: Kubectl, job_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def is_deleting(pod: dict[str, Any]) -> bool:
+    """Return whether Kubernetes has marked `pod` for deletion."""
+    return bool(pod.get("metadata", {}).get("deletionTimestamp"))
+
+
 def pick_live_pod(pods: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The pod to read: Running, else Pending, else the first one.
 
     In a multi-host Job, the leader's (index 0), which serves and prints the
-    result.
+    result. Superseded pods from earlier runs are ignored.
     """
     ranked = {"Running": 0, "Pending": 1}
     return min(
-        pods,
-        key=lambda p:
-        (pod_index(p) not in
-         (None, 0), ranked.get(p.get("status", {}).get("phase"), 2)),
+        current_pods(pods),
+        key=lambda p: (
+            pod_index(p) not in (None, 0),
+            is_deleting(p),
+            ranked.get(p.get("status", {}).get("phase"), 2),
+        ),
         default=None,
     )
 
@@ -289,7 +301,7 @@ def _recency(pod: dict[str, Any]) -> tuple[float, bool, int]:
     created = parse_time(meta.get("creationTimestamp")) or 0.0
     phase = pod.get("status", {}).get("phase")
     live = {"Running": 2, "Pending": 1}.get(phase, 0)
-    return created, not meta.get("deletionTimestamp"), live
+    return created, not is_deleting(pod), live
 
 
 def _lagging_host(pods: list[dict[str, Any]],
@@ -301,13 +313,14 @@ def _lagging_host(pods: list[dict[str, Any]],
     """
     up = {
         pod_index(pod)
-        for pod in pods
-        if pod.get("status", {}).get("phase") in ("Running", "Succeeded")
+        for pod in pods if pod.get("status", {}).get("phase") in (
+            "Running", "Succeeded") and not is_deleting(pod)
     }
     for index in range(hosts):
         if index not in up:
-            return index, next(
-                (pod for pod in pods if pod_index(pod) == index), None)
+            pod = next((p for p in pods
+                        if pod_index(p) == index and not is_deleting(p)), None)
+            return index, pod
     return None
 
 

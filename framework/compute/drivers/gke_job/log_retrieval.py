@@ -28,7 +28,8 @@ from .. import base, gcs_staging, jobs
 from ..kubectl import KUBECTL_READ_TIMEOUT_SEC
 from .gke_common import parse_time, rfc3339
 from .pod_diagnostics import failed, first_failures, node_lost
-from .status import current_pods, job_pods, live_status, pick_live_pod
+from .status import (current_pods, is_deleting, job_pods, live_status,
+                     pick_live_pod)
 
 if TYPE_CHECKING:
     from ..kubectl import Kubectl
@@ -128,13 +129,32 @@ def _log_entry_pod(entry: dict[str, Any]) -> str | None:
     return ((entry.get("resource") or {}).get("labels") or {}).get("pod_name")
 
 
+def _live_job_status(kube: Kubectl, job_id: str) -> str | None:
+    """The Job's live cluster status, or None if the Job cannot be read."""
+    try:
+        return live_status(kube, job_id).status
+    except base.ComputeConfigError:
+        return None
+
+
+def _log_pod(current: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The pod of the latest run whose logs represent the Job."""
+    if len(current) == 1:
+        return current[0]
+    if len(current) > 1:
+        first = first_failures(current)
+        return first[0] if failed(first[0]) else pick_live_pod(first)
+    return None
+
+
 def read_logs(kube: Kubectl, config: GkeJobConfig, storage: StagingClient,
               job_id: str) -> str:
     """Return the Job's pod output, or "" if it hasn't started.
 
     Prefers the `save_logs` copy, since the pod is GC'd once its TPU node
-    scales away. Then tries the pod of the Job's latest run, the GCS copy
-    and Cloud Logging, and raises if none has it.
+    scales away. Then tries the pod of the Job's latest run, and for
+    finished Jobs falls back to the GCS copy and Cloud Logging, raising
+    if none has it.
     """
     saved = saved_log(job_id)
     if not saved.is_file():
@@ -148,30 +168,30 @@ def read_logs(kube: Kubectl, config: GkeJobConfig, storage: StagingClient,
             )
         pods = job_pods(kube, job_id)
         current = current_pods(pods)
-        proc = pod_logs(kube, job_id, pods)
+        pod = _log_pod(current)
+        if pod is not None and is_deleting(pod):
+            # A pod being deleted (e.g. Kueue preemption) is not the new run's
+            # log while the Job is pending or suspended.
+            if _live_job_status(kube, job_id) == "PENDING":
+                return ""
+        proc = _pod_logs(kube, job_id, pod)
         if proc.returncode == 0:
             if not node_lost(current):
                 return proc.stdout
             # The node is gone, so this log is final. Save it.
             _keep_lost_node_log(job_id, proc.stdout)
-        elif current and all(
-                pod.get("status", {}).get("phase") == "Pending"
-                for pod in current):
-            # The latest run has not started. What an earlier run left, its
-            # pod's log or the copy it uploaded, is not this run's.
-            return ""
         else:
+            if _live_job_status(kube, job_id) in ("PENDING", "RUNNING"):
+                # Still live (Kueue-suspended, ContainerCreating, multi-host
+                # staggered startup, or pod log not readable yet): never fetch
+                # or freeze an earlier run's GCS copy, or fall back to Cloud
+                # Logging.
+                return ""
             download_log(config, storage, job_id, saved)
     if saved.is_file():
         if lost_node_marker(job_id).is_file():
             return _settle_lost_node_log(kube, job_id)
         return saved.read_text(encoding="utf-8")
-    try:
-        live = live_status(kube, job_id).status
-    except base.ComputeConfigError:
-        live = None  # The Job itself is gone.
-    if live == "PENDING":
-        return ""
     record = jobs.JobRecord.load(job_id)
     why = ("It was cancelled before it finished, and cancelling deletes "
            "its pod"
@@ -332,6 +352,20 @@ def save_logs(kube: Kubectl, config: GkeJobConfig, storage: StagingClient,
     download_log(config, storage, job_id, saved)
 
 
+def _pod_logs(
+    kube: Kubectl,
+    job_id: str,
+    pod: dict[str, Any] | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run unchecked `kubectl logs` for `pod`, or `job/<job_id>` when None."""
+    target = f"job/{job_id}"
+    if pod and pod.get("metadata", {}).get("name"):
+        target = f"pod/{pod['metadata']['name']}"
+    return kube.run(["logs", target] + kube.ns(),
+                    check=False,
+                    timeout=KUBECTL_READ_TIMEOUT_SEC)
+
+
 def pod_logs(
     kube: Kubectl,
     job_id: str,
@@ -345,16 +379,7 @@ def pod_logs(
     did, else the leader's. With no pod listed, `job/<id>` all the same.
     """
     current = current_pods(job_pods(kube, job_id) if pods is None else pods)
-    pod = current[0] if len(current) == 1 else None
-    if len(current) > 1:
-        first = first_failures(current)
-        pod = first[0] if failed(first[0]) else pick_live_pod(first)
-    target = f"job/{job_id}"
-    if pod and pod.get("metadata", {}).get("name"):
-        target = f"pod/{pod['metadata']['name']}"
-    return kube.run(["logs", target] + kube.ns(),
-                    check=False,
-                    timeout=KUBECTL_READ_TIMEOUT_SEC)
+    return _pod_logs(kube, job_id, _log_pod(current))
 
 
 def saved_log(job_id: str) -> Path:

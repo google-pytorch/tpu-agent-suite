@@ -736,14 +736,12 @@ class TestGkeJobPodRanking(GkeJobLifecycleBase):
         """
 
         def pod(name, created, index=None, phase="Running", deleting=False):
-            meta = {"name": name, "creationTimestamp": created}
-            if index is not None:
-                meta["labels"] = {
-                    gke_job.gke_common.COMPLETION_INDEX_KEY: str(index)
-                }
-            if deleting:
-                meta["deletionTimestamp"] = created
-            return {"metadata": meta, "status": {"phase": phase}}
+            return failed_pod(name=name,
+                              created=created,
+                              index=index,
+                              phase=phase,
+                              deleting=deleting,
+                              node=None)
 
         def names(*pods):
             return sorted(p["metadata"]["name"]
@@ -762,6 +760,84 @@ class TestGkeJobPodRanking(GkeJobLifecycleBase):
             names(pod("h0-old", early, 0, "Failed"), pod("h1", late, 1),
                   pod("h0", late, 0)), ["h0", "h1"])
         self.assertEqual(names(), [])
+
+    def test_live_status_and_placement_ignore_superseded_preempted_pods(self):
+        """After Kueue readmission, old Running pods must not hide new ones."""
+        early, late = "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"
+        old = failed_pod(name="run-1-0-old",
+                         created=early,
+                         index=0,
+                         phase="Running",
+                         deleting=True,
+                         node="old-node")
+        new = failed_pod(name="run-1-0-new",
+                         created=late,
+                         index=0,
+                         phase="Pending",
+                         node=None)
+        h1_old = failed_pod(name="run-1-1-old",
+                            created=early,
+                            index=1,
+                            phase="Running",
+                            deleting=True,
+                            node="old-node-1")
+        fake = FakeKubectl({
+            "get job": (0, job_json(hosts=2, active=2), ""),
+            "get pods": (0, json.dumps({"items": [old, new, h1_old]}), ""),
+        })
+        result = self.status(fake)
+        self.assertEqual(result.status, "PENDING")
+        self.assertEqual(result.details["pod_name"], "run-1-0-new")
+        self.assertNotIn("node_name", result.details)
+        # Even once host 0 is Running, a terminating old host 1 is still
+        # lagging and must not copy its dying nodeName into details.
+        new_running = failed_pod(name="run-1-0-new",
+                                 created=late,
+                                 index=0,
+                                 phase="Running",
+                                 node="new-node-0")
+        fake.responses["get pods"] = (0,
+                                      json.dumps({
+                                          "items": [old, new_running, h1_old]
+                                      }), "")
+        lagging = self.status(fake)
+        self.assertEqual(lagging.status, "PENDING")
+        self.assertEqual(lagging.details["lagging_host"], 1)
+        self.assertNotIn("node_name", lagging.details)
+        # `--colocate-with` refuses a dying pod and picks the live replacement.
+        driver = make_driver()
+        dying_fake = FakeKubectl({
+            "get pods": (0, json.dumps({"items": [old]}), ""),
+        })
+        with patch.object(subprocess, "run", dying_fake), \
+                self.assertRaises(ComputeConfigError) as ctx:
+            driver._placement_of("run-1")
+        self.assertEqual(ctx.exception.error_code, "INVALID_FIELD")
+        with patch.object(subprocess, "run", fake):
+            placement = driver._placement_of("run-1")
+        self.assertEqual(
+            placement["nodeSelector"][gke_job.gke_common.HOSTNAME_LABEL],
+            "new-node-0")
+
+    def test_failed_serve_job_keeps_exit_code_after_replacement(self):
+        """A --serve Job (backoffLimit > 0) keeps its failure exit code."""
+        early, late = "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"
+        evicted = failed_pod(exit_code=137,
+                             container_reason="OOMKilled",
+                             name="run-1-old",
+                             created=early)
+        replacement = failed_pod(name="run-1-new",
+                                 created=late,
+                                 phase="Pending",
+                                 node=None)
+        fake = FakeKubectl({
+            "get job": (0, job_json(failed=1, active=1), ""),
+            "get pods": (0, json.dumps({"items": [evicted, replacement]}), ""),
+        })
+        result = self.status(fake)
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual(result.exit_code, 137)
+        self.assertIn("OOMKilled", result.error or "")
 
 
 if __name__ == "__main__":
