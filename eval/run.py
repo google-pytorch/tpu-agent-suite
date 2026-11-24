@@ -2076,9 +2076,12 @@ def _read_suite_verifier_family(suite_spec: str) -> str | None:
             continue
         ev = raw_suite.get("evaluation") if isinstance(
             raw_suite.get("evaluation"), dict) else {}
+        ev_meta = ev.get("metadata") if isinstance(ev.get("metadata"),
+                                                   dict) else {}
         if not ev and "verifier_family" not in raw_suite:
             continue
-        fam_val = ev.get("verifier_family") or raw_suite.get("verifier_family")
+        fam_val = (ev_meta.get("verifier_family") or ev.get("verifier_family")
+                   or raw_suite.get("verifier_family"))
         suite_fams.append(str(fam_val).strip() if fam_val else None)
     non_empty = {f for f in suite_fams if f}
     if len(non_empty) == 1 and len(suite_fams) == sum(

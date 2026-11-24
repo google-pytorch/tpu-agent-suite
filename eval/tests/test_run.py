@@ -3865,6 +3865,34 @@ class TestRunSuiteAndSitecustomizeProvenance(unittest.TestCase):
                 "jaxbench",
             )
 
+            meta_yaml = root / "meta_family.yaml"
+            meta_yaml.write_text(
+                'version: "1.0"\n'
+                "name: meta-family\n"
+                "evaluation:\n"
+                "  verifier_family: onboard\n"
+                "  metadata:\n"
+                "    verifier_family: onboarding_routing\n"
+                "  cases:\n"
+                "    - name: c1\n"
+                '      prompt: "Run check"\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _RUN_MOD._read_suite_verifier_family(str(meta_yaml)),
+                "onboarding_routing",
+            )
+
+            unrelated_meta_yaml = root / "unrelated_meta.yaml"
+            unrelated_meta_yaml.write_text(
+                "evaluation:\n"
+                "  metadata:\n"
+                "    owner: team-a\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(
+                _RUN_MOD._read_suite_verifier_family(str(unrelated_meta_yaml)))
+
     def test_collect_task_search_roots_extracts_datasets_and_tasks(
         self, ) -> None:
         with tempfile.TemporaryDirectory() as tmp:

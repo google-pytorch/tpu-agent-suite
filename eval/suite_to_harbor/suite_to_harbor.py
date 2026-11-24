@@ -248,14 +248,19 @@ def bundle_setup_scripts(
 
 def bundle_script_verifiers(
     verifiers: Sequence[Any],
-    task_dir: Path,
+    task_dir: Path | None = None,
     source_root: Path | None = None,
+    *,
+    tests_dir: Path | None = None,
 ) -> list[tuple[str, schema.ScriptCheck]]:
     """Stages verifiers (.py scripts or .toml judges) into tests/."""
     if not verifiers:
         return []
 
-    tests_dir = task_dir / "tests"
+    if tests_dir is None:
+        if task_dir is None:
+            raise ValueError("Either task_dir or tests_dir must be provided")
+        tests_dir = task_dir / "tests"
     used_names: set[str] = ({p.name
                              for p in tests_dir.iterdir()}
                             if tests_dir.is_dir() else set())
@@ -423,7 +428,6 @@ def _bundle_environment(
 def _stage_verifier_assets(
     case: schema.TestCase,
     eval_cfg: schema.EvaluationConfig,
-    task_dir: Path,
     tests_dir: Path,
     judge_model_override: str | None,
     source_root: Path | None,
@@ -450,7 +454,7 @@ def _stage_verifier_assets(
         case.normalized_script_verifiers())
     bundled_verifiers = bundle_script_verifiers(
         all_verifiers,
-        task_dir=task_dir,
+        tests_dir=tests_dir,
         source_root=source_root,
     )
     return bundled_verifiers, bool(judge_toml)
@@ -559,6 +563,67 @@ def _write_test_runner(
     os.chmod(test_sh, 0o755)
 
 
+def _prepare_tests_output_dir(output_tests_dir: Path) -> Path:
+    """Prepares a destination tests/ dir while guarding unrelated non-empty dirs."""
+    tests_dir = Path(output_tests_dir)
+    if tests_dir.exists():
+        if not tests_dir.is_dir():
+            raise ValueError(
+                f"Refusing to overwrite non-directory path '{tests_dir}'.")
+        if any(tests_dir.iterdir()):
+            looks_like_tests_bundle = ((tests_dir / "test.sh").is_file() or
+                                       (tests_dir / "reward.toml").is_file())
+            if not looks_like_tests_bundle:
+                raise ValueError(
+                    f"Refusing to overwrite non-empty directory '{tests_dir}' "
+                    "that does not look like a compiled tests/ bundle "
+                    "(missing test.sh and reward.toml).")
+            shutil.rmtree(tests_dir)
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    return tests_dir
+
+
+def compile_tests_bundle(
+    case: schema.TestCase,
+    eval_cfg: schema.EvaluationConfig,
+    output_tests_dir: Path,
+    judge_model_override: str | None = None,
+    source_root: Path | None = None,
+    workdir: str = "/workspace",
+) -> Path:
+    """Compiles only the tests/ verifier bundle for one TestCase."""
+    tests_dir = _prepare_tests_output_dir(output_tests_dir)
+
+    bundled_verifiers, has_judge_toml = _stage_verifier_assets(
+        case=case,
+        eval_cfg=eval_cfg,
+        tests_dir=tests_dir,
+        judge_model_override=judge_model_override,
+        source_root=source_root,
+    )
+    _write_reward_toml(
+        case=case,
+        eval_cfg=eval_cfg,
+        tests_dir=tests_dir,
+        bundled_verifiers=bundled_verifiers,
+        has_judge_toml=has_judge_toml,
+    )
+    _write_verifier_params(
+        case=case,
+        tests_dir=tests_dir,
+        bundled_verifiers=bundled_verifiers,
+    )
+    _write_test_runner(
+        case=case,
+        eval_cfg=eval_cfg,
+        tests_dir=tests_dir,
+        bundled_verifiers=bundled_verifiers,
+        source_root=source_root,
+        workdir=workdir,
+    )
+    return tests_dir
+
+
 def compile_case(
     suite_name: str,
     case: schema.TestCase,
@@ -589,33 +654,11 @@ def compile_case(
         task_dir=task_dir,
         source_root=source_root,
     )
-
-    tests_dir = task_dir / "tests"
-    bundled_verifiers, has_judge_toml = _stage_verifier_assets(
+    compile_tests_bundle(
         case=case,
         eval_cfg=eval_cfg,
-        task_dir=task_dir,
-        tests_dir=tests_dir,
+        output_tests_dir=task_dir / "tests",
         judge_model_override=judge_model_override,
-        source_root=source_root,
-    )
-    _write_reward_toml(
-        case=case,
-        eval_cfg=eval_cfg,
-        tests_dir=tests_dir,
-        bundled_verifiers=bundled_verifiers,
-        has_judge_toml=has_judge_toml,
-    )
-    _write_verifier_params(
-        case=case,
-        tests_dir=tests_dir,
-        bundled_verifiers=bundled_verifiers,
-    )
-    _write_test_runner(
-        case=case,
-        eval_cfg=eval_cfg,
-        tests_dir=tests_dir,
-        bundled_verifiers=bundled_verifiers,
         source_root=source_root,
         workdir=effective_env.workdir,
     )

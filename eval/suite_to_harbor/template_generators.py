@@ -296,10 +296,12 @@ def generate_task_toml(
             "name": task_name,
             "description": desc,
         },
-        "metadata": {
-            "category": suite_name,
-            **(case.metadata or {}),
-        },
+        "metadata":
+        schema.merge_metadata(
+            {"category": suite_name},
+            eval_cfg.metadata if eval_cfg is not None else None,
+            case.metadata,
+        ),
         "agent": {
             "timeout_sec": float(agent_timeout),
         },

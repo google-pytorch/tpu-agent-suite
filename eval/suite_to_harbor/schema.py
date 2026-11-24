@@ -21,6 +21,7 @@ Defines data models for evaluating AI agents:
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal, TextIO, TypeVar
 
@@ -767,6 +768,12 @@ class EvaluationConfig(StrictModel):
             "Suite-level static files or directories staged into tests/ "
             "after agent execution across all cases."),
     )
+    metadata: dict[str, Any] | None = pydantic.Field(
+        default=None,
+        description=(
+            "Optional evaluation-level metadata dictionary merged into each "
+            "case's [metadata]."),
+    )
     cases: NonNullList[TestCase] = pydantic.Field(
         ...,
         description="List of test cases.",
@@ -877,3 +884,12 @@ def normalize_file_staging(
     item: str | FileStaging | dict[str, Any], ) -> FileStaging:
     """Normalizes a string path, dict, or FileStaging instance into a FileStaging."""
     return FileStaging.coerce(item)
+
+
+def merge_metadata(*sources: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Merges optional metadata mappings in ascending precedence order."""
+    merged: dict[str, Any] = {}
+    for src in sources:
+        if src:
+            merged.update(src)
+    return merged

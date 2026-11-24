@@ -757,6 +757,105 @@ evaluation:
         self.assertEqual(merged.memory_mb, 8192)
         self.assertEqual(merged.workdir, "/app")
 
+    def test_metadata_accepted_on_eval_and_case(self) -> None:
+        suite = schema.EvalSuite.from_yaml("""
+name: meta_suite
+evaluation:
+  metadata:
+    verifier_family: onboard
+    offline_gradable: false
+  cases:
+    - name: override_case
+      prompt: "Run checks"
+      metadata:
+        verifier_family: xprof
+        offline_gradable: true
+    - name: inherit_case
+      prompt: "Run inherited checks"
+""")
+        self.assertEqual(suite.evaluation.metadata, {
+            "verifier_family": "onboard",
+            "offline_gradable": False,
+        })
+        c0, c1 = suite.evaluation.cases
+        self.assertEqual(c0.metadata, {
+            "verifier_family": "xprof",
+            "offline_gradable": True,
+        })
+        self.assertIsNone(c1.metadata)
+        self.assertEqual(
+            schema.merge_metadata(
+                {"category": "meta_suite"},
+                suite.evaluation.metadata,
+                c0.metadata,
+            ),
+            {
+                "category": "meta_suite",
+                "verifier_family": "xprof",
+                "offline_gradable": True,
+            },
+        )
+        self.assertEqual(
+            schema.merge_metadata(
+                {"category": "meta_suite"},
+                suite.evaluation.metadata,
+                c1.metadata,
+            ),
+            {
+                "category": "meta_suite",
+                "verifier_family": "onboard",
+                "offline_gradable": False,
+            },
+        )
+
+    def test_top_level_regrade_and_root_metadata_rejected_by_strict_schema(
+            self) -> None:
+        with self.assertRaises(pydantic.ValidationError):
+            schema.EvalSuite.from_yaml("""
+name: s
+metadata:
+  verifier_family: default
+evaluation:
+  cases:
+    - name: c
+      prompt: "p"
+""")
+
+        for field_line in (
+                "verifier_family: onboard",
+                "offline_gradable: true",
+                "verifier_version: v1",
+        ):
+            for yaml_text in (
+                    f"""
+name: s
+{field_line}
+evaluation:
+  cases:
+    - name: c
+      prompt: "p"
+""",
+                    f"""
+name: s
+evaluation:
+  {field_line}
+  cases:
+    - name: c
+      prompt: "p"
+""",
+                    f"""
+name: s
+evaluation:
+  cases:
+    - name: c
+      prompt: "p"
+      {field_line}
+""",
+            ):
+                with self.subTest(field_line=field_line), self.assertRaises(
+                        pydantic.ValidationError):
+                    schema.EvalSuite.from_yaml(yaml_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1546,6 +1546,183 @@ evaluation:
         self.assertIn("pip install --no-cache-dir harbor-rewardkit pytest\n",
                       df)
 
+    def _write_meta_test_suite(self, root: Path) -> Path:
+        (root / "checks").mkdir(parents=True, exist_ok=True)
+        (root / "workspace_src").mkdir(parents=True, exist_ok=True)
+        (root / "checks" / "verify.py").write_text(
+            "def main():\n    return 1.0\n",
+            encoding="utf-8",
+        )
+        (root / "workspace_src" / "input.txt").write_text(
+            "heavy payload\n",
+            encoding="utf-8",
+        )
+        suite_yaml = root / "suite.yaml"
+        suite_yaml.write_text(
+            """
+name: meta-suite
+environment:
+  base_image: python:3.12-slim
+evaluation:
+  metadata:
+    verifier_family: onboard
+    offline_gradable: true
+    owner: suite-team
+  cases:
+    - name: case-alpha
+      prompt: "Solve alpha"
+      workspace_files:
+        - "workspace_src/input.txt:input.txt"
+      expectations:
+        - "Check invariant"
+      script_verifiers:
+        - "checks/verify.py"
+      metadata:
+        offline_gradable: false
+        custom_tag: alpha
+    - name: case-beta
+      prompt: "Solve beta"
+      expectations:
+        - "Check beta"
+""",
+            encoding="utf-8",
+        )
+        return suite_yaml
+
+    def test_compile_tests_bundle_writes_only_tests_with_judge_override(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            suite_yaml = self._write_meta_test_suite(root)
+            suite = schema.EvalSuite.from_file(suite_yaml)
+            alpha_case = suite.evaluation.cases[0]
+            tests_out = root / "standalone_parent" / "tests"
+            res_dir = suite_to_harbor.compile_tests_bundle(
+                case=alpha_case,
+                eval_cfg=suite.evaluation,
+                output_tests_dir=tests_out,
+                judge_model_override="gemini/test-judge",
+                source_root=root,
+            )
+            self.assertEqual(res_dir, tests_out)
+            self.assertTrue((tests_out / "test.sh").is_file())
+            self.assertTrue(
+                bool((tests_out / "test.sh").stat().st_mode & stat.S_IXUSR))
+            self.assertTrue((tests_out / "reward.toml").is_file())
+            self.assertTrue(
+                (tests_out / "expectations" / "judge.toml").is_file())
+            self.assertIn(
+                "gemini/test-judge",
+                (tests_out / "expectations" /
+                 "judge.toml").read_text(encoding="utf-8"),
+            )
+            self.assertTrue((tests_out / "verify" / "verify.py").is_file())
+            self.assertFalse((tests_out.parent / "environment").exists())
+            self.assertFalse((tests_out.parent / "task.toml").exists())
+            self.assertFalse((tests_out.parent / "instruction.md").exists())
+
+    def test_compile_suite_merges_eval_and_case_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            suite_yaml = self._write_meta_test_suite(root)
+            out_dir = root / "compiled"
+            suite_to_harbor.compile_suite(suite_path=suite_yaml,
+                                          output_dir=out_dir)
+
+            alpha_toml = tomllib.loads(
+                (out_dir / "case-alpha" /
+                 "task.toml").read_text(encoding="utf-8"))
+            self.assertEqual(
+                alpha_toml["metadata"],
+                {
+                    "category": "meta-suite",
+                    "verifier_family": "onboard",
+                    "offline_gradable": False,
+                    "owner": "suite-team",
+                    "custom_tag": "alpha",
+                },
+            )
+
+            beta_toml = tomllib.loads(
+                (out_dir / "case-beta" /
+                 "task.toml").read_text(encoding="utf-8"))
+            self.assertEqual(
+                beta_toml["metadata"],
+                {
+                    "category": "meta-suite",
+                    "verifier_family": "onboard",
+                    "offline_gradable": True,
+                    "owner": "suite-team",
+                },
+            )
+
+    def test_compile_tests_bundle_safety_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            suite_yaml = self._write_meta_test_suite(root)
+            suite = schema.EvalSuite.from_file(suite_yaml)
+            alpha_case, beta_case = suite.evaluation.cases
+
+            tests_out = root / "reusable_tests"
+            suite_to_harbor.compile_tests_bundle(
+                case=beta_case,
+                eval_cfg=suite.evaluation,
+                output_tests_dir=tests_out,
+                source_root=root,
+            )
+            # Re-compiling over an existing compiled tests/ bundle succeeds.
+            suite_to_harbor.compile_tests_bundle(
+                case=alpha_case,
+                eval_cfg=suite.evaluation,
+                output_tests_dir=tests_out,
+                source_root=root,
+            )
+            self.assertTrue((tests_out / "verify" / "verify.py").is_file())
+
+            # Refuses to overwrite a non-directory file or arbitrary non-empty directory.
+            file_target = root / "not_a_dir.txt"
+            file_target.write_text("file\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                suite_to_harbor.compile_tests_bundle(
+                    case=beta_case,
+                    eval_cfg=suite.evaluation,
+                    output_tests_dir=file_target,
+                    source_root=root,
+                )
+
+            unrelated_dir = root / "unrelated"
+            unrelated_dir.mkdir()
+            sentinel = unrelated_dir / "keep_me.txt"
+            sentinel.write_text("important\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                suite_to_harbor.compile_tests_bundle(
+                    case=beta_case,
+                    eval_cfg=suite.evaluation,
+                    output_tests_dir=unrelated_dir,
+                    source_root=root,
+                )
+            self.assertTrue(sentinel.is_file())
+
+    def test_bundle_script_verifiers_standalone_tests_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "checks").mkdir(parents=True)
+            (root / "checks" / "verify.py").write_text(
+                "def main():\n    return 1.0\n",
+                encoding="utf-8",
+            )
+            standalone = root / "direct_tests"
+            bundled = suite_to_harbor.bundle_script_verifiers(
+                ["checks/verify.py"],
+                tests_dir=standalone,
+                source_root=root,
+            )
+            self.assertEqual(bundled[0][0], "verify")
+            self.assertTrue((standalone / "verify" / "verify.py").is_file())
+
+            with self.assertRaises(ValueError):
+                suite_to_harbor.bundle_script_verifiers(["checks/verify.py"])
+
 
 class CompileSuiteSpecTest(unittest.TestCase):
 
