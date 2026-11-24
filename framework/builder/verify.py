@@ -100,6 +100,12 @@ def verify_package(
             raise utils.TpuAgentSuiteError(f"invalid schema {schema_rel}:\n" +
                                            "\n".join(errors))
 
+    for hc_rel in package_loader.hillclimber_scripts(manifest):
+        hc_path = utils.rooted(package_dir, hc_rel, "hillclimber script")
+        if not hc_path.is_file():
+            raise utils.TpuAgentSuiteError(
+                f"hillclimber script does not exist: {hc_path}")
+
     target_harnesses = {
         target["harness"]
         for target in manifest["compatibility_targets"]

@@ -38,6 +38,22 @@ def hook_script(action: Any) -> str | None:
     return None
 
 
+def hillclimber_scripts(manifest: dict[str, Any]) -> list[str]:
+    """Return all package-relative script paths declared in `manifest['hillclimber']`."""
+    hc = manifest.get("hillclimber")
+    if not isinstance(hc, dict):
+        return []
+    paths_out: list[str] = [
+        hc["e2e_sweep_script"],
+        *hc.get("e2e_sweep_companions", ()),
+        *hc.get("serving_scripts", {}).values(),
+        hc["vllm_patch_applier"],
+        *hc.get("accuracy_scripts", {}).values(),
+        hc["microbenchmark_runner"],
+    ]
+    return list(dict.fromkeys(paths_out))
+
+
 def excluded_internal(entry: dict[str, Any], include_internal: bool) -> bool:
     """Whether a build leaves out `entry`: internal, and not asked for."""
     return entry.get("visibility") == "internal" and not include_internal

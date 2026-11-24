@@ -27,6 +27,25 @@
     "questions": "environment/questions.json",
     "schema": "schemas/environment.json"
   },
+  "hillclimber": {
+    "e2e_sweep_script": "scripts/common/serving_sweep.py",
+    "e2e_sweep_companions": [
+      "scripts/common/serving_benchmark.py",
+      "scripts/common/tpu_slots.py",
+      "scripts/common/serving_sweep_client.sh",
+      "scripts/common/benchmark_fastapi_server.py",
+      "scripts/tpu-model-onboarding/fetch_weights.py"
+    ],
+    "serving_scripts": {
+      "vllm": "scripts/common/serve_vllm.sh",
+      "sglang": "scripts/common/serve_sglang.sh"
+    },
+    "vllm_patch_applier": "scripts/common/vllm_patches/apply_vllm_patch.sh",
+    "accuracy_scripts": {
+      "vllm": "scripts/accuracy-check/eval_recipe.sh"
+    },
+    "microbenchmark_runner": "scripts/workload-microbenchmark/core/forward_run.py"
+  },
   "hooks": [
     {
       "name": "session-run-init",

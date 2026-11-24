@@ -35,8 +35,8 @@ _BASE_PROTO_JSON = """{
   ],
   "accuracy_gate": {"metric": "gsm8k", "comparator": "gte", "threshold": -0.01,
                     "is_relative": true, "relative_to": null},
-  "execution_spec": {"image": "img:1", "e2e_script": "run_e2e.sh", "accuracy_script": "acc.sh",
-                     "serving_script": "serve.sh", "base_server_args": "--tp 4", "base_client_args": ""}
+  "execution_spec": {"image": "img:1", "base_server_args": "--tp 4",
+                     "base_client_args": "", "base_eval_args": "--num_fewshot 5"}
 }"""
 
 
@@ -87,15 +87,24 @@ class TestSchemaValidation(unittest.TestCase):
             schemas.validate_campaign_config({**cfg, "extra_key": 1})
 
         padded = _proto(compute_profile="  gke-v7x\n")
-        padded["execution_spec"]["e2e_script"] = "  run_e2e.sh  "
+        padded["execution_spec"]["base_eval_args"] = "  --num_fewshot 5  "
         valid = schemas.validate_protocol_config(padded)
         self.assertEqual(
-            (valid["compute_profile"], valid["execution_spec"]["e2e_script"]),
-            ("gke-v7x", "run_e2e.sh"))
-        self.assertIsNone(
-            schemas.validate_protocol_config(
-                _proto(accuracy_gate=None),
-                is_microbenchmark=True)["accuracy_gate"])
+            (valid["compute_profile"],
+             valid["execution_spec"]["base_eval_args"]),
+            ("gke-v7x", "--num_fewshot 5"),
+        )
+        micro_spec = dict(_proto()["execution_spec"],
+                          microbenchmark_target="  plan.steps.json  ")
+        micro_valid = schemas.validate_protocol_config(
+            _proto(accuracy_gate=None, execution_spec=micro_spec),
+            is_microbenchmark=True,
+        )
+        self.assertEqual(
+            (micro_valid["accuracy_gate"],
+             micro_valid["execution_spec"]["microbenchmark_target"]),
+            (None, "plan.steps.json"),
+        )
 
         tcell = dict(topology="2x2x2",
                      weight=1.0,
@@ -120,15 +129,31 @@ class TestSchemaValidation(unittest.TestCase):
             (_proto(workload_kind="training",
                     measurement_cells=[dict(tcell,
                                             prefill=1)]), "forbids inference"),
-            *[(_proto(execution_spec=dict(espec, e2e_script=s)), "")
-              for s in ("../evil.sh", ".", "./")],
-            (_proto(execution_spec=dict(espec, serving_script="   ")),
-             "serving_script"),
+            (_proto(
+                execution_spec=dict(espec, microbenchmark_target="bench.py")),
+             "only allowed on microbenchmark"),
+            (_proto(execution_spec=dict(espec, base_eval_args="--limit 10")),
+             "cannot specify '--limit'"),
+            (_proto(execution_spec=dict(espec, base_eval_args="--tasks=mmlu")),
+             "cannot specify '--tasks=mmlu'"),
+            (_proto(execution_spec=dict(espec, base_eval_args="'unclosed")),
+             "invalid shell quoting"),
         ]
         for bad_proto, err_re in bad_cases:
             with self.subTest(err_re=err_re), self.assertRaisesRegex(
                     constants.ValidationError, err_re):
                 schemas.validate_protocol_config(bad_proto)
+
+        for bad_micro_target in (None, "../evil.py", "bench.sh"):
+            with self.assertRaises(constants.ValidationError):
+                schemas.validate_protocol_config(
+                    _proto(
+                        accuracy_gate=None,
+                        execution_spec=dict(
+                            espec, microbenchmark_target=bad_micro_target),
+                    ),
+                    is_microbenchmark=True,
+                )
 
         with tempfile.NamedTemporaryFile(suffix=".json") as bad_utf8:
             bad_utf8.write(b"\xff\xfe{}")
@@ -210,6 +235,12 @@ class TestSchemaValidation(unittest.TestCase):
                 "nested": {
                     "d": [1]
                 }
+        }, {
+                "eval_limit": 1
+        }, {
+                "base_eval_args": "--num_fewshot 0"
+        }, {
+                "model": "tiny"
         }):
             with self.assertRaises(constants.ValidationError):
                 schemas.validate_flags_dict(bf)

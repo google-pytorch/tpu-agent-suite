@@ -209,8 +209,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "image",
-        "e2e_script"
+        "image"
       ],
       "properties": {
         "image": {
@@ -219,22 +218,7 @@
           "maxLength": 65536,
           "pattern": "\\S"
         },
-        "e2e_script": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 65536,
-          "pattern": "\\S"
-        },
-        "accuracy_script": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "minLength": 1,
-          "maxLength": 65536,
-          "pattern": "\\S"
-        },
-        "serving_script": {
+        "microbenchmark_target": {
           "type": [
             "string",
             "null"
@@ -250,6 +234,12 @@
           ]
         },
         "base_client_args": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_eval_args": {
           "type": [
             "string",
             "null"

@@ -442,34 +442,34 @@ def translate(
         "max_depth": package_checks.MAX_DELEGATION_DEPTH,
     }
 
-    jsonio.write_json(
-        output / "tpu-agent-suite-build.json",
-        {
-            "version":
-            manifest.get("version", utils.TPU_AGENT_SUITE_VERSION),
-            "source":
-            manifest["name"],
-            "compatibility_target":
-            target["name"],
-            "harness":
-            harness,
-            "version_range":
-            target["versions"],
-            "include_internal":
-            include_internal,
-            "contracts":
-            contracts,
-            "delegation":
-            delegation,
-            "skill_allowed_tools":
-            hook_config.hook_allowed_skill_tools(manifest, harness),
-            "agent_tools": {
-                agent["name"]: list(agent.get("tools", []))
-                for agent in manifest["agents"]
-            },
-            "generated":
-            True,
+    build_doc: dict[str, Any] = {
+        "version":
+        manifest.get("version", utils.TPU_AGENT_SUITE_VERSION),
+        "source":
+        manifest["name"],
+        "compatibility_target":
+        target["name"],
+        "harness":
+        harness,
+        "version_range":
+        target["versions"],
+        "include_internal":
+        include_internal,
+        "contracts":
+        contracts,
+        "delegation":
+        delegation,
+        "skill_allowed_tools":
+        hook_config.hook_allowed_skill_tools(manifest, harness),
+        "agent_tools": {
+            agent["name"]: list(agent.get("tools", []))
+            for agent in manifest["agents"]
         },
-    )
+        "generated":
+        True,
+    }
+    if "hillclimber" in manifest:
+        build_doc["hillclimber"] = manifest["hillclimber"]
+    jsonio.write_json(output / "tpu-agent-suite-build.json", build_doc)
 
     dist_assets.bundle_standalone_distribution(output, manifest, harness)

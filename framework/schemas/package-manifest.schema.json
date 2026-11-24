@@ -302,6 +302,35 @@
         "schema": { "type": "string" }
       }
     },
+    "hillclimber": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "e2e_sweep_script",
+        "serving_scripts",
+        "vllm_patch_applier",
+        "accuracy_scripts",
+        "microbenchmark_runner"
+      ],
+      "properties": {
+        "e2e_sweep_script": { "type": "string", "minLength": 1 },
+        "e2e_sweep_companions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "serving_scripts": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "vllm_patch_applier": { "type": "string", "minLength": 1 },
+        "accuracy_scripts": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "microbenchmark_runner": { "type": "string", "minLength": 1 }
+      },
+      "description": "Shipped package scripts sealed or executed by the Hillclimber runtime."
+    },
     "compatibility_targets": {
       "type": "array",
       "items": {

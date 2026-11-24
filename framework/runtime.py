@@ -62,6 +62,7 @@ if _PACKAGE_ROOT not in sys.path:
 try:
     from framework import (agent_contracts, compute, harnesses, items, journal,
                            jsonio, paths, run_state, study, trajectory, utils)
+    from framework.hc import cli as hc_cli
     from framework.hooks import actions, dispatch, events
 except Exception as _import_error:  # noqa: BLE001 - becomes the hook's failure
     # If `hook-dispatch` fails during import (e.g. half-removed package or
@@ -258,6 +259,14 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     # items
     items.register_items_parser(sub)
 
+    # hc (parsed and dispatched by framework.hc.cli)
+    sub.add_parser(
+        "hc",
+        add_help=False,
+        help=
+        "Hillclimber campaign, round, hypothesis, candidate, and review CLI",
+    )
+
     # validate
     p_validate = sub.add_parser(
         "validate", help="Validate a JSON instance against a schema")
@@ -441,6 +450,8 @@ def build_runtime_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Main entrypoint for standalone runtime operations."""
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["hc"]:
+        return hc_cli.main(argv[1:], prog="runtime hc")
     if not _is_hook_dispatch(argv):
         args = build_runtime_parser().parse_args(argv)
     else:

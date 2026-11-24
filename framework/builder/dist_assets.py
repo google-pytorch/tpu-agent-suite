@@ -202,6 +202,14 @@ def copy_runtime_assets(package_dir: Path, output: Path,
             source = utils.rooted(package_dir, str(rel), "script tool path")
             copy_asset(source, output / rel)
 
+    for hc_rel in package_loader.hillclimber_scripts(manifest):
+        if hc_rel in shipped:
+            continue
+        shipped.add(hc_rel)
+        rel = utils.safe_relative(hc_rel, "hillclimber script path")
+        source = utils.rooted(package_dir, str(rel), "hillclimber script path")
+        copy_asset(source, output / rel)
+
     bundle_framework(output / "framework")
     bundle_runtime_schemas(output / "schemas")
     # Session start and the compute contract point at the setup guide, so it
@@ -582,6 +590,10 @@ def build_install_plan(
         script_path = script.get("path", "")
         if Path(script_path).parts:
             asset_roots.add(Path(script_path).parts[0])
+
+    for hc_rel in package_loader.hillclimber_scripts(manifest):
+        if Path(hc_rel).parts:
+            asset_roots.add(Path(hc_rel).parts[0])
 
     skill_names = [skill["name"] for skill in manifest["skills"]]
     spec = harness_install_specs(skill_names, name)[harness]

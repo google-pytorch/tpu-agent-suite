@@ -51,6 +51,14 @@ class TestCoordinationDatabase(unittest.TestCase):
                 self.assertEqual(set(found), expected)
                 self.assertTrue(all(strict == 1 for strict in found.values()))
 
+                for q_name, (q_sql, q_params) in db._load_queries().items():
+                    with self.subTest(query=q_name):
+                        conn.execute(f"EXPLAIN {q_sql}",
+                                     {p: None
+                                      for p in q_params})
+                with self.assertRaises(ValueError):
+                    db.exec_query(conn, "get_campaign_by_id")
+
                 # Deferred `initial_version` FK (insert placeholder 0 -> insert Candidate -> UPDATE)
                 # + nested SAVEPOINT rollback.
                 with db.transaction(conn):
@@ -59,8 +67,8 @@ class TestCoordinationDatabase(unittest.TestCase):
                         "primary_metric_unit, primary_metric_direction, primary_metric_statistic, "
                         "min_replicates, min_win_percentage, noise_floor_percentage, has_accuracy_gate, "
                         "accuracy_gate_metric, accuracy_gate_comparator, accuracy_gate_threshold, "
-                        "accuracy_gate_is_relative, exec_image, exec_e2e_script) VALUES "
-                        "('inference','tps','gke','tok/s','maximum','mean',3,2.0,1.0,1,'acc','gte',-0.01,1,'img','e2e.sh')"
+                        "accuracy_gate_is_relative, exec_image, exec_base_eval_args) VALUES "
+                        "('inference','tps','gke','tok/s','maximum','mean',3,2.0,1.0,1,'acc','gte',-0.01,1,'img','--num_fewshot 5')"
                     ).lastrowid
                     camp_id = conn.execute(
                         "INSERT INTO Campaigns (name, owner, target_model, engine, accelerator, "

@@ -21,6 +21,7 @@ import math
 import os
 import pathlib
 import re
+import shlex
 from typing import Any, Mapping
 
 from framework import jsonio, utils
@@ -29,6 +30,29 @@ from framework.hc import constants
 Path = pathlib.Path
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RESERVED_CONTEXT_FLAG_KEYS = frozenset({
+    "accuracy_metric",
+    "base_client_args",
+    "base_eval_args",
+    "base_server_args",
+    "client_args",
+    "eval_args",
+    "eval_limit",
+    "eval_tasks",
+    "model",
+    "target_model",
+    "weights_path",
+})
+_RESERVED_EVAL_FLAGS = (
+    "--tasks",
+    "-t",
+    "--limit",
+    "-L",
+    "--model",
+    "--model_args",
+    "--output_path",
+    "-o",
+)
 _INFERENCE_CELL_KEYS = ("prefill", "decode", "concurrency")
 _TRAINING_CELL_KEYS = ("sequence_length", "global_batch_size",
                        "per_device_batch_size")
@@ -49,6 +73,22 @@ def load_json_object(path: str | Path, label: str) -> dict[str, Any]:
         raise constants.ValidationError(
             f"{label} must be a JSON object, got {type(raw).__name__}")
     return raw
+
+
+def require_text(
+    raw: Any,
+    label: str,
+    *,
+    max_length: int = constants.MAX_TEXT_LENGTH,
+) -> str:
+    """Require a non-blank string within `max_length`, returning its stripped form."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise constants.ValidationError(f"{label} must be a non-empty string")
+    stripped = raw.strip()
+    if len(stripped) > max_length:
+        raise constants.ValidationError(
+            f"{label} exceeds max length {max_length}")
+    return stripped
 
 
 def _strip_strings(value: Any) -> Any:
@@ -100,6 +140,10 @@ def validate_flags_dict(raw: Any) -> dict[str, Any]:
         if not isinstance(key, str) or not key.strip():
             raise constants.ValidationError(
                 f"{constants.FLAGS_FILENAME} keys must be non-empty strings")
+        if key.strip() in _RESERVED_CONTEXT_FLAG_KEYS:
+            raise constants.ValidationError(
+                f"{constants.FLAGS_FILENAME} cannot override protocol/context key {key!r}"
+            )
         if key == "env":
             if not isinstance(val, dict):
                 raise constants.ValidationError(
@@ -114,8 +158,7 @@ def validate_flags_dict(raw: Any) -> dict[str, Any]:
                     raise constants.ValidationError(
                         f"{constants.FLAGS_FILENAME}.env[{env_k!r}] must be a finite scalar value"
                     )
-        elif key in ("server_args", "client_args", "runtime_args",
-                     "script_args"):
+        elif key in ("server_args", "runtime_args", "script_args"):
             if isinstance(val, str) or (isinstance(val, list) and all(
                     isinstance(item, str) for item in val)):
                 continue
@@ -235,22 +278,45 @@ def validate_protocol_config(
             gate["relative_to"] = float(gate["relative_to"])
 
     spec = out["execution_spec"]
-    for k in ("accuracy_script", "serving_script", "base_server_args",
-              "base_client_args"):
+    for k in ("microbenchmark_target", "base_server_args", "base_client_args",
+              "base_eval_args"):
         spec.setdefault(k, None)
-    for k in ("e2e_script", "accuracy_script", "serving_script"):
-        if spec[k] is not None:
-            spec[k] = _safe_script_relpath(
-                spec[k], f"Protocol Config.execution_spec.{k}")
-    if gate is not None and spec["accuracy_script"] is None:
+    target = spec["microbenchmark_target"]
+    if is_microbenchmark:
+        if target is None:
+            raise constants.ValidationError(
+                "Protocol Config.execution_spec.microbenchmark_target is required on microbenchmark protocols"
+            )
+        target = _safe_script_relpath(
+            target, "Protocol Config.execution_spec.microbenchmark_target")
+        if not target.endswith((".json", ".py")):
+            raise constants.ValidationError(
+                "Protocol Config.execution_spec.microbenchmark_target must be a .json steps plan or .py script"
+            )
+        spec["microbenchmark_target"] = target
+    elif target is not None:
         raise constants.ValidationError(
-            "Protocol Config.execution_spec.accuracy_script is required when accuracy_gate is present"
+            "Protocol Config.execution_spec.microbenchmark_target is only allowed on microbenchmark protocols"
         )
+
+    if spec["base_eval_args"]:
+        try:
+            eval_tokens = shlex.split(spec["base_eval_args"])
+        except ValueError as exc:
+            raise constants.ValidationError(
+                f"invalid shell quoting in Protocol Config.execution_spec.base_eval_args: {exc}"
+            ) from exc
+        eq_prefixes = tuple(f"{f}=" for f in _RESERVED_EVAL_FLAGS)
+        for tok in eval_tokens:
+            if tok in _RESERVED_EVAL_FLAGS or tok.startswith(eq_prefixes):
+                raise constants.ValidationError(
+                    f"Protocol Config.execution_spec.base_eval_args cannot specify {tok!r} (managed by accuracy protocol)"
+                )
     return out
 
 
 def validate_hypothesis_config(raw: dict[str, Any]) -> dict[str, Any]:
-    """Validate a Hypothesis JSON object for `hc.py hypothesis add`."""
+    """Validate a Hypothesis JSON object for `runtime.py hc hypothesis add`."""
     out = _validate_structure(raw, "hc-hypothesis.json", "Hypothesis")
     for k in ("target_canonical_ops", "target_relayout_edges", "evidence",
               "target_code_refs"):

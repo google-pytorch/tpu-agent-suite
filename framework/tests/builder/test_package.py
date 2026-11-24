@@ -543,6 +543,71 @@ class TestFrontmatterSchema(helpers.CompilerTestCase):
                 self.assertIn("invalid YAML frontmatter in " + label, message)
                 self.assertIn(field, message)
 
+    def test_hillclimber_manifest_verification_and_subset_bundling(self):
+        pkg_dir = self._create_valid_package()
+        manifest = self._read_manifest(pkg_dir)
+        hc_cfg = {
+            "e2e_sweep_script": "scripts/common/serving_sweep.py",
+            "e2e_sweep_companions": ["scripts/common/serving_benchmark.py"],
+            "serving_scripts": {
+                "vllm": "scripts/common/serve_vllm.sh"
+            },
+            "vllm_patch_applier": "scripts/common/apply_vllm_patch.sh",
+            "accuracy_scripts": {
+                "vllm": "scripts/accuracy-check/eval_recipe.sh"
+            },
+            "microbenchmark_runner": "scripts/micro/forward_run.py",
+        }
+        manifest["hillclimber"] = hc_cfg
+        self._write_manifest(pkg_dir, manifest)
+
+        with self.assertRaisesRegex(utils.TpuAgentSuiteError,
+                                    "hillclimber script does not exist"):
+            verify.verify_package(pkg_dir)
+
+        for rel in package_loader.hillclimber_scripts(manifest):
+            target = pkg_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        verify.verify_package(pkg_dir)
+
+        (pkg_dir / "skills" / "solo").mkdir(parents=True, exist_ok=True)
+        (pkg_dir / "skills" / "solo" / "SKILL.md").write_text(
+            "---\nname: solo\ndescription: Solo skill with no scripts\n---\nSolo.",
+            encoding="utf-8",
+        )
+        out = self.temp_dir / "dist_hc_subset"
+        self.assertEqual(
+            compiler.main([
+                "translate",
+                str(pkg_dir),
+                "--skills",
+                "solo",
+                "--harness",
+                "claude-code",
+                "--output",
+                str(out),
+            ]),
+            0,
+        )
+        build_doc = json.loads(
+            (out / "tpu-agent-suite-build.json").read_text(encoding="utf-8"))
+        self.assertEqual(build_doc["hillclimber"], hc_cfg)
+        for rel in package_loader.hillclimber_scripts(manifest):
+            self.assertTrue((out / rel).is_file(), rel)
+        for sql_file in ("schema.sql", "queries.sql"):
+            self.assertTrue((out / "framework" / "hc" / sql_file).is_file(),
+                            sql_file)
+        install_doc = json.loads(
+            (out / "tpu-agent-suite-install.json").read_text(encoding="utf-8"))
+        self.assertIn(
+            "scripts",
+            {
+                c["source"]
+                for c in install_doc["copies"] if c["store"] == "central"
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

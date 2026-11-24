@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Detached bare-repository Git operations and worktree hygiene for `hc.py`."""
+"""Detached bare-repository Git operations and worktree hygiene for `runtime.py hc`."""
 
 from __future__ import annotations
 
@@ -248,15 +248,49 @@ def write_worktree_state(
     jsonio.write_json(get_worktree_state_path(campaign_id), payload)
 
 
-def _copy_code_dir_into_worktree(code_dir: Path, src_dir: Path) -> None:
-    """Copy `code_dir` into `src_dir`, omitting any `.git` entries."""
+def verify_init_worktree_inputs(code_dir: Path, workspace: Path) -> bool:
+    """Validate `--code-dir` and `<workspace>/src/` before initializing a campaign repo.
+
+    Returns True when `<workspace>/src/` does not yet hold user files and should
+    be removed if initialization rolls back, or False for an in-place
+    `--code-dir == <workspace>/src` initialization so rollback never deletes user code.
+    """
+    if workspace.is_symlink():
+        raise constants.ValidationError(f"workspace is a symlink: {workspace}")
     paths.verify_no_symlinks(code_dir, "--code-dir", ignore_git_dir=True)
+    src_dir = get_worktree_dir(workspace)
     if src_dir.is_symlink() or src_dir.parent.is_symlink():
         raise constants.ValidationError(
             f"worktree path is a symlink: {src_dir}")
+    if src_dir.exists() and not src_dir.is_dir():
+        raise constants.ValidationError(
+            f"worktree path must be a directory, got file: {src_dir}")
     code_resolved = code_dir.resolve()
     src_resolved = src_dir.resolve()
-    if code_resolved == src_resolved:
+    cleanup_src = False
+    if code_resolved != src_resolved:
+        if src_resolved.is_relative_to(code_resolved):
+            raise constants.ValidationError(
+                f"worktree directory ({src_dir}) cannot be nested inside --code-dir ({code_dir})"
+            )
+        if src_dir.exists() and any(src_dir.iterdir()):
+            raise constants.InvalidStateError(
+                f"worktree directory {src_dir} already exists and is non-empty"
+            )
+        cleanup_src = True
+    flags_file = code_dir / constants.FLAGS_FILENAME
+    if flags_file.exists():
+        schemas.validate_flags_dict(
+            schemas.load_json_object(flags_file, constants.FLAGS_FILENAME))
+    return cleanup_src
+
+
+def _copy_code_dir_into_worktree(code_dir: Path, workspace: Path) -> Path:
+    """Copy `code_dir` into `<workspace>/src/`, omitting any `.git` entries."""
+    # Re-checked here to guard direct `init_campaign_repo` callers outside `open_campaign`.
+    verify_init_worktree_inputs(code_dir, workspace)
+    src_dir = get_worktree_dir(workspace)
+    if code_dir.resolve() == src_dir.resolve():
         # Strip any top-level or nested `.git` metadata in place so `<workspace>/src`
         # functions purely as a detached working tree.
         for dirpath, dirnames, filenames in os.walk(src_dir,
@@ -267,14 +301,7 @@ def _copy_code_dir_into_worktree(code_dir: Path, src_dir: Path) -> None:
                 dirnames.remove(".git")
             if ".git" in filenames:
                 (current / ".git").unlink()
-        return
-    if src_resolved.is_relative_to(code_resolved):
-        raise constants.ValidationError(
-            f"worktree directory ({src_dir}) cannot be nested inside --code-dir ({code_dir})"
-        )
-    if src_dir.exists() and any(src_dir.iterdir()):
-        raise constants.InvalidStateError(
-            f"worktree directory {src_dir} already exists and is non-empty")
+        return src_dir
     shutil.copytree(
         code_dir,
         src_dir,
@@ -282,6 +309,7 @@ def _copy_code_dir_into_worktree(code_dir: Path, src_dir: Path) -> None:
         ignore=shutil.ignore_patterns(".git"),
         dirs_exist_ok=True,
     )
+    return src_dir
 
 
 def pin_candidate_ref(campaign_id: int | str, candidate_id: int,
@@ -397,12 +425,7 @@ def init_campaign_repo(
             f"bare git repository already exists for campaign {cid}: {git_dir}"
         )
 
-    ws_path = Path(workspace)
-    if ws_path.is_symlink():
-        raise constants.ValidationError(f"workspace is a symlink: {ws_path}")
-    src_dir = get_worktree_dir(ws_path)
-
-    _copy_code_dir_into_worktree(Path(code_dir), src_dir)
+    src_dir = _copy_code_dir_into_worktree(Path(code_dir), Path(workspace))
 
     flags_path = src_dir / constants.FLAGS_FILENAME
     if not flags_path.exists():
