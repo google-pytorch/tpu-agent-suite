@@ -114,6 +114,35 @@ class Overrides(unittest.TestCase):
                          Deploy(dcp=2))
 
 
+class CarriedServedArgs(unittest.TestCase):
+    """The recurrent-state dtype the server ran with reaches every twin, adapter or not."""
+
+    def _snap(self):
+        p = sorted(
+            glob.glob(
+                os.path.join(SCRIPTS, "Qwen3.5-397B-A17B-FP8", "config",
+                             "*.source.json")))
+        if not p:
+            self.skipTest("no Qwen3.5-397B-A17B-FP8 reference snapshot")
+        return json.load(open(p[0]))
+
+    def test_mamba_ssm_cache_dtype_is_carried(self):
+        snap = self._snap()
+        snap["recipe"]["server_args"]["mamba-ssm-cache-dtype"] = "bfloat16"
+        cfg = derive.derive(snap, "Qwen3.5-397B-A17B-FP8")
+        tw = project.project(cfg, snap,
+                             derive.load_model("Qwen3.5-397B-A17B-FP8"), 8)
+        self.assertEqual(tw["twin"]["server_args"]["mamba-ssm-cache-dtype"],
+                         "bfloat16")
+
+    def test_absent_flag_is_not_invented(self):
+        snap = self._snap()
+        cfg = derive.derive(snap, "Qwen3.5-397B-A17B-FP8")
+        tw = project.project(cfg, snap,
+                             derive.load_model("Qwen3.5-397B-A17B-FP8"), 8)
+        self.assertNotIn("mamba-ssm-cache-dtype", tw["twin"]["server_args"])
+
+
 def _reference():
     p = sorted(
         glob.glob(
@@ -572,6 +601,21 @@ class VllmServerLog(unittest.TestCase):
         # no aiperf export: no server counters and no step slices (no metrics poller)
         self.assertEqual(snap["server"], {})
         self.assertIsNone(snap["step_slices"])
+
+    def test_snapshot_reads_the_tpu_kv_cache_line(self):
+        # Builds whose platform reports itself as TPU log "TPU KV cache size"; missing it lost
+        # the served pool, and the twin booted with all of HBM as KV.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            job, _ = self._job(tmp)
+            log = os.path.join(job, "logs", "server.log")
+            with open(log) as f:
+                text = f.read().replace("GPU KV cache size: 1,000",
+                                        "TPU KV cache size: 851,456")
+            with open(log, "w") as f:
+                f.write(text)
+            snap = jobdata.snapshot("j-srv", root=tmp)
+        self.assertEqual(snap["log"]["kv_pool_tokens"], 851456)
 
 
 class ServingBenchmarkSummary(unittest.TestCase):

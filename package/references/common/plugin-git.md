@@ -68,8 +68,10 @@ python3 {{script:common/plugin_source.py}} base <repo> <work>/jobs/<job_id> --im
 git -C <repo> switch stack 2>/dev/null || git -C <repo> switch -c stack base
 ```
 
-Probe exit 7 returns `blocked` with the probe's message: the image's plugin is not a git checkout,
-or has modified tracked files. A refused claim also returns `blocked`, with the claim's output. A
+Probe exit 7 returns `blocked` with the probe's message: the image's plugin checkout has modified
+tracked files, or its tree could not be bundled. A plugin that is not a git checkout is not a
+block: the probe commits its tree once and `plugin.json` says `synthesized`; report that in the
+summary, since the base then has no upstream history. A refused claim also returns `blocked`, with the claim's output. A
 repo holds one base; `base` exit 2 for another image is `invalid_input`. The repo's own work dir
 stays on `stack`: return it as `worktree`, and `stack` cut as in `ref` as `plugin`.
 

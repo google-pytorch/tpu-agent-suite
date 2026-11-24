@@ -114,6 +114,18 @@ The recipe has no default `EVAL_CMD` and exits non-zero without one.
 
 Both baselines: commit `ec4bcecf78`, lm_eval 0.5.0.dev1, n=1400, **0 null-content answers**.
 
+**Porting one of these to a model with no protocol** (Mistral-Small-24B, 2026-11-18), two
+changes, both needed on the same host as the server:
+
+- **Skip lm_eval's torch seed: `--seed 42,42,None,42`.** `--seed 42` also calls
+  `torch.manual_seed`, which initializes torch_tpu and tries to open a TPU device the server
+  already holds; the eval dies before scoring. An API model uses no torch randomness, so the
+  python, numpy and fewshot seeds keep the run reproducible.
+- **No `chat_template_kwargs` for a model served with the Mistral tokenizer**
+  (`--tokenizer-mode mistral`, the default for Mistral checkpoints). vLLM answers every request
+  with HTTP 400 ("chat_template is not supported for Mistral tokenizers"). Drop that
+  `--gen_kwargs` entry; a model with no thinking mode loses nothing.
+
 ### Qwen3.5-397B-A17B-FP8, 1 node
 
 ```

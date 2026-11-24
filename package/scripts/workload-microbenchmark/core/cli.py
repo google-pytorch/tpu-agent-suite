@@ -336,13 +336,15 @@ TOP_JOB_BUDGET_S = 300
 #: the one file a forward-cmd recipe returns: its output directory, packed
 OUT_TGZ = "wmb_out.tgz"
 
-#: the recipe forward-cmd writes next to the plan; it runs on the TPU host, beside its inputs
+#: the recipe forward-cmd writes next to the plan; it runs on the TPU host and finds its inputs
+#: beside itself or, on a backend that mounts it elsewhere, in its working directory
 _RECIPE = '''#!/usr/bin/env python3
 """workload-microbenchmark recipe, written by `cli.py forward-cmd` for {plan}.
 
 Runs forward_run.py on the TPU host and packs its output directory into {out}, the
-job's one output. The inputs of the job are in the same directory as this file. The
-recipe exits with the exit code of forward_run.py.
+job's one output. The inputs of the job are beside this file, or, where the backend
+mounts the recipe elsewhere (gke_job runs it from /app and stages inputs in the working
+directory), in the working directory. The recipe exits with the exit code of forward_run.py.
 
 The recipe runs forward_run.py through forward_run.supervise, which stops a run whose
 engine start-up fails or lasts longer than START_TIMEOUT_S seconds. supervise writes
@@ -352,6 +354,8 @@ import sys
 import tarfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if not os.path.exists(os.path.join(HERE, "forward_run.py")):
+    HERE = os.getcwd()
 os.chdir(HERE)
 sys.path.insert(0, HERE)
 from forward_run import supervise  # noqa: E402
@@ -866,25 +870,27 @@ def cmd_points(a) -> int:
     d = Deploy(**cfg["real_deploy"])
     mod = derive_mod.load_model(cfg["model_dir"])
     cache_hit = getattr(mod, "cache_hit", None)
-    # a serving_benchmark.py job records no step mix: its cells are already fixed shapes
-    if not a.point and not snap.get("step_slices") and snap.get(
-            "summary_cells"):
-        a.point = [
-            f"{c['cell']}=0/{c['isl']}/{c['osl']}@{c['concurrency']}"
-            for c in snap["summary_cells"]
-        ]
-        print(
-            "no step mix: the source job is a serving_benchmark.py run (fixed lengths and "
-            "concurrency, every prompt new); one point per benchmark cell: " +
-            ", ".join(a.point))
-    # the workload: the job's step mix (core/mix.py), unless explicit --point shapes replace it
+    # the workload: the job's step mix (core/mix.py), unless explicit --point shapes replace it.
+    # A serving_benchmark.py job records no step mix (fixed lengths and concurrency, every
+    # prompt new, per-replicate totals only): its mix is modelled per engine from its cells,
+    # so each cell has a step count and a share the cost model can weigh.
     mixd = None
+    summary_only = not snap.get("step_slices") and snap.get("summary_cells")
     if not a.point or a.with_mix:
         try:
-            mixd = mix_mod.build(snap, d, cache_hit)
+            mixd = (mix_mod.from_summary_cells(snap["summary_cells"], d,
+                                               (snap.get("log")
+                                                or {}).get("kv_pool_tokens"))
+                    if summary_only else mix_mod.build(snap, d, cache_hit))
         except ValueError as e:
             print(f"! {e}", file=sys.stderr)
             return 2
+        if summary_only:
+            print(
+                "no step mix: the source job is a serving_benchmark.py run; its mix is "
+                "modelled per engine from its cells")
+            for n in mixd["admission"]:
+                print(f"  {n}")
     pts = [steps.parse_point(x) for x in a.point or []]
     # the drafter follows the source job: on when it served with speculative decoding
     if a.mtp is None:

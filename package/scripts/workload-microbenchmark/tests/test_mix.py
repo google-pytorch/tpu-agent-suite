@@ -394,5 +394,77 @@ class TokenPaddings(unittest.TestCase):
             bucket(4097, token_paddings(4096))
 
 
+class SummaryCellsMix(unittest.TestCase):
+    """A serving_benchmark.py source (Mistral-Small-24B, TP2xDP4, mns 256, 128-token pages, an
+    851,456-token pool per engine): its mix is modelled per engine, with admission applied."""
+
+    D = None
+
+    def setUp(self):
+        from core.deploy import Deploy
+        self.D = Deploy(tp=2, dp=4, block_size=128, mnbt=2048, mns=256)
+        self.cells = [
+            {
+                "cell": "isl8192_osl1024_c128",
+                "isl": 8192,
+                "osl": 1024,
+                "concurrency": 128,
+                "requests": 512,
+                "duration_s": 120.0
+            },
+            {
+                "cell": "isl8192_osl1024_c1024",
+                "isl": 8192,
+                "osl": 1024,
+                "concurrency": 1024,
+                "requests": 2048,
+                "duration_s": 360.0
+            },
+        ]
+
+    def test_client_concurrency_is_split_over_dp(self):
+        from core import mix
+        c, why = mix.admitted_concurrency(128, 8192, 1024, self.D, 851456)
+        self.assertEqual(c, 32)
+        self.assertTrue(any("4 DP engines" in w for w in why))
+
+    def test_kv_admission_caps_the_batch(self):
+        from core import mix
+
+        # 256 per engine would need 256 x 8,704 tokens; the pool holds 97 such requests
+        c, why = mix.admitted_concurrency(1024, 8192, 1024, self.D, 851456)
+        self.assertEqual(c, 851456 // 8704)
+        self.assertTrue(any("KV admission" in w for w in why))
+        # no pool known: only max-num-seqs caps it
+        c, _ = mix.admitted_concurrency(1024, 8192, 1024, self.D, None)
+        self.assertEqual(c, 256)
+
+    def test_cells_have_steps_and_shares(self):
+        from core import mix
+        m = mix.from_summary_cells(self.cells, self.D, 851456)
+        names = [c["name"] for c in m["cells"]]
+        self.assertEqual(names, [
+            "isl8192_osl1024_c128-mixed", "isl8192_osl1024_c128-decode",
+            "isl8192_osl1024_c1024-mixed", "isl8192_osl1024_c1024-decode"
+        ])
+        self.assertAlmostEqual(sum(c["share"] for c in m["cells"]),
+                               1.0,
+                               places=2)
+        for c in m["cells"]:
+            self.assertGreater(c["steps"], 0)
+            self.assertLessEqual(c["batch"], 97)
+        dec = m["cells"][3]
+        self.assertEqual(dec["batch"], 97)
+        self.assertEqual(m["cells"][2]["batch"], 96)
+
+    def test_mix_steps_accepts_the_modelled_mix(self):
+        from core import mix, steps
+        m = mix.from_summary_cells(self.cells, self.D, 851456)
+        pl = steps.plan([], self.D, 1.0, "test", mix=m, top=2)
+        kept = [s for s in pl["points"] if s.get("cell")]
+        self.assertEqual(len(kept), 2)
+        self.assertGreater(pl["mix"]["share_kept"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

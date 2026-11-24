@@ -37,6 +37,12 @@ from .deploy import Deploy, kv_per_token_rank, per_rank
 
 GiB = 1 << 30
 
+#: Served flags every twin carries, whatever the adapter: they set the dtype of the recurrent
+#: state the twin's engine allocates. Without `mamba-ssm-cache-dtype` a hybrid model's GDN state
+#: ran float32 against a bfloat16 server (twice the bytes per page), and Qwen3.5-397B's fused
+#: GDN kernel ran out of scoped VMEM at start-up.
+CORE_CARRY_ARGS = ("mamba-ssm-cache-dtype", "mamba-cache-dtype")
+
 
 def _cmp(real: Any, twin: Any) -> str:
     if real == twin:
@@ -215,7 +221,8 @@ def project(cfg: dict, snap: dict, mod, twin_world: int = 8) -> dict[str, Any]:
     served = (snap.get("recipe") or {}).get("server_args") or {}
     carried = {
         k: served[k]
-        for k in getattr(mod, "TWIN_CARRY_ARGS", []) if k in served
+        for k in (*CORE_CARRY_ARGS, *getattr(mod, "TWIN_CARRY_ARGS", []))
+        if k in served
     }
     server_args = {**carried, **server_args}
     server_args = {k: v for k, v in server_args.items() if v is not None}

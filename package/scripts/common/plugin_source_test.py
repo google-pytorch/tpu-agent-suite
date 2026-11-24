@@ -154,10 +154,48 @@ class PluginSourceTest(unittest.TestCase):
             _read(os.path.join(root, "vllm_torchtpu", "ops", "kernel.py")),
             "BLOCK = 512\n")
 
-    def test_no_git_or_modified_tracked_files_exit_7(self):
-        root = self._plugin(git=False)
-        self.assertEqual(self._probe(root).returncode, 7)
-        shutil.rmtree(self.image)
+    def test_a_plugin_without_git_is_bundled_as_one_commit_of_its_tree(self):
+        root = self._plugin(prefix="src", git=False)
+        _write(os.path.join(self.image, "pyproject.toml"), "[project]\n")
+        r = self._probe(root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        meta = json.loads(r.stdout)
+        self.assertTrue(meta["synthesized"])
+        self.assertEqual(meta["prefix"], "src")
+        self.assertEqual(os.path.realpath(meta["path"]),
+                         os.path.realpath(self.image))
+        # The image's tree is left as it was: no .git written into it.
+        self.assertFalse(os.path.exists(os.path.join(self.image, ".git")))
+        rec = self._base(root)
+        self.assertEqual(rec["base_sha"], meta["sha"])
+        self.assertEqual(
+            _read(
+                os.path.join(self.repo, "src", "vllm_torchtpu", "ops",
+                             "kernel.py")), "BLOCK = 128\n")
+        # Same tree, same sha: a second probe of the image gives the same base.
+        again = json.loads(self._probe(root).stdout)
+        self.assertEqual(again["sha"], meta["sha"])
+        sha = self._commit("src/vllm_torchtpu/ops/kernel.py", "BLOCK = 512\n",
+                           "tile")
+        r, patch = self._diff(sha, root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._apply(patch, root).returncode, 0)
+        self.assertEqual(
+            _read(os.path.join(root, "vllm_torchtpu", "ops", "kernel.py")),
+            "BLOCK = 512\n")
+
+    def test_an_installed_copy_without_a_project_bundles_only_the_plugin(self):
+        root = self._plugin(prefix="site-packages", git=False)
+        _write(os.path.join(root, "other_pkg", "__init__.py"), "")
+        r = self._probe(root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self._base(root)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "other_pkg")))
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(self.repo, "vllm_torchtpu", "ops", "kernel.py")))
+
+    def test_modified_tracked_files_exit_7(self):
         root = self._plugin()
         _write(os.path.join(root, "vllm_torchtpu", "ops", "kernel.py"),
                "BLOCK = 64\n")

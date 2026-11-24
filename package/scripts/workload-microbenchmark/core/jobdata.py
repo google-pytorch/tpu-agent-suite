@@ -427,7 +427,10 @@ _SCHED = re.compile(
 #: (platforms/tpu_platform.py), e.g. 256 under the batched-RPA CUSTOM backend.
 _LOG_FACTS = {
     "kv_pool_tokens":
-    (re.compile(r"GPU KV cache size: ([\d,]+) tokens"), "GPU KV cache size"),
+    # vLLM's kv_cache_utils names the device: "GPU KV cache size" upstream, "TPU KV cache size"
+    # in builds whose platform reports itself as TPU.
+    (re.compile(r"[GT]PU KV cache size: ([\d,]+) tokens"),
+     ("GPU KV cache size", "TPU KV cache size")),
     "block_size_resolved":
     (re.compile(r"(?:TPU block_size derivation path: .*final_block_size=|"
                 r"Using KV cache block size: )(\d+)"),

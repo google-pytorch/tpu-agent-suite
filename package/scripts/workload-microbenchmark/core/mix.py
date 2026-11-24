@@ -354,3 +354,110 @@ def build(snap: dict, d: Deploy, cache_hit=None) -> dict[str, Any]:
         "cells":
         cells,
     }
+
+
+def admitted_concurrency(concurrency: int, isl: int, osl: int, d: Deploy,
+                         kv_pool_tokens: int | None) -> tuple[int, list[str]]:
+    """Requests one engine holds at once when a client keeps `concurrency` requests open.
+
+    The client's concurrency is spread over the DP engines, so one engine sees ceil(C / dp). It
+    can hold no more than max-num-seqs, and no more than its KV pool admits: each running
+    request holds the pages of its prompt plus, on average, half its output (the decode rows of
+    a closed loop are mid-generation). Returns the count and why it is below ceil(C / dp)."""
+    per_engine = math.ceil(concurrency / max(d.dp, 1))
+    why = []
+    if d.dp > 1:
+        why.append(f"client concurrency {concurrency} over {d.dp} DP engines")
+    c = per_engine
+    if c > d.mns:
+        c = d.mns
+        why.append(f"capped at max-num-seqs {d.mns}")
+    if kv_pool_tokens:
+        page = max(d.block_size, 1)
+        held = math.ceil((isl + osl // 2) / page) * page
+        fit = max(1, kv_pool_tokens // held)
+        if c > fit:
+            c = fit
+            why.append(
+                f"capped at KV admission {fit} ({kv_pool_tokens:,}-token pool, "
+                f"{held:,} tokens held per request)")
+    return c, why
+
+
+def from_summary_cells(cells: list[dict[str, Any]], d: Deploy,
+                       kv_pool_tokens: int | None) -> dict[str, Any]:
+    """The step mix of a serving_benchmark.py job (fixed lengths and concurrency, every prompt
+    new, per-replicate totals only), MODELLED per engine so the cost model has cells to weigh.
+
+    Per benchmark cell, one mixed cell (each prompt's prefill chunks beside the other running
+    requests' decode rows) and one decode cell (every admitted request decoding), both at the
+    engine's admitted concurrency (`admitted_concurrency`). Step counts follow a closed loop:
+    a prompt of `isl` tokens takes ceil(isl / chunk) mixed steps and its `osl` tokens are
+    produced by decode steps shared by the admitted requests. A cell's share of busy time is its
+    share of the sweep's duration, split between its mixed and decode cells by step count.
+    No step was measured: `measured_step_ms` is None."""
+    rows = 1 + (d.spec_tokens if d.spec_method else 0)
+    total_s = sum(c["duration_s"] for c in cells) or 1.0
+    out, notes = [], []
+    for c in cells:
+        isl, osl = c["isl"], c["osl"]
+        conc, why = admitted_concurrency(c["concurrency"], isl, osl, d,
+                                         kv_pool_tokens)
+        if why:
+            notes.append(f"{c['cell']}: {conc} per engine ({'; '.join(why)})")
+        reqs = c["requests"] / max(d.dp, 1)
+        chunk = d.mnbt - (conc - 1) * rows
+        if chunk <= 0:
+            raise ValueError(
+                f"{c['cell']}: {conc - 1} decodes x {rows} rows fill the "
+                f"budget {d.mnbt}")
+        mixed_steps = reqs * math.ceil(isl / chunk)
+        decode_steps = reqs * osl / rows / conc
+        share = c["duration_s"] / total_s
+        both = mixed_steps + decode_steps or 1.0
+        ctx = isl + osl // 2
+        out.append({
+            "name": f"{c['cell']}-mixed",
+            "kind": "mixed",
+            "class": "mixed",
+            "batch": conc - 1,
+            "context": ctx,
+            "chunk": chunk,
+            "prefix": max(0, (math.ceil(isl / chunk) - 1) * chunk),
+            "steps": round(mixed_steps, 1),
+            "measured_step_ms": None,
+            "share": round(share * mixed_steps / both, 4),
+        })
+        out.append({
+            "name": f"{c['cell']}-decode",
+            "kind": "decode",
+            "class": f"D{conc}",
+            "batch": conc,
+            "context": ctx,
+            "steps": round(decode_steps, 1),
+            "measured_step_ms": None,
+            "share": round(share * decode_steps / both, 4),
+        })
+    return {
+        "_what":
+        "the steps a serving_benchmark.py job's engines ran, MODELLED per engine from its "
+        "cells (core/mix.py from_summary_cells): no step was measured",
+        "rows_per_decode":
+        rows,
+        "window_s":
+        round(total_s, 1),
+        "busy_s":
+        round(total_s, 1),
+        "idle_s":
+        0.0,
+        "measured_share_of_wall":
+        None,
+        "measured_step_ms":
+        None,
+        "method":
+        "closed loop per benchmark cell; shares from cell durations",
+        "admission":
+        notes,
+        "cells":
+        out,
+    }

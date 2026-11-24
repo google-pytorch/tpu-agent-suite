@@ -94,6 +94,25 @@ class ForwardCompat(unittest.TestCase):
             cachelocal.key("img", ["--a"], {"LIBTPU_INIT_ARGS": "--y"}))
 
 
+class ReorderThreshold(unittest.TestCase):
+    """Verify windows count as decode only when the runner reorders (threshold > 1)."""
+
+    def test_none_and_absent_mean_no_reorder(self):
+        from core import forward_run
+
+        class R:
+            pass
+
+        r = R()
+        self.assertFalse(forward_run._reorders_windows(r))
+        r.reorder_batch_threshold = None
+        self.assertFalse(forward_run._reorders_windows(r))
+        r.reorder_batch_threshold = 1
+        self.assertFalse(forward_run._reorders_windows(r))
+        r.reorder_batch_threshold = 4
+        self.assertTrue(forward_run._reorders_windows(r))
+
+
 class CachePrune(unittest.TestCase):
 
     def test_cold_save_keeps_tier3_drops_own_dir_restored_save_the_reverse(
@@ -890,6 +909,79 @@ class FillPages(unittest.TestCase):
             self.assertFalse(
                 torch.equal(x.contiguous().view(torch.uint8),
                             y.contiguous().view(torch.uint8)))
+
+
+class LayoutPlanner(unittest.TestCase):
+    """Both vllm-torchtpu runner APIs for the sequence layout planner."""
+
+    def test_module_helper_on_older_plugins(self):
+        import types
+
+        from core import forward_run as fr
+        planner = object()
+        tr = types.SimpleNamespace(
+            _get_sequence_layout_planner_for_runner=lambda r: planner)
+        self.assertIs(fr._layout_planner(tr, types.SimpleNamespace()), planner)
+
+    def test_runner_attribute_on_newer_plugins(self):
+        import types
+
+        from core import forward_run as fr
+        planner = object()
+        r = types.SimpleNamespace(sequence_layout_planner=planner,
+                                  pcp_manager=None)
+        self.assertIs(fr._layout_planner(types.SimpleNamespace(), r), planner)
+
+    def test_pcp_manager_runner_is_refused_by_name(self):
+        import types
+
+        from core import forward_run as fr
+        r = types.SimpleNamespace(sequence_layout_planner=None,
+                                  pcp_manager=object())
+        with self.assertRaisesRegex(RuntimeError, "PCP manager"):
+            fr._layout_planner(types.SimpleNamespace(), r)
+
+
+class RecipeFindsItsInputs(unittest.TestCase):
+    """forward-cmd's recipe runs beside its inputs, or from a mount with inputs in cwd."""
+
+    def _run(self, recipe_dir, inputs_dir):
+        import subprocess
+        import tarfile
+
+        from core import cli
+        with open(os.path.join(inputs_dir, "forward_run.py"), "w") as f:
+            f.write(
+                "import os\n"
+                "def supervise(args, out, timeout):\n"
+                "    os.makedirs(out, exist_ok=True)\n"
+                "    open(os.path.join(out, 'result.json'), 'w').write('{}')\n"
+                "    return 0\n")
+        recipe = os.path.join(recipe_dir, "recipe.py")
+        with open(recipe, "w") as f:
+            f.write(
+                cli._RECIPE.format(plan="plan.steps.json",
+                                   out=cli.OUT_TGZ,
+                                   image="img@sha256:0",
+                                   args=[],
+                                   start_timeout_s=1,
+                                   apply="",
+                                   guard=""))
+        rc = subprocess.call([sys.executable, recipe], cwd=inputs_dir)
+        self.assertEqual(rc, 0)
+        with tarfile.open(os.path.join(inputs_dir, cli.OUT_TGZ)) as t:
+            self.assertIn("./wmb/forward/result.json", t.getnames())
+
+    def test_inputs_beside_the_recipe(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self._run(d, d)
+
+    def test_recipe_mounted_away_from_its_inputs(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as mount, \
+                tempfile.TemporaryDirectory() as work:
+            self._run(mount, work)
 
 
 if __name__ == "__main__":

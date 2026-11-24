@@ -632,6 +632,27 @@ def _prepare_sampling(r, rows: list, ids, verify: int, sampling: dict) -> dict:
     }
 
 
+def _layout_planner(tr, r):
+    """The runner's sequence layout planner, on either plugin API.
+
+    Older vllm-torchtpu builds expose it through a module helper in
+    `tpu_runner`; newer ones keep it on the runner as
+    `sequence_layout_planner`. With `USE_TPU_PCP_MANAGER` set, the runner
+    has a PCP manager instead and no planner; the twin does not drive that
+    path, so say so rather than fail on a missing attribute.
+    """
+    get = getattr(tr, "_get_sequence_layout_planner_for_runner", None)
+    if get is not None:
+        return get(r)
+    planner = getattr(r, "sequence_layout_planner", None)
+    if planner is not None:
+        return planner
+    raise RuntimeError(
+        "forward_run: this vllm-torchtpu runner has no sequence layout planner"
+        " (USE_TPU_PCP_MANAGER set?); the twin does not support the PCP"
+        " manager path")
+
+
 def _sample_stage(r, hidden, plan, st: dict):
     """Executed on a rank: one serving step's sample stage on `hidden` (the backbone output),
     through the runner's own compiled functions, the calls `execute_model` + `sample_tokens` make:
@@ -645,7 +666,7 @@ def _sample_stage(r, hidden, plan, st: dict):
     Returns the sampled token tensor (not synchronized)."""
     import torch
     from vllm_torchtpu.runner import tpu_runner as tr
-    planner = tr._get_sequence_layout_planner_for_runner(r)
+    planner = _layout_planner(tr, r)
     sel = planner.maybe_select_logits_hidden_states(hidden, plan, st["idx"])
     if sel is not None:
         logits = r.compute_logits_from_hidden_states(sel)
@@ -673,6 +694,13 @@ def _sample_stage(r, hidden, plan, st: dict):
 def _last_sampling(worker):
     """Executed on every rank: the sample stage's wall ms per iteration of the last batch."""
     return getattr(worker.model_runner, "_wmb_sample_ms", None)
+
+
+def _reorders_windows(runner) -> bool:
+    """Whether ragged paged attention counts MTP verify windows as decode: the runner's
+    `reorder_batch_threshold` > 1. Newer runners set it to None, which means no reorder, the same
+    as an absent attribute."""
+    return (getattr(runner, "reorder_batch_threshold", None) or 1) > 1
 
 
 def _run_batch(worker,
@@ -730,7 +758,7 @@ def _run_batch(worker,
     n_win = n_dec
     while verify > 1 and n_win < len(q) and 1 < q[n_win] <= verify:
         n_win += 1
-    rpa_dec = n_win if getattr(r, "reorder_batch_threshold", 1) > 1 else n_dec
+    rpa_dec = n_win if _reorders_windows(r) else n_dec
 
     gen = torch.Generator().manual_seed(1234 + 7919 * len(q) + real)
     ids = torch.zeros((num_tokens, ), dtype=torch.int32)
@@ -820,8 +848,9 @@ def _run_batch(worker,
         combined = torch.tensor(dist + [n_win, n_win, len(q)],
                                 dtype=torch.int32).to(r.device)
         request_distribution, mamba_dist = combined[0:3], combined[3:6]
-    plan = tr._get_sequence_layout_planner_for_runner(r).prepare_dummy(
-        num_tokens=num_tokens, num_reqs=num_reqs, kv_cache_initialized=True)
+    plan = _layout_planner(tr, r).prepare_dummy(num_tokens=num_tokens,
+                                                num_reqs=num_reqs,
+                                                kv_cache_initialized=True)
     r._attn_metadata_builder_ctx = tr.AttentionMetadataBuilderContext(
         num_reqs=len(q),
         start_index=0,

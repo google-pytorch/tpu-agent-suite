@@ -18,11 +18,14 @@
   plugin_source.py local <checkout> --image IMAGE [--path IN_IMAGE_PATH]
   plugin_source.py diff <repo> <ref> <out.patch> [--from REV]
 
-`probe` runs on the image, with its Python. The installed plugin must be a git
-checkout with no modified tracked files; untracked files and commits no remote
-has are fine. It writes HEAD's history as a git bundle, and beside it
+`probe` runs on the image, with its Python. An installed plugin in a git
+checkout must have no modified tracked files; untracked files and commits no
+remote has are fine. It writes HEAD's history as a git bundle, and beside it
 plugin.json: the sha, the plugin's path inside the repo, the remote, and the
-untracked files. `base` fetches the bundle into <repo> (created when missing)
+untracked files. A plugin that is not in a git checkout (an image built from a
+source copy) is committed once, from outside its tree, under the fixed author
+and date `local` uses, and that one commit is the bundle; plugin.json says
+`synthesized`. `base` fetches the bundle into <repo> (created when missing)
 and tags that sha `base`; its record keeps the checkout's in-image `path`.
 `local` is `base` for a copy of the image's plugin tree on this host: the copy
 is the repo. One with no .git is committed once, as `base`, under a fixed
@@ -34,7 +37,7 @@ descend from it or touches anything outside the plugin.
 `base`, `local` and `diff` print one JSON record.
 
 Exit codes: 0 done; 2 usage; 3 plugin not found; 6 ref refused; 7 the image's
-plugin is not a git checkout, or has modified tracked files.
+plugin checkout has modified tracked files, or its tree cannot be bundled.
 """
 
 import argparse
@@ -81,9 +84,7 @@ def probe(output):
     top = _git(pkg_dir, "rev-parse", "--show-toplevel")
     sha = top and _git(top, "rev-parse", "--verify", "HEAD^{commit}")
     if not sha:
-        print(f"{pkg_dir} is not in a git checkout with a commit",
-              file=sys.stderr)
-        return 7
+        return _probe_tree(pkg_dir, output)
     modified = _git(top, "status", "--porcelain", "--untracked-files=no")
     if modified:
         print(
@@ -102,6 +103,80 @@ def probe(output):
         "prefix": os.path.relpath(os.path.dirname(pkg_dir), top),
         "remote": _git(top, "remote", "get-url", "origin"),
         "untracked": untracked.splitlines() if untracked else [],
+    }
+    with open(os.path.join(os.path.dirname(os.path.abspath(output)), META),
+              "w",
+              encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    print(json.dumps(meta))
+    return 0
+
+
+def _tree_root(pkg_dir):
+    """The source tree holding the plugin: the nearest directory above it, within
+    three levels, with a pyproject.toml or setup.py; else the plugin's parent."""
+    d = os.path.dirname(pkg_dir)
+    for _ in range(3):
+        if any(
+                os.path.exists(os.path.join(d, f))
+                for f in ("pyproject.toml", "setup.py")):
+            return d
+        d = os.path.dirname(d)
+    return os.path.dirname(pkg_dir)
+
+
+def _probe_tree(pkg_dir, output):
+    """Bundle a plugin that is not in a git checkout as one commit of its tree.
+
+    The git dir is a temporary directory, never the image's tree. With no
+    project file above the plugin (an installed site-packages copy), only the
+    plugin directory itself is committed."""
+    import tempfile
+    top = _tree_root(pkg_dir)
+    project = top != os.path.dirname(pkg_dir) or any(
+        os.path.exists(os.path.join(top, f))
+        for f in ("pyproject.toml", "setup.py"))
+    paths = ["."] if project else [os.path.basename(pkg_dir)]
+    with tempfile.TemporaryDirectory() as gd:
+        git = [*GIT, f"--git-dir={gd}", f"--work-tree={top}"]
+        env = dict(os.environ,
+                   GIT_AUTHOR_DATE=BASE_DATE,
+                   GIT_COMMITTER_DATE=BASE_DATE)
+        try:
+            subprocess.run([*git, "init", "-q"],
+                           check=True,
+                           capture_output=True)
+            with open(os.path.join(gd, "info", "exclude"),
+                      "a",
+                      encoding="utf-8") as f:
+                f.write("\n".join(IGNORED) + "\n")
+            subprocess.run([*git, "add", "-A", "--", *paths],
+                           check=True,
+                           capture_output=True)
+            subprocess.run([*git, "commit", "-q", "-m", "base: image tree"],
+                           check=True,
+                           env=env,
+                           capture_output=True)
+            sha = subprocess.run([*git, "rev-parse", "HEAD"],
+                                 check=True,
+                                 capture_output=True,
+                                 text=True).stdout.strip()
+            subprocess.run(
+                [*git, "bundle", "create",
+                 os.path.abspath(output), "HEAD"],
+                check=True,
+                capture_output=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            print(f"could not bundle the tree of {pkg_dir}: {e}",
+                  file=sys.stderr)
+            return 7
+    meta = {
+        "sha": sha,
+        "path": top,
+        "prefix": os.path.relpath(os.path.dirname(pkg_dir), top),
+        "remote": None,
+        "untracked": [],
+        "synthesized": True,
     }
     with open(os.path.join(os.path.dirname(os.path.abspath(output)), META),
               "w",
@@ -259,7 +334,8 @@ def diff(repo, ref, output, start):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("probe", help="on the image: bundle the plugin's git")
+    p = sub.add_parser(
+        "probe", help="on the image: bundle the plugin's git (or its tree)")
     p.add_argument("--output", default="plugin.bundle")
     p = sub.add_parser("base", help="fetch the bundle and tag its sha base")
     p.add_argument("repo")
