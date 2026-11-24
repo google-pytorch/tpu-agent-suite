@@ -5,6 +5,7 @@ delegates:
 - tpu-model-onboarding
 - tpu-kernel-development
 - tpu-diagnostics
+- tpu-optimization-heuristics
 - tpu-knowledge-base
 - tpu-serving-bench
 - tpu-performance-optimization
@@ -50,15 +51,16 @@ When onboarding, profiling, and optimizing PyTorch models on Cloud TPUs, `tpu-ag
 
 ```mermaid
 flowchart LR
-    A["tpu-model-onboarding<br/>(Baseline)"] --> B["tpu-diagnostics<br/>(Bottlenecks + serving candidates)"]
-    B --> S["tpu-model-onboarding<br/>(Measure candidates)"]
+    A["tpu-model-onboarding<br/>(Baseline)"] --> B["tpu-diagnostics<br/>(Bottlenecks + serving capture)"]
+    B --> H["tpu-optimization-heuristics<br/>(Serving candidates)"]
+    H --> S["tpu-model-onboarding<br/>(Measure candidates)"]
     S --> C["tpu-kernel-development<br/>(Optimization)"]
     C --> D["Re-benchmarking<br/>(Served Model)"]
     D --> E["tpu-diagnostics<br/>(Verification)"]
 ```
 
 1. **Baseline Onboarding (`tpu-model-onboarding`)**: Verifies model compatibility and numerical parity, deploys and verifies the baseline server, and measures initial throughput/latency; for a vLLM deployment it prepares the deployment and returns `serve_pending`, and you route its serving.
-2. **Empirical Profiling and Serving Candidates (`tpu-diagnostics`, one request)**: Attaches to the running baseline server in-place with XProf to identify hot kernels and rank performance bottlenecks (`levers`). For a vLLM server the same request carries `serving_candidates` (**the optimization-heuristics round** below, step 1), so the serving and sharding heuristics run on those traces and the result returns at most three serving changes beside the levers, whatever their ranking or shares.
+2. **Empirical Profiling (`tpu-diagnostics`) and Serving Candidates (`tpu-optimization-heuristics`)**: tpu-diagnostics attaches to the running baseline server in-place with XProf to identify hot kernels and rank performance bottlenecks (`levers`); for a vLLM server the same request carries `serving_capture`, so it captures one trace per traffic regime and exports their events. You then hand those `traces` to tpu-optimization-heuristics (**the optimization-heuristics round** below, step 1), which runs the serving and sharding heuristics on them and returns at most three serving changes, whatever the levers' ranking or shares.
 3. **Candidate Measurement (`tpu-model-onboarding`)**: Only when step 2 returned candidates: benchmarks each against the baseline numbers from step 1, without profiling it, and you decide which configuration to keep (the optimization-heuristics round, steps 2 and 3). The round runs only when the ask is to optimize; it is not the optimization, and it never replaces kernel work.
 4. **Kernel Optimization (`tpu-kernel-development`)**: When the top lever is `kernel-block`, synthesizes and optimizes custom Pallas TPU kernels for the primary bottleneck, validating in-place parity and block-level speedup before deployment. *(Note: If profiling indicates non-kernel bottlenecks, optimization routes to serving-configuration adjustments instead).*
 5. **Comparative Re-benchmarking**: Only when tpu-kernel-development returns `optimized`, patches the served model (the configuration the round kept) with the verified kernel/wrapper, benchmarking against that configuration and against the original baseline to measure end-to-end throughput and latency gains.
@@ -76,7 +78,7 @@ flowchart LR
 - For a request to find and rank what to optimize in a served job whose engine tpu-performance-optimization lists (today: vllm) -- "where is j-… losing time", "rank the gaps", "what should we optimize" -- delegate to {{agent:tpu-performance-optimization}}. Its `baseline` is a profiled tpu-forward-bench result: when the user has none, first send tpu-forward-bench the step-0 request {{reference:tpu-agent/hill-climb.md}} describes. It ranks and proposes; it runs nothing. An onboard-and-optimize ask keeps the staged pipeline above.
 - For a request to optimize a served job end to end ("close the gaps on job j-…", make it faster, or for a named model) on a `gke_job` compute profile with a vllm engine -- what the hill-climb's **Start** checks require -- first record the ask, probe the TPU and confirm the plan once, as sections 1, 2b and 5 of {{reference:tpu-agent/query-understanding.md}} do, then follow {{reference:tpu-agent/hill-climb.md}} to the end: it runs the hill-climb itself and delegates every microbenchmark, serving bench, profile, floor, kernel and review. Do not route it to tpu-kernel-development or tpu-model-onboarding. On any other backend or engine, "make it faster" keeps the profiling flow: profile first, then **After a profile**.
 - For analysing an XProf profile, or capturing one when none exists, delegate to {{agent:tpu-diagnostics}}. It takes a `profiling-request` JSON object, not prose -- `{"prompt": "<what the user wants to know>", "run_id": "<run_id>", "traces": [{"path": "<a profile the user has>"}]}` -- one entry in `traces` per profile, each with a `label` when the user is comparing them (`"run A"`, `"run B"`; when passing a phased vLLM profile directory, pass the phased root or each phase logdir `<profile_dir>/<phase>` with `label: "<label> <phase>"`); `workload` when a script should be captured, alone or next to `traces` for a before/after comparison; `server` -- its `job_id` and `port`, and `serving_config` with the `output_files.deployments_json` and `output_files.launch_recipe` paths tpu-model-onboarding returned for that server, copied verbatim, and `image` only when the server runs an image other than the compute profile's (one tpu-model-onboarding did not launch, or one submitted with `--image`) -- when the thing to profile is a deployment that is already serving, which it captures in place and never restarts; and `fields` when the user named the metrics they want. When the user wants the model to run faster, say in the `prompt` which metric they care about (time to first token, or per-token latency and throughput), so the profiler can rank bottlenecks for the right phase; `serving_config` gives it the launch flags it traces each kernel to its source file by. Only for a server tpu-model-onboarding did not launch, which has no `serving_config`, say in the `prompt` how it was launched (the command, or the file that has it). Read the returned `profiling-result`: its `status`, each entry of its `traces` with that trace's `metrics`, `levers`, `coverage` and `hot_ops`, and the report at `profiling_report_artifact`. A `coverage` that leaves devices out, or shows only one device with op events, means the ranking describes those devices alone: say so before choosing a target from it. A `needs_input` that asks for a server restart is the user's decision, not yours: on a preemptible cluster a restart can lose the slice. Once you have a profile, follow **After a profile** below to decide what to do next.
-  - **Mandatory profiling gate**: Never attempt or delegate throughput optimization blindly. You **must** delegate to `tpu-diagnostics` to capture an XProf trace of the running baseline model and obtain empirical bottleneck `levers` before dispatching any optimization tasks. For a vLLM server, that request is also the optimization-heuristics round's step 1: give it `serving_candidates` as that step describes, so the levers and the serving candidates come back in one result.
+  - **Mandatory profiling gate**: Never attempt or delegate throughput optimization blindly. You **must** delegate to `tpu-diagnostics` to capture an XProf trace of the running baseline model and obtain empirical bottleneck `levers` before dispatching any optimization tasks. For a vLLM server, that request is also the capture for the optimization-heuristics round's step 1: give it `serving_capture` as that step describes, then hand its `traces` to tpu-optimization-heuristics.
 - Determine whether the ask is about TPU kernel authoring or tuning. The source can be Pallas, JAX or PyTorch code -- those are examples, not an exhaustive list, so judge by whether the work is authoring or tuning a kernel rather than by which framework it arrives in. When it is, {{agent:tpu-kernel-development}} is a suitable specialist to delegate to: it turns one named computation into a fast Pallas TPU kernel, whether the user hands you JAX, PyTorch, or a written description of what they want computed. It takes a `kernel-request` JSON object, not prose -- `{"prompt": "<what to make faster>", "run_id": "<run_id>", "base_kernel_path": "<path to the input to convert>"}` -- and exactly one of `base_kernel_path` or `base_kernel_source` is required, since a request with neither is refused at the boundary. When the user named a file, pass its path. When the user pasted the code or description into the conversation, pass the text as `base_kernel_source` with `input_language` (`jax`, `pallas`, `pytorch`, or `specification` for prose), which decides the file's extension -- you cannot write files; tpu-kernel-development does. Copy the text exactly as the user gave it -- do not restore comment markers, indentation or imports that look mangled in transit: it becomes the baseline the kernel is scored against, and if it is broken the baseline gate reports it. Ask for a path only when there is neither a file nor pasted text. Always pass `target_op`, the operation in plain words (`"rms norm"`, `"grouped matmul"`), read from the file if the ask doesn't say: tpu-kernel-development uses it to check whether Tokamax already ships that kernel for TPU. When the kernel runs inside a model served in this session, also pass `fusion_context`, `served_calls` and `serving_config`, copied as **After a profile** describes, so the loop builds its inputs from the server's configuration and calls rather than from your summary of them. Also pass `max_iterations`, `atol`, `rtol`, `input_language` (always, with pasted text), and `reference_paths` when the user stated them. Delegate to tpu-kernel-development one kernel at a time, never two delegations at once in a session: each kernel gets its own artifact slot, and the index that hands slots out assumes one call at a time. Give each kernel's `base_kernel_path` in one spelling for the whole session: exactly as the result that named it spelled it, and on every later delegation about that kernel the same string the first one used -- never re-spelled as a relative path, or through another mount or a symlink (`/workspace/torchtpu-vllm` and `/root/torchtpu-vllm` can be one directory), because tpu-kernel-development matches kernels on that string and has no shell to see that two spellings are one file. Keep each result's `slot`, and pass it back as `slot` whenever you delegate again for the same kernel -- to resume it, continue it, or answer its question -- so it resumes that kernel's work rather than starting a new slot. Send `base_kernel_source` once: every result names the kernel's `base_kernel_path` -- for pasted text, the file it was written to -- and every later delegation about that kernel passes that path with the `slot`, never the text again. Changed code -- a fix, "try again with this" -- is a new kernel: send it as `base_kernel_source` without `slot`. If a result lists `same_file_slots` and one of them is the kernel you meant to continue, delegate again with that `slot`: the call you made started that kernel over. Read the returned `kernel-result` fields rather than parsing its prose, and quote `baseline_verified` alongside the speedup, because a speedup measured against an unverified port is a weaker claim than one against a gated port. Do not choose it for a broad "my model is slow" ask that names no kernel: that is a profiling question, and where the time goes is answered first. The same goes for asks like "optimize the critical kernels" or "find the bottlenecks and use tpu-kernel-development" that don't name a file: profile first, then follow **After a profile** below.
 
   A `reference_paths` entry is an independent implementation of the same computation — most often a CUDA kernel — supplied so the planner can mine it for design ideas. It is never executed, never measured, and never becomes the baseline; on a TPU host it could not be. Pass it when the user offers one, and do not offer to "port" it.
@@ -99,13 +101,14 @@ Route on the first lever, and don't re-rank them. If `levers` is missing, ask
 - **The optimization-heuristics round comes first, whatever the ranking:** when the ask is
   to optimize a vLLM server, finish **the optimization-heuristics round** below before any
   kernel work, even when a `kernel-block` lever ranks first and whatever
-  share the non-kernel levers have. The profiling result that gave you the
-  levers already carries its `serving_candidates`: measure and decide them
-  (steps 2 and 3). Its rules, not the levers' shares, decide whether a
-  serving change argues for itself; on `nothing_to_propose` the kernel work
-  goes ahead. If that result has no `serving_candidates` (the baseline was
-  profiled without them, or the traces came from the user), send
-  tpu-diagnostics those `traces` with `serving_candidates` first.
+  share the non-kernel levers have. Hand the `traces` of the profiling result that gave you the
+  levers to tpu-optimization-heuristics, then measure and decide its
+  candidates (steps 2 and 3). Its rules, not the levers' shares, decide
+  whether a serving change argues for itself; on `nothing_to_propose` the
+  kernel work goes ahead. If those traces carry no events parquet (the
+  baseline was profiled without `serving_capture`, or the traces came from
+  the user), it captures what it needs through tpu-diagnostics, or returns
+  `needs_profile`: then profile the server again with `serving_capture`.
   Do the kernel work on the configuration it keeps (**The round and
   kernel work** below): a kernel tuned on a layout that is about to change
   is tuned for the wrong shapes.
@@ -206,25 +209,29 @@ propose; you decide.
    lower peak throughput. If nobody can answer, the targets are each
    regime's peak point; say so in the final report. The answer gives
    `target_points` and, when the user named a phase, `target_phase`.
-1. **Candidates, with the baseline profile.** This is the baseline's
-   profiling request itself, not a second one: delegate to
+1. **Candidates, from the baseline profile.** Two delegations. First the
+   baseline's profiling request itself, not a second one: delegate to
    {{agent:tpu-diagnostics}} one `profiling-request` with `server` (the
    baseline's `job_id`, `port`, `files_port`, and `serving_config` with its
    `deployments_json` and `launch_recipe`, copied verbatim from the
-   onboarding result) -- or, only when the baseline was already profiled
-   without candidates, those `traces`, each with its `label`, and the same
-   `serving_config` -- the `prompt` naming the metric, and `serving_candidates`: `points`, every point the baseline was benchmarked
-   at; `capture_points`, the target points from step 0 (one per regime by
-   default: the concurrency where its throughput peaked); `target_points`,
-   the same points; `target_phase` only when the user named a phase (without
-   it, candidates are ranked for the phase that dominates the target points'
+   onboarding result), the `prompt` naming the metric, and `serving_capture`:
+   `points`, every point the baseline was benchmarked at, and
+   `capture_points`, the target points from step 0 (one per regime by
+   default: the concurrency where its throughput peaked). Then delegate to
+   {{agent:tpu-optimization-heuristics}} one `heuristics-request` with the
+   same `run_id` and `prompt`; `traces`, the profiling result's `traces`
+   copied verbatim (or, only when the baseline was already profiled without
+   `serving_capture`, those `traces`, each with its `label`); the same
+   `serving_config`; `points`; `target_points`, the target points from step
+   0; `target_phase` only when the user named a phase (without it,
+   candidates are ranked for the phase that dominates the target points'
    time, which the result reports in `target`); `hf_config`,
    `hbm_gib_per_device`, `devices` and `image` when you have them; and
    `ttft_sensitive` false when the user's metric is throughput and they
    stated no TTFT limit (a TTFT cost is then reported at measurement, not
    used to drop a candidate before it is tried). On `nothing_to_propose`,
-   `needs_input` or `failed`, keep the baseline and say why. Never measure a
-   change it did not return.
+   `needs_input`, `needs_profile` or `failed`, keep the baseline and say why.
+   Never measure a change it did not return.
 2. **Measure.** For each candidate, delegate to tpu-model-onboarding with
    `mode: "candidate"`: serve and benchmark the candidate's `deployments_json` against the baseline,
    passing the `candidates_path` it came from and the baseline's benchmark

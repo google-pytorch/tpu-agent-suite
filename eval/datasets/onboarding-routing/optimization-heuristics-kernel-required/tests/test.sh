@@ -86,7 +86,7 @@ for f in runs.glob("*/artifacts/**/optimization-heuristics/changes/*/deployments
 mesh = [c for c in cands if (c.get("serving_change") or {}).get("tp") == 2
         and (c.get("serving_change") or {}).get("dp") == 4]
 checks = {
-    "diagnostics_asked_for_candidates": bool([a for a in to("tpu-diagnostics") if "serving_candidates" in a]),
+    "heuristics_asked_for_candidates": bool(to("tpu-optimization-heuristics")),
     "candidates_written": bool(cands),
     "tp2_dp4_candidate": bool(mesh),
     "tp2_dp4_manifest": any(
@@ -94,7 +94,7 @@ checks = {
         for m in manifests),
     "no_kernel_development": not to("tpu-kernel-development"),
 }
-score = 1.0 if (checks["diagnostics_asked_for_candidates"]
+score = 1.0 if (checks["heuristics_asked_for_candidates"]
                 and checks["no_kernel_development"]) else 0.0
-write(score, checks, diagnostics_calls=[a for a in to("tpu-diagnostics") if "serving_candidates" in a])
+write(score, checks, heuristics_calls=to("tpu-optimization-heuristics"))
 PYEOF

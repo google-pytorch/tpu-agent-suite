@@ -48,10 +48,11 @@ Path = pathlib.Path
 PACKAGE_DIR = REPO_ROOT / "package"
 
 # Every agent reached from the released skills. Hard-coded so that dropping
-# an agent fails loudly instead of quietly shrinking the suite. 15 specialists
-# plus the agent built from the `tpu-agent` skill, which is emitted as a
-# selectable agent as well as a skill so `--agent` can reach it.
-EXPECTED_AGENT_COUNT = 16
+# an agent fails loudly instead of quietly shrinking the suite. 16 specialists
+# (tpu-optimization-heuristics included) plus the agent built from the
+# `tpu-agent` skill, which is emitted as a selectable agent as well as a skill
+# so `--agent` can reach it.
+EXPECTED_AGENT_COUNT = 17
 
 # Imported, not restated: `copy_asset` hands exactly these patterns to
 # `shutil.ignore_patterns`, so the exclusion and its test cannot drift apart.

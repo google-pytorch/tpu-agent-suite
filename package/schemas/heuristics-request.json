@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "heuristics-request.json",
+  "title": "tpu-optimization-heuristics Request",
+  "description": "Input to the tpu-optimization-heuristics agent: the baseline's measured facts (the traces a tpu-diagnostics profiling-result returned, copied verbatim) and how it was served. The agent runs fixed rules over them and returns the serving changes they argue for; it captures nothing itself unless no traces are given, and it never measures or keeps a candidate. The caller measures and decides.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "prompt",
+    "run_id",
+    "serving_config",
+    "points"
+  ],
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What the caller wants optimized, naming the metric (output throughput, TTFT or per-token latency)."
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "traces": {
+      "type": "array",
+      "description": "The `traces` of the tpu-diagnostics profiling-result for this server, copied verbatim: each with its label, load and tool_outputs, which list the events parquet of each phase trace. Omit only when the baseline was never profiled; then give `server` and the agent asks tpu-diagnostics for the capture itself.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "port"
+      ],
+      "description": "The running baseline server, as given to tpu-diagnostics. Used only when `traces` is absent, to request a capture at `capture_points`.",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The serving job's id, as `submit` printed it: what the agent forwards the port of and fetches the profile from."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port the server listens on inside the job."
+        },
+        "files_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port the onboarding launcher serves the profile directory on inside the job, so a trace can be fetched while the server runs: the GKE job backend's `job artifacts` cannot read a running pod's files. Omit for the launcher's default, 8790."
+        },
+        "profiler_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the server's profiler writes, relative to the job's working directory. Omit when the server was started by the onboarding launcher, which writes to 'artifacts/vllm_profile'."
+        },
+        "load": {
+          "type": "string",
+          "description": "The traffic to send between `/start_profile` and `/stop_profile`: a benchmark command, or the request shape and concurrency in prose. Omit for a handful of requests shaped like the workload."
+        },
+        "serving_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "deployments_json"
+          ],
+          "description": "The configuration the server was launched with, copied from the onboarding result's `output_files` as the paths it returned -- the same object tpu-kernel-development's request takes as `serving_config`. The agent reads both files before it captures: they hold the launch flags it follows to trace a kernel to its file (e.g. the attention backend), the tensor parallelism that says how many devices a complete capture covers, and the maximum context and sequence count the load has to stay within. Read only; the server is never restarted from them. Omit when the server was not launched by tpu-model-onboarding, and say in the `prompt` how it was launched instead.",
+          "properties": {
+            "deployments_json": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The onboarding result's `output_files.deployments_json`, verbatim."
+            },
+            "launch_recipe": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The onboarding result's `output_files.launch_recipe`, verbatim, when it returned one."
+            }
+          }
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The container image the serving job runs, when it is not the compute profile's `image`: for example, a server that tpu-model-onboarding did not launch, or one submitted with `--image`. tpu-diagnostics runs its kernel-introspection job on this image beside the server, and records it as where the copied kernel came from. Omit when the server runs the compute profile's image, as every server tpu-model-onboarding launches does."
+        }
+      }
+    },
+    "serving_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployments_json",
+        "launch_recipe"
+      ],
+      "description": "The baseline's deployments.json and launch recipe, copied verbatim from the onboarding result.",
+      "properties": {
+        "deployments_json": {
+          "type": "string",
+          "minLength": 1
+        },
+        "launch_recipe": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9]+:[0-9]+:[0-9]+$"
+      },
+      "description": "Every isl:osl:concurrency point the baseline was benchmarked at."
+    },
+    "capture_points": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9]+:[0-9]+:[0-9]+$"
+      },
+      "description": "The points to capture a trace at, one load each (one per traffic regime, e.g. each regime's peak)."
+    },
+    "target_points": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9]+:[0-9]+:[0-9]+$"
+      },
+      "description": "The points to optimize, as ISL:OSL:C: the ones the user chose from the baseline's measured points, or each regime's peak point when nobody chose. Candidates are ranked for these points' phase."
+    },
+    "target_phase": {
+      "type": "string",
+      "enum": [
+        "prefill",
+        "decode"
+      ],
+      "description": "The phase to optimize when the user named one (prefill for time to first token, decode for per-token latency or decode throughput). Omit it to optimize the phase that dominates the target points' time, which propose.py estimates from the captured step times."
+    },
+    "hf_config": {
+      "type": "string",
+      "description": "The model's config.json; fetched at the served revision when absent."
+    },
+    "hbm_gib_per_device": {
+      "type": "number"
+    },
+    "devices": {
+      "type": "integer"
+    },
+    "image": {
+      "type": "string",
+      "description": "The serving image's digest."
+    },
+    "ttft_sensitive": {
+      "type": "boolean",
+      "description": "False when the metric is throughput and no TTFT limit was stated."
+    },
+    "max_candidates": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 3
+    }
+  },
+  "examples": [
+    {
+      "prompt": "Raise output throughput of the gemma-4-31B-it server.",
+      "run_id": "20261107T120000Z-abcdef012345",
+      "traces": [
+        {
+          "label": "1024:1024:64 decode_only",
+          "path": "/runs/20261107T120000Z-abcdef012345/artifacts/tpu-diagnostics/capture/1024_1024_64/decode_only",
+          "tool_outputs": [
+            {
+              "tool": "create_events_db",
+              "artifact": "/runs/20261107T120000Z-abcdef012345/artifacts/tpu-diagnostics/events/1024_1024_64_decode_only.parquet"
+            }
+          ]
+        }
+      ],
+      "serving_config": {
+        "deployments_json": "/runs/20261107T120000Z-abcdef012345/artifacts/tpu-model-onboarding/deployments.json",
+        "launch_recipe": "/runs/20261107T120000Z-abcdef012345/artifacts/tpu-model-onboarding/launch_vllm.sh"
+      },
+      "points": [
+        "1024:1024:16",
+        "1024:1024:64",
+        "8192:1024:16"
+      ],
+      "target_points": [
+        "1024:1024:64",
+        "8192:1024:16"
+      ],
+      "ttft_sensitive": false
+    }
+  ]
+}

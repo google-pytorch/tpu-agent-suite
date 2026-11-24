@@ -14,8 +14,9 @@
 # limitations under the License.
 
 # A running baseline with no profile yet, and an optimize ask: does tpu-agent's
-# first tpu-diagnostics request (the profiling gate) carry serving_candidates,
-# so the levers and the candidates come back together?
+# first tpu-diagnostics request (the profiling gate) carry serving_capture,
+# so the levers and the per-regime traces tpu-optimization-heuristics reads come
+# back together?
 set -uo pipefail
 LOGS="${LOGS_DIR:-/logs/verifier}"
 mkdir -p "$LOGS"
@@ -74,11 +75,11 @@ def write(score, checks, **extra):
 diag = to("tpu-diagnostics")
 checks = {
     "diagnostics_called": bool(diag),
-    "first_request_has_candidates": bool(diag) and "serving_candidates" in diag[0],
+    "first_request_has_capture": bool(diag) and "serving_capture" in diag[0],
     "first_request_has_server": bool(diag) and "golden-gemma4-a1b2c3d-serve" in diag[0],
     "no_kernel_development": not to("tpu-kernel-development"),
 }
-score = 1.0 if (checks["first_request_has_candidates"]
+score = 1.0 if (checks["first_request_has_capture"]
                 and checks["first_request_has_server"]
                 and checks["no_kernel_development"]) else 0.0
 write(score, checks, diagnostics_calls=diag[:2])

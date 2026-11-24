@@ -73,14 +73,16 @@ families:
       v1: sha256:eaef1e14c5aaeaf2b4a3fd9aa70f45de934868e6b4094cc1c307603384cd34aa
       v2: sha256:d2365197e1ab8fa701575d91f60bbbffb8ac4c224e45df82354b6be8efee4b1a
   onboarding_routing:
-    current: v1
+    current: v2
     description: Verifiers for onboarding topology and TP/DP routing checks
     source_paths:
     - eval/datasets/onboarding-routing/*/tests
     history:
       v1: initial
+      v2: d4aad851b8f8e81929d27f7db6a6d28a44ca5245
     inputs_sha256:
       v1: sha256:e61b2d77d5ac745f95bced88c0cfced1a24532643a944c13011edf6945b05ba3
+      v2: sha256:8f1eade6e1b45e1b9992824158f2f7ac66976b6cf02e7bd41f67630ef8fa22b9
   cset:
     current: v1
     description: CSET benchmark suite LLM expectations

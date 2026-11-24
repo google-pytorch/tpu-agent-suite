@@ -239,7 +239,7 @@ the benchmark workflow is reserved for requests that name it.
 ## Measuring a serving candidate
 
 When the request's `mode` is `candidate`, it asks you to serve and benchmark
-a serving candidate tpu-diagnostics proposed (its `deployments_json`, the `candidates.json` it
+a serving candidate tpu-optimization-heuristics proposed (its `deployments_json`, the `candidates.json` it
 came from, and the baseline's benchmark summaries), serve the candidate's
 `deployments_json` -- its `env` goes into the launch recipe, everything else
 as the baseline's -- and benchmark it at the baseline's

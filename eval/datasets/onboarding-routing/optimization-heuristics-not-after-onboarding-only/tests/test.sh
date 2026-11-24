@@ -79,9 +79,9 @@ for p in (logs.parent / "artifacts" / "answer.json", pathlib.Path("/logs/artifac
             answer = p.read_text("utf-8")
         break
 # An onboarding-only ask must not start the optimization-heuristics round: no trace capture
-# or candidates from tpu-diagnostics, no measurement, no kernel work.
+# for candidates, no tpu-optimization-heuristics call, no measurement, no kernel work.
 checks = {
-    "no_round": not [a for a in to("tpu-diagnostics") if "serving_candidates" in a],
+    "no_round": not to("tpu-optimization-heuristics") and not [a for a in to("tpu-diagnostics") if "serving_capture" in a],
     "no_diagnostics_at_all": not to("tpu-diagnostics"),
     "nothing_measured": not to("tpu-model-onboarding"),
     "no_kernel_development": not to("tpu-kernel-development"),
