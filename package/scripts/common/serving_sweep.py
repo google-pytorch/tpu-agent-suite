@@ -166,6 +166,9 @@ class Wait(enum.IntEnum):
     FAILURE_LOGGED = 2
     TIMED_OUT = 3
     JOB_ENDED = 4
+    # Not `job wait`'s: the sweep stopped waiting on a client because the
+    # server it was placed beside is no longer running.
+    SERVER_GONE = 5
 
 
 # One `job wait` call; short, so a stop request is seen within a poll or two.
@@ -860,8 +863,15 @@ class Sweep:
              profile: str | None,
              limit_s: float,
              fail_on: str | None = None,
-             default_fail: bool = True) -> tuple[int, dict]:
-        """`job wait` in short calls until it settles, `limit_s` or a stop."""
+             default_fail: bool = True,
+             alive: Callable[[], bool] | None = None) -> tuple[int, dict]:
+        """`job wait` in short calls until it settles, `limit_s` or a stop.
+
+        With `alive`, it is asked between calls; once it says no, the wait
+        ends with SERVER_GONE. A client pinned beside a server whose node was
+        reclaimed can never be scheduled, so its own wait would run to
+        `limit_s` (hours) while nothing is measured.
+        """
         deadline = time.monotonic() + limit_s
         while True:
             tail = ["--until", until, "--timeout", str(WAIT_CHUNK_S)]
@@ -880,6 +890,8 @@ class Sweep:
                 return rc, body
             if self.stop.is_set() or time.monotonic() > deadline:
                 return Wait.TIMED_OUT, body
+            if alive is not None and not alive():
+                return Wait.SERVER_GONE, {"outcome": "server_gone"}
 
     def start_server(self, server: dict[str, Any]) -> bool:
         """Submit a follower from the recipe and wait until it serves."""
@@ -1037,7 +1049,12 @@ class Sweep:
                              "done",
                              server["profile"],
                              self.args.shape_timeout,
-                             default_fail=False)
+                             default_fail=False,
+                             alive=lambda: self.server_running(server))
+        if rc == Wait.SERVER_GONE:
+            self.set_shape(sid,
+                           note="its server stopped running while the "
+                           "client waited; the client was cancelled")
         if rc not in (Wait.REACHED, Wait.JOB_ENDED):
             # Still running, or its state unknown: it must not load the
             # server beside the next shape's client.

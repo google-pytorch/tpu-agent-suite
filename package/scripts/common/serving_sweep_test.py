@@ -102,7 +102,9 @@ class FakeCompute:
     client ends mid-sweep with a `partial` summary, mapped to whether its
     server is lost too; `setup_error` shapes whose client cannot start; `client_submit_fails` failed submits per shape;
     `client_wait_rc` a shape client's `job wait` exit code; `raise_on_submit`
-    servers whose submit raises.
+    servers whose submit raises; `stranded_once` shapes whose first client is
+    stranded: its server's node goes away, so the client is never scheduled
+    and its `job wait` only ever times out.
     """
 
     def __init__(self,
@@ -117,6 +119,7 @@ class FakeCompute:
                  client_submit_fails=None,
                  client_wait_rc=None,
                  raise_on_submit=(),
+                 stranded_once=(),
                  fail_line="Traceback",
                  fail_at="log:"):
         self.lock = threading.Lock()
@@ -129,6 +132,8 @@ class FakeCompute:
         self.client_submit_fails = dict(client_submit_fails or {})
         self.client_wait_rc = dict(client_wait_rc or {})
         self.raise_on_submit = set(raise_on_submit)
+        self.stranded_once = set(stranded_once)
+        self.stranded = set()
         self.fail_line = fail_line
         self.fail_at = fail_at
         self.n = 0
@@ -226,10 +231,23 @@ class FakeCompute:
                 self.ready.setdefault(job_id, time.monotonic())
             return 0, {"outcome": "reached"}
         time.sleep(self.client_delay)
-        rc = self.client_wait_rc.get(self.sid(job["argv"]), 0)
+        sid = self.sid(job["argv"])
+        with self.lock:
+            if sid in self.stranded_once:
+                self.stranded_once.discard(sid)
+                self.stranded.add(job_id)
+                job["stranded"] = True
+                self.records[_flag(job["argv"],
+                                   "--colocate-with")]["status"] = "FAILED"
+            if job_id in self.stranded:
+                # Unschedulable, so never done: each call just times out.
+                return 3, {"outcome": "timed_out"}
+        rc = self.client_wait_rc.get(sid, 0)
         return rc, {"outcome": "failure_logged" if rc else "reached"}
 
     def artifacts(self, job, out_dir):
+        if job.get("stranded"):
+            return  # Never scheduled: it wrote nothing.
         argv, base = job["argv"], out_dir / serving_sweep.CLIENT_DIR
         sid = self.sid(argv)
         server = self.records[_flag(argv, "--colocate-with")]
@@ -543,6 +561,8 @@ class TestRun(SweepCase):
             dict(setup_error={first}),
             "a client wait ends badly":
             dict(client_wait_rc={first: 2}, no_summary={first}),
+            "a client is stranded by its server's node":
+            dict(stranded_once={first}),
         }
         # Which shape fails, and how often it was tried.
         expect = {
@@ -555,6 +575,7 @@ class TestRun(SweepCase):
             ("failed", first, serving_sweep.SHAPE_TRIES),
             "a client cannot start": ("failed", first, 1),
             "a client wait ends badly": ("failed", first, 1),
+            "a client is stranded by its server's node": ("ok", None, 2),
         }
         for name, knobs in cases.items():
             with self.subTest(name):
