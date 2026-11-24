@@ -105,7 +105,7 @@ families:
     inputs_sha256:
       v1: sha256:4917f33ff69d13505dac2106623076a06ae527a08dc0756c1ea455799434f746
       v2: sha256:04ce1cace4b9922864220e0a41b87642a9d16794540257631b79ca1466e2bf12
-      v3: sha256:cf7fcb5fc0e6058df18b8df76834c8d4d611f4257e1717578e28dd89d2ae40ab
+      v3: sha256:36c2869bfd4737d7d919fec00f82267a8c498f5c9276f5107fae417bc0c29b47
   knowledgebase:
     current: v2
     description: TPU Knowledge QA rubric suite

@@ -63,6 +63,9 @@ repos:
       - --ignore=E501,F841
       - --per-file-ignores=__init__.py:F401
       - --extend-per-file-ignores=package/scripts/tpu-kernel-development/*:F821,package/scripts/tpu-kernel-development/*:F401
+      # JaxBench level2 bases are upstream Pallas kernels vendored as-is; keep
+      # them close to the source instead of restyling them for lint.
+      - --extend-per-file-ignores=eval/suites/jaxbench/level2/assets/bases/*:E402,eval/suites/jaxbench/level2/assets/bases/*:E731,eval/suites/jaxbench/level2/assets/bases/*:E741,eval/suites/jaxbench/level2/assets/bases/*:F401,eval/suites/jaxbench/level2/assets/bases/*:F722,eval/suites/jaxbench/level2/assets/bases/*:F811,eval/suites/jaxbench/level2/assets/bases/*:F821
   # Docstrings in framework/, google/drivers/ and google/tests/ follow the
   # Google convention: a one-line summary ending in a period, with
   # Args:/Returns: sections only where the signature is not self-explanatory. `__init__` is covered by its class docstring, and

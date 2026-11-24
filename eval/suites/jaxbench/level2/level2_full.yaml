@@ -1,0 +1,186 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+# JaxBench Level 2 Benchmark Suite
+# ==============================================================================
+suite_name: jaxbench_level_2_full
+
+# ==============================================================================
+# 1. ENVIRONMENT (Sandbox & Agent Suite Requirements)
+# ==============================================================================
+environment:
+  base_image: us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host@sha256:7ff58a98ae2655dbcf25fa0aeb3e8081281bfb3061f97581a98951e98371fff4
+  apt_packages:
+    - procps
+    - sqlite3
+  pip_packages:
+    - numpy
+    - "jax[cpu]"
+  cpus: 2
+  memory_mb: 65536
+  storage_mb: 10240
+
+# ==============================================================================
+# 2. EVALUATION (Benchmark Scenarios & Grading)
+# ==============================================================================
+evaluation:
+  script_verifiers:
+    - name: "invoked_subagent"
+      script: "eval/verifiers/common/invoked_subagent.py"
+      verifier_params:
+        agents:
+          - "tpu-kernel-development"
+    - name: "schema_compliance"
+      script: "eval/verifiers/common/schema_compliance.py"
+      weight: 0.0
+
+  cases:
+    - name: "1p-flash-attention"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/1p-flash-attention.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "2p-gqa-attention"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/2p-gqa-attention.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "3p-mla-attention"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/3p-mla-attention.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "4p-sparse-attention"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/4p-sparse-attention.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "6p-paged-attention"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/6p-paged-attention.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "7p-ragged-paged-attention"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/7p-ragged-paged-attention.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "8p-gemm"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/8p-gemm.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "11p-megablox-gmm"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/11p-megablox-gmm.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "51p-deepseek-v4-csa"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/51p-deepseek-v4-csa.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "52p-deepseek-v4-hca"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/52p-deepseek-v4-hca.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "53p-deepseek-v4-mla-swa"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/53p-deepseek-v4-mla-swa.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "54p-deepseek-v4-masked-dense-mla"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/54p-deepseek-v4-masked-dense-mla.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "55p-deepseek-v4-streamindex-topk"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/55p-deepseek-v4-streamindex-topk.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "56p-deepseek-v4-mhc"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/56p-deepseek-v4-mhc.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "57p-sparsecore-ragged-gather"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/57p-sparsecore-ragged-gather.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "58p-deepseek-v4-kv-compressor"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/58p-deepseek-v4-kv-compressor.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "59p-megablox-gmm-v2"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/59p-megablox-gmm-v2.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "60p-rpav3"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/60p-rpav3.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "61p-batched-rpa"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/61p-batched-rpa.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "62p-causal-conv1d-gdn"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/62p-causal-conv1d-gdn.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "63p-gdn"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/63p-gdn.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "64p-linear-softmax-cross-entropy"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/64p-linear-softmax-cross-entropy.py:base.py"
+      timeout_sec: 14400.0
+
+    - name: "65p-quantized-splash-attention"
+      prompt_file: "assets/prompts/accelerate_kernel.md"
+      workspace_files:
+        - "assets/bases/65p-quantized-splash-attention.py:base.py"
+      timeout_sec: 14400.0
