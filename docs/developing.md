@@ -37,11 +37,17 @@ These apply to every change merged to `main`.
    - its user journeys show consistently performant eval results;
    - the product owners approve releasing it;
    - it is described in that release's `release-notes/vX.Y.Z.md`.
-4. **Experimental work uses a separate manifest.** Experimental work lives in
-   a manifest that `extends` `package.release.json`: `package.experimental.json`
-   if it belongs to that initiative, or one of your own (see
-   [The experimental package](#the-experimental-package-tpu-agent-suite-experimental)).
-   It merges to `main` as long as it does not break anything already released.
+4. **Experimental work uses a separate manifest.** Experimental work lives
+   outside `package.release.json`: `package.experimental.json` (`extends`
+   `package.release.json` via `add_skills`) for serving/inference optimization
+   skills, `package.train.json` (standalone `skills`) for training optimization
+   skills, or a manifest of your own (see
+   [The experimental package](#the-experimental-package-tpu-agent-suite-experimental)
+   and [The training package](#the-training-package-tpu-agent-suite-train)).
+   Keep training-only skills in `package.train.json` rather than
+   `package.experimental.json` so they do not pull in inference agents or
+   collide with inference skills in the same workspace. Experimental work merges
+   to `main` as long as it does not break anything already released.
 5. **Reuse first; duplicate only with a plan.** New prose units and code should
    reuse what already exists, within reason. Duplication is acceptable when
    reuse would risk breaking existing functionality, or would significantly slow
@@ -200,36 +206,45 @@ Every pull request runs the following checks:
 
 | Gate | Runs | Required? |
 | :--- | :--- | :--- |
-| **Package & unit tests** | `make verify`, `make verify-experimental`, `make verify-train`, `make validate-kb KB_BASE=origin/<base>`, `make test`, `make test-eval`, `make build`, `compiler.py lint`, `make coverage`, `make coverage-diff` | yes (`coverage-diff` advisory) |
-| **Formatting & denylist** | The `pre-commit` hook set plus `.ci/check_denylist.py` on PR diffs and commit messages | yes |
+| **Package & unit tests** | `make verify`, `make verify-experimental`, `make verify-train`, `make validate-kb KB_BASE=origin/<base>`, `make test`, `make test-eval`, `make build`, `compiler.py lint` (plus `--no-overlays` `verify` / `verify-experimental` / `verify-train` / `lint`, and `google/tests` when present), `make coverage`, `make coverage-diff` | yes (`coverage-diff` advisory) |
+| **Formatting & denylist** | The `pre-commit` hook set plus `.ci/check_denylist.py` on PR diffs, commit messages, and PR titles | yes |
 | **Dataset naming** | Eval dataset and task folder naming (`^[a-z0-9-]+$`) | yes, when `eval/**` changes |
 | **Code owners** | Code-owner approval on protected onboarding, framework, documentation, and infrastructure paths | yes |
 | **Smoke evaluation** | The `smoke-check` Harbor evaluation when package, framework, or evaluation files change | reported |
 
-Release builds compile standalone per-harness archives without internal
-overlays, scan the compiled `dist/` and curated `release-notes/v<version>.md`
-(copied from `release-notes/TEMPLATE.md`) with `.ci/check_denylist.py`,
-smoke-test installing the `claude-code` archive in a clean workspace, and emit
+Release builds validate `release-notes/v<version>.md` (copied from
+`release-notes/TEMPLATE.md`), compile standalone per-harness archives without
+internal overlays, scan the compiled `dist/` with `.ci/check_denylist.py`,
+smoke-test installing the built archive(s) in a clean workspace, and emit
 `SHA256SUMS`.
 
 Run the same commands locally before pushing; CI adds nothing you cannot
-reproduce with the loop above plus `pre-commit run --all-files`.
+reproduce with the commands in the table above plus `pre-commit run --all-files`.
 
 ---
 
 ## 4. Adding an agent to an existing package
 
-`package/README.md` walks through converting a whole skill from scratch.
-Adding one agent to a domain that already exists is shorter:
+`package/README.md` walks through converting a whole skill from scratch;
+[Choosing a kind](design/package.md#choosing-a-kind) decides between a skill, an
+agent, a reference, or inline prose. To scaffold one with an agent harness
+(Claude Code, Antigravity, Codex, or Cursor), prompt it with:
 
-1. **Write the instruction file** at `package/agents/<agent-name>.md`.
-   The YAML frontmatter is the manifest:
+```text
+Follow @docs/developing.md (§4–§4c) to scaffold a new [agent | skill] named `<name>` that <one-line purpose>, wired into `<caller-or-manifest>`.
+```
+
+Adding one agent to a domain that already exists:
+
+1. **Write the instruction file** at `package/agents/<agent-name>.md`
+   (validated against `framework/schemas/agent-frontmatter.schema.json`; never
+   grant skill-only tool `ask` to an agent):
 
    ```yaml
    ---
    name: my-agent                       # unique, lowercase hyphen-case
    description: One line on what it does.
-   tools: [read]                        # minimum of read | write | edit | shell | search
+   tools: [read]                        # minimum of read | write | edit | shell | search | web_search | web_fetch
    accepts: schemas/my-agent-request.json   # typed input contract under schemas/
    produces: schemas/my-agent-result.json
    delegates: []
@@ -242,32 +257,107 @@ Adding one agent to a domain that already exists is shorter:
 
    In prose, name other agents with `{{agent:<name>}}` and package files with
    `{{script:..}}`, `{{reference:..}}`, `{{data:..}}` or `{{schema:..}}`, never
-   by a typed-out path. A path in the user's workspace needs something in front
-   of it: `./scripts/train.py`. The full list is in
+   by a typed-out path. Prefix workspace paths with `<workspace>/...`,
+   `<work>/...`, or `workspace/...` (for example `` `<workspace>/scripts/train.py` ``
+   — `./...` passes `verify`, whereas inline backticked `` `./config.json` ``
+   still trips `lint`'s `bare-paths` check). The full list is in
    [Tokens](design/package.md#tokens).
 
-   Don't write instructions for the session journal: an agent with `shell`
-   gets them in its generated contract.
+   Don't write generic compute lifecycle prose (`run` vs. `submit`, job
+   wait/logs/artifacts) or session-journal instructions: the compiler appends
+   the compute contract automatically (`lint`'s `generic-compute-prose` flags
+   duplicated compute prose) and appends the journal contract when `tools`
+   includes `shell`.
 
-2. **Nothing to register.** The compiler finds an agent by following
-   `delegates` from the released skills, so wiring the delegation (next step)
-   is what makes it part of the build. Pin any new pip dependencies in
-   `package/requirements-client.txt` / `requirements-tpu.txt`
-   (unpinned entries fail `verify`). Scripts go under
-   `package/scripts/<family>/`, references under
-   `package/references/<family>/`; a reference may declare its own
-   scripts, references and delegates in optional frontmatter, and every
-   reader inherits them.
+2. **Nothing to register; place scripts and references under their `<family>/` directory.**
+   The compiler finds an agent by following `delegates` from the released
+   skills, so wiring the delegation (next step) is what makes it part of the
+   build. Pin any new pip dependencies in `package/requirements-client.txt` /
+   `requirements-tpu.txt` (unpinned entries fail `verify`). Scripts go under
+   `package/scripts/<family>/` (with companion `*_test.py` files beside them)
+   and references under `package/references/<family>/`; a reference may declare
+   its own scripts, references, delegates and dependencies in optional
+   frontmatter (`framework/schemas/reference-frontmatter.schema.json`), and
+   every reader inherits them.
+
+   When porting an external tool or adding a multi-file Python package, flatten
+   it into a single self-contained `package/scripts/<family>/` directory (like
+   `package/scripts/workload-microbenchmark/`) — no nested `skills/.../scripts/`
+   or single-implementation `backends/` wrappers, no standalone
+   `pyproject.toml`/`setup.py`, no `..` `sys.path` walks across package roots,
+   and **never** place nested `AGENTS.md` or `CLAUDE.md` files under `package/`
+   or `scripts/` (harnesses auto-load nested `AGENTS.md` files into context; put
+   provenance or citations in `SOURCES.md` or `references/`). Agent-invoked CLIs
+   should fail fast on unknown flags (`argparse` `parse_args`, not
+   `parse_known_args`).
 
 3. **Wire the delegation.** Add the name to the `delegates` list of the agent
    that will call it, and mention it in that agent's prose with an
    `{{agent:my-agent}}` token. If it is a new top-level workflow, add a routing
-   line in
-   `package/skills/tpu-agent/SKILL.md` and to that
-   file's `delegates`.
+   line in `package/skills/tpu-agent/SKILL.md` and to that file's `delegates`.
 
-4. **Add schemas** under `schemas/` if you introduced typed contracts; every
-   `schemas/*.json` is registered and validated automatically.
+4. **Add schemas and contract tests** under `package/schemas/` and
+   `package/tests/test_<agent>_schemas.py`. Every `schemas/*.json` is registered
+   automatically. Set `"additionalProperties": false`, include valid
+   `"examples"` for each outcome, and express per-status required fields with
+   `"status_requires"` or `"oneOf"` (`framework/utils.py`'s
+   `JSON_SCHEMA_KEYWORDS` omits `$ref`, `if`/`then`, and `allOf`;
+   every `status_requires` key must appear in `properties.status.enum` and its
+   fields must not be in top-level `required`; `agent_contracts.result_problems(schema, payload)`
+   enforces non-empty values for `status_requires` fields and, when `artifacts`
+   is a property, non-empty `artifacts` on `"status": "completed"`; leave
+   `"failed"` out of `status_requires` so `test_runtime.py` confirms at least
+   one failure status can always be returned):
+
+   ```json
+   {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "$id": "my-agent-result.json",
+     "title": "my-agent Result",
+     "type": "object",
+     "additionalProperties": false,
+     "required": ["status", "summary", "run_id"],
+     "status_requires": {
+       "completed": ["artifacts"],
+       "invalid_input": ["missing"]
+     },
+     "properties": {
+       "status": { "type": "string", "enum": ["completed", "invalid_input", "failed"] },
+       "summary": { "type": "string", "minLength": 1 },
+       "run_id": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$" },
+       "artifacts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+       "missing": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+       "failure_reason": { "type": "string" }
+     },
+     "examples": [
+       {
+         "status": "completed",
+         "summary": "Wrote report.",
+         "artifacts": ["~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/my-agent/report.md"],
+         "run_id": "20260921T120000Z-abcdef012345"
+       },
+       {
+         "status": "invalid_input",
+         "summary": "Missing model config.",
+         "missing": ["model_config_path"],
+         "run_id": "20260921T120000Z-abcdef012345"
+       },
+       {
+         "status": "failed",
+         "summary": "Target unreachable.",
+         "failure_reason": "compute_run_failed",
+         "run_id": "20260921T120000Z-abcdef012345"
+       }
+     ]
+   }
+   ```
+
+   Follow [`package/schemas/roofline-request.json`](../package/schemas/roofline-request.json),
+   [`package/schemas/roofline-result.json`](../package/schemas/roofline-result.json)
+   (or [`package/schemas/code-arm-result.json`](../package/schemas/code-arm-result.json)
+   when `oneOf` is needed), and
+   [`package/tests/test_roofline_schemas.py`](../package/tests/test_roofline_schemas.py)
+   for a complete request/result pair and contract test.
 
 5. **Profiling?** Do not run XProf. Delegate to `{{agent:tpu-diagnostics}}`
    instead; `lint` flags direct XProf use. See
@@ -314,12 +404,15 @@ enforces.
    where you register one decides who gets it. (Agents and references are
    not listed; a skill pulls them in through `delegates` and `references`.)
 
-   - **To build and test it,** list it under `add_skills` in a manifest that
-     `extends` `package.release.json` (see
+   - **For experimental serving / inference optimization skills,** list it under
+     `add_skills` in `package/package.experimental.json` (which `extends`
+     `package.release.json`; see
      [The experimental package](#the-experimental-package-tpu-agent-suite-experimental)).
-     Use the manifest of the initiative it belongs to, such as
-     `package.experimental.json` for the vLLM optimization skills, or create
-     one for your own work.
+   - **For experimental training skills,** list it under `skills` in
+     `package/package.train.json` (standalone manifest; see
+     [The training package](#the-training-package-tpu-agent-suite-train)), or
+     create a separate manifest for a distinct initiative so skills from
+     unrelated workflows do not collide in one workspace.
    - **To release it to every user,** it moves to `skills` in
      `package/package.release.json`. That is a product decision as much as an
      engineering one: it needs approval, and happens only in a version-bump
@@ -349,6 +442,15 @@ enforces.
 
 ---
 
+## 4c. Pre-PR checklist for skills, agents, and references
+
+- [ ] **Frontmatter & layout**: frontmatter validates against `framework/schemas/{agent,skill,reference}-frontmatter.schema.json`; `agents/` and `skills/<name>/` contain no subdirectories; `scripts/<family>/` is flattened into one self-contained directory (no `..` `sys.path` walks, standalone `pyproject.toml`, or nested `AGENTS.md`/`CLAUDE.md` files); `host_dependencies` / `tpu_dependencies` are unpinned names with version constraints pinned in `package/requirements-{client,tpu}.txt`.
+- [ ] **Declaration & link parity**: every `scripts`, `references`, and `delegates` entry is referenced in prose (`unused-declarations`, `delegation-consistency`), and every markdown link resolves to a declared bundled file (`instruction-links`, `reference-links`).
+- [ ] **Deterministic code & prose rigor**: deterministic logic lives in Python/runtime/schemas rather than prompt prose, and CLI entry points fail fast on unknown flags (`parse_args`); prompts use `{{runtime}} compute ...` without restating generic compute (`generic-compute-prose`) or journal mechanics, use `{{built-in:ask_user_question}}` in skills rather than harness-specific tools (`ask_question`, `AskUserQuestion`, `request_user_input`, `invoke_subagent`, `Bash tool`; `legacy-paths`), state no harness-specific subagent waiting (`transcript.jsonl`), cite public TPU facts via `{{agent:tpu-knowledge-base}}`, and contain zero internal/non-public references (`.ci/check_denylist.py`).
+- [ ] **Local gates pass**: `make verify && make verify-experimental && make verify-train && make lint && make test && pre-commit run --all-files` (for experimental or training units, also check `python3 framework/compiler.py lint package --manifest <manifest>` reports no findings or warnings on your files).
+
+---
+
 ## 5. Contributing a tpu-knowledge-base source
 
 Agents do not answer public TPU facts from memory: they ask the `tpu-knowledge-base`
@@ -358,16 +460,18 @@ the index at `package/data/tpu-knowledge-base/index/*.jsonl`, one row per source
 row and how its answer is cached. This is the checklist.
 
 1. **A public page**: fetch the URL and confirm it returns 200, then add a row
-   with today's date in `verified` and a `prompt` and `template` that exist.
-   `index.py` refuses a row whose prompt does not exist or whose keyword
-   another row already claims.
+   with today's date in `verified`, unique `keywords`, and a `prompt` id from
+   `package/data/tpu-knowledge-base/prompts/prompt_table.jsonl`
+   (`catalog_test.py` fails on an unknown `prompt` or a keyword another row
+   already claims).
 2. **Knowledge with no citable page** (a playbook, an observed behaviour): an
    authored page under `package/data/tpu-knowledge-base/pages/` and a `page` row
    naming it. The page says which of its claims are documented and which
    observed. A playbook lists the imports it removes under `target_imports`,
    which `preflight_check` reads.
-3. `make test-package` checks the index, the authored pages and the golden
-   rows without fetching anything.
+3. `make test-knowledge-base` (included in `make test`) checks the index,
+   keyword resolution, and authored pages without fetching anything;
+   `make test-package` checks `target_imports` across playbooks.
 
 The knowledge base at `package/data/knowledgebase/` stays in the repository
 but is not packaged, and no agent reads it. `make validate-kb` still checks its
@@ -384,7 +488,7 @@ compiles and stages the package for you; see
 - **Layout**: `eval/datasets/<dataset>/<task>/` holding
   `task.toml`, `instruction.md`, `environment/Dockerfile`, and `tests/`
   (`test.sh` plus `reward.toml` or expectation files). Configs go in
-  `eval/configs/<config>.yaml`.
+  `eval/configs/<harness>/<name>.yaml`.
 - **Naming**: dataset and task directory names must match `^[a-z0-9-]+$`
   (enforced in CI). Directories starting with `_` or `.`
   are ignored, so `_template` is fine.

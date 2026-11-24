@@ -286,7 +286,7 @@ class LayoutTranslationTest(_LayoutTest):
             ("agents/worker.md", "\nThen run `python3 scripts/helper.py`.\n",
              ("agent worker names package files by path",
               "scripts/helper.py -> {{script:helper.py}}",
-              "./scripts/helper.py or <work>/scripts/helper.py")),
+              "<workspace>/scripts/helper.py or <work>/scripts/helper.py")),
             ("references/guide.md", "See references/bundle/a.md.\n",
              ("reference references/guide.md names package files",
               "-> {{reference:bundle/a.md}}")),

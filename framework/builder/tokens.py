@@ -293,7 +293,7 @@ def reject_plain_package_paths(text: str,
                       f" -> {token_for(path)}" for number, path in found) +
             "\nA path that names a file in the workspace, not in the"
             " package, is written as one, with something in front of it:"
-            f" ./{found[0][1]} or <work>/{found[0][1]}.")
+            f" <workspace>/{found[0][1]} or <work>/{found[0][1]}.")
 
 
 def resource_registry(manifest: dict[str, Any]) -> dict[str, str]:

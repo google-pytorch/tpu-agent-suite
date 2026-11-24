@@ -176,9 +176,11 @@ exists.
   token must name a file that `package.release.json` copies.
 - A package path typed out in prose, such as `scripts/tpu-kernel-development/run.py`, is an
   error. The message names the token to use instead.
-- Paths in the user's workspace are fine, but need a prefix such as `./` or
-  `<work>/`, as in `./scripts/train.py`. Without one, `verify` cannot tell
-  `scripts/train.py` apart from a package path that is missing its token.
+- Paths in the user's workspace are fine, but need a prefix such as
+  `<workspace>/` or `<work>/`, as in `<workspace>/scripts/train.py` (`./` also
+  clears `verify`, though `lint`'s `bare-paths` check flags inline `./...`
+  paths). Without a prefix, `verify` cannot tell `scripts/train.py` apart from a
+  package path that is missing its token.
 - An unknown token kind, such as the typo `{{scripts:..}}`, fails and suggests
   the closest valid kind.
 
