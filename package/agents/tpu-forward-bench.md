@@ -40,6 +40,7 @@ scripts:
   - scripts/workload-microbenchmark/core/evidence.py
   - scripts/workload-microbenchmark/core/forward_run.py
   - scripts/workload-microbenchmark/core/jobdata.py
+  - scripts/workload-microbenchmark/core/jobdata_agentx.py
   - scripts/workload-microbenchmark/core/mix.py
   - scripts/workload-microbenchmark/core/project.py
   - scripts/workload-microbenchmark/core/report.py

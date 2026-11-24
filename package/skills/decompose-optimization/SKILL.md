@@ -4,6 +4,7 @@ description: Turns a benchmark job with an xprof capture into a ranked list of o
 scripts:
 - scripts/decompose-optimization/inventory.py
 - scripts/decompose-optimization/q.py
+- scripts/roofline-analysis/cost_estimator/collective.py
 - scripts/roofline-analysis/roofline.py
 references:
 - references/decompose-optimization/decompose_template.md

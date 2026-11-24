@@ -21,6 +21,7 @@ scripts:
 - scripts/optimization-heuristics/hillclimb/run_history.py
 - scripts/optimization-heuristics/hillclimb/trace_roofline.py
 - scripts/optimization-heuristics/hillclimb/verify.py
+- scripts/optimization-heuristics/serving_analysis/limits.py
 references:
 - references/close-gaps/LEDGER-TEMPLATE.md
 - references/close-gaps/serving-hillclimb-gates.md

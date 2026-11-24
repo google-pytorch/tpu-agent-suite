@@ -13,6 +13,7 @@ references:
 - references/tpu-model-onboarding/numerical-parity.md
 scripts:
 - scripts/tpu-model-onboarding/capture_parity.py
+- scripts/tpu-model-onboarding/fetch_weights.py
 ---
 
 <!-- disableFinding(LINE_OVER_80) -->
