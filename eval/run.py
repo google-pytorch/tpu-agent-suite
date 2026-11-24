@@ -2178,12 +2178,10 @@ def _resolve_and_check_run_verifier(
         for item in check_version_drift(family=v_info["verifier_family"]):
             if item.get("drifted"):
                 print(
-                    f"Warning: Verifier scoring inputs drifted for family "
-                    f"'{v_info['verifier_family']}' ({item.get('current_version')}): "
-                    "live files differ from eval/verifiers/versions.yaml. "
-                    "Run `python -m eval.job_naming --refresh-versions` or bump version.",
-                    file=sys.stderr,
-                )
+                    f"==> [Verifier] info: live scoring inputs for family "
+                    f"'{v_info['verifier_family']}' differ from released "
+                    f"'{item.get('current_version')}' in eval/verifiers/versions.yaml; "
+                    "stamping live digest.")
                 break
     except Exception:
         pass

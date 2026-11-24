@@ -278,12 +278,13 @@ You can launch an interactive Claude Code session inside an isolated container w
 
 ## Verifier Versioning
 
-Evaluation runs resolve verifier families and record version provenance from
-[`verifiers/versions.yaml`](verifiers/versions.yaml) into Harbor job/trial
-metadata.
+Evaluation runs resolve the verifier family and version from
+[`verifiers/versions.yaml`](verifiers/versions.yaml) along with the live
+scoring-input digest into Harbor job/trial metadata (non-blocking if live files
+differ from the last release).
 
 ```bash
-# Check or bump verifier versions after editing verifier scripts or rubrics
+# Optionally inspect drift or bump a family when cutting a verifier release
 eval/.venv/bin/python -m eval.job_naming --check-verifier-versions
 eval/.venv/bin/python -m eval.job_naming --bump-version <family>
 ```
