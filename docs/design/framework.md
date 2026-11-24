@@ -152,7 +152,7 @@ are kept there rather than repeated here.
 | Harness | Agent file format | Delegation tool | Config the installer writes |
 | --- | --- | --- | --- |
 | Claude Code | `agents/<name>.md` | `Agent` | `.claude/settings.json`, `.claude/hooks.json` |
-| Codex | `agents/<name>.toml` | `spawn_agent`, which has not yet been validated end to end, so `translate` prints a warning | `.codex/config.toml`, `.codex/hooks.json` |
+| Codex | `agents/<name>.toml` | `spawn_agent`, `collaborationspawn_agent` | `.codex/config.toml`, `.codex/hooks.json` |
 | Antigravity | `agents/<name>.md` | `invoke_subagent` | `.agents/hooks.json`, `.agents/plugin.json` (`~/.gemini/config/` at user scope; no path pre-authorization setting) |
 | Cursor | `.cursor/rules/<package>.mdc` and `skills/`; the rule file inlines each agent and delegating skill | none (agents run as personas in one context) | `.cursor/hooks.json` |
 

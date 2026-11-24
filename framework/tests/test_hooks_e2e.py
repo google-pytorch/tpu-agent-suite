@@ -27,6 +27,7 @@ import unittest
 from pathlib import Path
 from typing import Callable
 
+from framework import harnesses
 from framework.jsonio import read_jsonl
 from framework.paths import TPU_AGENT_SUITE_HOME_SPELLING
 from framework.utils import (RUN_ID_PATTERN, SemVer, extract_all_json_objects,
@@ -565,27 +566,26 @@ class TestHooksCLIEndToEnd(unittest.TestCase):
         )
         last_req = diagnostics_requests[-1]
         prompt_str = str(last_req.get("prompt", ""))
-        json_cands = extract_all_json_objects(prompt_str)
-        if json_cands:
-            payload_to_verify = dict(json_cands[-1])
-        else:
-            payload_to_verify = {"prompt": prompt_str}
-            if "run_id" in last_req:
-                payload_to_verify["run_id"] = last_req["run_id"]
+        if not harnesses.require(harness).is_encrypted_delegation(prompt_str):
+            json_cands = extract_all_json_objects(prompt_str)
+            if json_cands:
+                payload_to_verify = dict(json_cands[-1])
+            else:
+                payload_to_verify = {"prompt": prompt_str}
 
-        diagnostics_request_schema = json.loads(
-            (test_pkg /
-             DIAGNOSTICS_REQUEST_SCHEMA).read_text(encoding="utf-8"))
-        req_errors = validate_instance(payload_to_verify,
-                                       diagnostics_request_schema)
-        self.assertFalse(
-            req_errors,
-            f"Incoming delegation request payload violated "
-            f"{DIAGNOSTICS_REQUEST_SCHEMA}: {req_errors}\nPayload: {payload_to_verify}",
-        )
-        self.assertEqual(
-            payload_to_verify.get("run_id"), expected_run_id,
-            f"{harness} agent was not aware of run_id {expected_run_id}.")
+            diagnostics_request_schema = json.loads(
+                (test_pkg /
+                 DIAGNOSTICS_REQUEST_SCHEMA).read_text(encoding="utf-8"))
+            req_errors = validate_instance(payload_to_verify,
+                                           diagnostics_request_schema)
+            self.assertFalse(
+                req_errors,
+                f"Incoming delegation request payload violated "
+                f"{DIAGNOSTICS_REQUEST_SCHEMA}: {req_errors}\nPayload: {payload_to_verify}",
+            )
+            self.assertEqual(
+                payload_to_verify.get("run_id"), expected_run_id,
+                f"{harness} agent was not aware of run_id {expected_run_id}.")
 
         # 2. Verify the delivered result conforms to the result contract: on
         # the last SubagentStop fire, the one the hooks let through, and in the

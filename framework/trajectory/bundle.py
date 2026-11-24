@@ -80,13 +80,16 @@ def slice_root_records(cut: Cut,
                        records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop everything before the cut, leaving the entrypoint's own work.
 
-    Generic over both harnesses: `cut.mode` says whether the key is a record
-    position or the name of a field to compare against.
+    Generic over all harnesses: `cut.mode` says whether the key is a record
+    position or the name of a field to compare against, and
+    `cut.header_indices` names any pre-cut header records to retain at the top.
     """
     if not cut.detected or cut.key is None:
         return records
     if cut.mode == "index":
-        return records[int(cut.key):]
+        cut_idx = int(cut.key)
+        headers = [records[i] for i in cut.header_indices if 0 <= i < cut_idx]
+        return headers + records[cut_idx:]
     return [
         record for record in records
         if int(record.get(cut.mode) or 0) >= int(cut.key)

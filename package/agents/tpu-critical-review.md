@@ -71,8 +71,7 @@ Return `reviewed` with `verdict`, `pass` (true only for `CONFIRMED`,
   "verdict": "NOT SUPPORTED",
   "pass": false,
   "fixes": [{"severity": "CRITICAL", "finding": "Arms ran different mnbt per recipe.yaml read-back.", "traced_to": "artifact"}],
-  "report_artifact": "<runs>/<run_id>/artifacts/review/g03-critical.md",
-  "run_id": "<run_id>"
+  "report_artifact": "<runs>/<run_id>/artifacts/review/g03-critical.md"
 }
 ```
 

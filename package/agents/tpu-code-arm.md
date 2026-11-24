@@ -77,8 +77,7 @@ your last commit) and `evidence`.
   "status": "changed",
   "summary": "One sorted gather in _gather_tokens: moe_gather 61.0 -> 38.4 us per occurrence, outputs bitwise equal.",
   "plugin": {"repo": "<repo>", "base_sha": "<base sha>", "ref": "<checkout.branch>", "sha": "<commit>", "patch": "<patch>"},
-  "evidence": {"probe_jobs": ["<job_id>", "<job_id>"], "commits": ["<commit>"], "op_before_ms": 0.061, "op_after_ms": 0.0384, "outputs_match": true, "review": "<runs>/<run_id>/artifacts/review/<slug>-critical.md"},
-  "run_id": "<run_id>"
+  "evidence": {"probe_jobs": ["<job_id>", "<job_id>"], "commits": ["<commit>"], "op_before_ms": 0.061, "op_after_ms": 0.0384, "outputs_match": true, "review": "<runs>/<run_id>/artifacts/review/<slug>-critical.md"}
 }
 ```
 

@@ -129,7 +129,6 @@
         "antigravity": {
           "tools": ["invoke_subagent"],
           "matcher": "invoke_subagent",
-          "metadata": ["toolAction", "toolSummary"],
           "args": {
             "subagents": "Subagents",
             "subagent": [
@@ -150,8 +149,8 @@
           }
         },
         "codex": {
-          "tools": ["spawn_agent", "Agent"],
-          "matcher": "spawn_agent|Agent",
+          "tools": ["spawn_agent", "collaborationspawn_agent"],
+          "matcher": "spawn_agent|collaborationspawn_agent",
           "args": {
             "subagent": "agent_type",
             "prompt": "message"

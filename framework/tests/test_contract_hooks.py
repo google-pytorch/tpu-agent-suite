@@ -340,12 +340,11 @@ class TestContractHooks(unittest.TestCase):
     def test_a_dispatch_without_run_id_is_denied(self):
         """The regression this pass fixes.
 
-        Several result schemas require `run_id`. A subagent never sees
-        SessionStart, so the delegation is its only source for the value:
-        dispatched without one it cannot write an artifact under the right run
-        and cannot return a valid result. The denial has to land on the caller,
-        which holds the run_id and can resend, rather than on the subagent that
-        can no longer recover it.
+        A subagent never sees SessionStart, so the delegation is its only
+        source for `run_id`: dispatched without one it cannot write an artifact
+        under the active run. The denial has to land on the caller, which holds
+        the run_id and can resend, rather than on the subagent that can no
+        longer recover it.
         """
         for caller, callee, prompt in self.WORKFLOW:
             payload = self._dispatch(callee, prompt)
@@ -384,7 +383,6 @@ class TestContractHooks(unittest.TestCase):
         reported = {
             "status": "reported",
             "summary": "done",
-            "run_id": RUN_ID,
             "profiling_report_artifact": "/w/iter1/p.md",
             "xprof_version": "xprof 2.24.0",
             "traces": [{
@@ -397,17 +395,14 @@ class TestContractHooks(unittest.TestCase):
         cases = [
             ("tpu-kernel-development", "optimized, no measurements", {
                 "status": "optimized",
-                "run_id": RUN_ID,
                 "artifacts": [ARTIFACT],
                 "summary": "went well",
             }),
             ("analyze-cuda-reference", "summarized, no payload", {
-                "status": "summarized",
-                "run_id": RUN_ID
+                "status": "summarized"
             }),
             ("kernel-worker", "optimized, no measurements", {
                 "status": "optimized",
-                "run_id": RUN_ID,
                 "iteration": 1
             }),
             ("tpu-diagnostics", "no report", without_report),
@@ -417,8 +412,7 @@ class TestContractHooks(unittest.TestCase):
             }),
             ("tpu-diagnostics", "failed without a reason", {
                 "status": "failed",
-                "summary": "x",
-                "run_id": RUN_ID
+                "summary": "x"
             }),
         ]
         for agent, label, payload in cases:
@@ -434,7 +428,6 @@ class TestContractHooks(unittest.TestCase):
         """
         measured = {
             "status": "optimized",
-            "run_id": RUN_ID,
             "slot": "k01",
             "base_kernel_path": "/workspace/work/base.py",
             "best_kernel_artifact": ARTIFACT,
@@ -462,7 +455,7 @@ class TestContractHooks(unittest.TestCase):
         """
 
         def report(status, **fields):
-            return dict(status=status, run_id=RUN_ID, **fields)
+            return dict(status=status, **fields)
 
         diag = "tpu-diagnostics"
         # XProf's "N/A" and null metric values pass through.

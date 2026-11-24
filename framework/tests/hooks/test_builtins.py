@@ -154,11 +154,10 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         self.assertIn("subagent_type", event["args"])
         self.assertEqual(self._validate(event)["decision"], "allow")
 
-        # The keys come from tool-mappings.json, so every harness's are
-        # dropped; a dotted spec (Antigravity's `Subagents.TypeName`)
-        # contributes its root, which is the key the bag carries. agy 1.4.x
-        # sends a single delegation flat, without the Subagents array; the
-        # array form still wins when both are present.
+        # Antigravity maps both dotted (`Subagents.TypeName`) and flat
+        # (`TypeName`, agy 1.4.x single delegation) forms; the array form still
+        # wins when both are present, and outer bag keys are ignored when
+        # validating plain-text prompts.
         flat = {"TypeName": "flat-agent", "Prompt": "flat"}
         nested = {"Subagents": [{"TypeName": "helper", "Prompt": "nested"}]}
         for args, subagent, prompt in ((flat, "flat-agent", "flat"), ({
@@ -190,9 +189,9 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         Supplying the context run_id to the validator alone would let the
         delegation through while the subagent still receives a prompt without
         one. It cannot recover it either: subagents bypass SessionStart, so the
-        prompt is their only source, and several shipped result schemas
-        require the value. The denial has to land on the caller, which holds the
-        run_id and can resend.
+        prompt is their only source for placing artifacts under the active run.
+        The denial has to land on the caller, which holds the run_id and can
+        resend.
         """
         run_id = "20260913T120000Z-abcdef123456"
         res = self._validate({
@@ -213,6 +212,23 @@ class TestBuiltinValidateSchema(unittest.TestCase):
         self.assertIn(run_id, res["reason"])
         self.assertLess(res["reason"].index(run_id),
                         res["reason"].index("20260914T120000Z-000000000000"))
+
+        # A top-level `run_id` on the tool call outside `prompt` never reaches
+        # the subagent, so it must not satisfy the schema.
+        outside_prompt = self._validate({
+            "event": "PreToolUse",
+            "tool": "delegate",
+            "subagent": "strict-worker",
+            "args": {
+                "subagent": "strict-worker",
+                "prompt": "Optimize TPU kernel",
+                "run_id": run_id,
+            },
+            "context": {
+                "run_id": run_id
+            },
+        })
+        self.assertEqual(outside_prompt["decision"], "deny")
 
         supplied = self._validate({
             "event": "PreToolUse",
@@ -301,6 +317,62 @@ class TestBuiltinValidateSchema(unittest.TestCase):
             "output": "Raw prose output is fine",
         })
         self.assertEqual(res_stop["decision"], "allow")
+
+    def test_codex_spawn_agent_items_normalized_into_prompt(self):
+        """MultiAgentV1 `spawn_agent` `items` text blocks normalize into `prompt` when `message` is absent."""
+        valid = json.dumps({"prompt": "x", "run_id": "r1"})
+        mention = {"type": "mention", "path": "app://doc"}
+        bad = {"type": "text", "text": "{\"prompt\": \"x\"}"}
+        ok = {"type": "text", "text": valid}
+        for extra, expected in (
+            ({
+                "items": [mention, ok]
+            }, "allow"),
+            ({
+                "items": [bad]
+            }, "deny"),
+            ({
+                "items": [{
+                    "type": "local_image",
+                    "path": "a.png"
+                }]
+            }, "deny"),
+            ({
+                "message": valid,
+                "items": [bad]
+            }, "allow"),
+        ):
+            ev = events.normalize_inbound_event(
+                {
+                    "tool_name": "spawn_agent",
+                    "tool_input": {
+                        "agent_type": "strict-worker",
+                        **extra
+                    }
+                }, "codex", "PreToolUse", "test-pkg@1.0.0", self.workspace_dir)
+            with self.subTest(extra=extra):
+                self.assertEqual(self._validate(ev)["decision"], expected)
+
+    def test_codex_encrypted_delegation_fallback(self):
+        """Fernet prompts bypass `validate-schema` only on Codex if V2 is enabled manually."""
+        fernet = "gAAAAAB" + ("A" * 91) + "=="
+        for harness, tool, field, msg, expected in (
+            ("codex", "collaborationspawn_agent", "message", fernet, "allow"),
+            ("codex", "spawn_agent", "message", "gAAAAAB {\"prompt\": \"x\"}",
+             "deny"),
+            ("claude-code", "Agent", "prompt", fernet, "deny"),
+        ):
+            ev = events.normalize_inbound_event(
+                {
+                    "tool_name": tool,
+                    "tool_input": {
+                        "agent_type": "strict-worker",
+                        "subagent_type": "strict-worker",
+                        field: msg,
+                    },
+                }, harness, "PreToolUse", "test-pkg@1.0.0", self.workspace_dir)
+            with self.subTest(harness=harness, msg=msg[:12]):
+                self.assertEqual(self._validate(ev)["decision"], expected)
 
 
 class TestBuiltinSkillTools(unittest.TestCase):

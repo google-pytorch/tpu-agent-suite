@@ -255,14 +255,15 @@ def reap_orphaned_jobs(
     return reaped, failed
 
 
-def _spawn(log: Path, *argv: str) -> None:
+def _spawn(log: Path, *argv: str) -> subprocess.Popen[bytes]:
     """Start `runtime.py <argv>` detached, appending its output to `log`.
 
     In a session of its own, so the terminal hanging up or the harness killing
     its process group -- the moments it exists for -- do not take it along.
     """
+    log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as out:
-        subprocess.Popen(  # pylint: disable=consider-using-with
+        return subprocess.Popen(  # pylint: disable=consider-using-with
             [sys.executable, str(RUNTIME), *argv],
             stdin=subprocess.DEVNULL,
             stdout=out,
@@ -287,6 +288,34 @@ def spawn_sweep(run_id: str) -> None:
     """
     _spawn(_path(run_id, "lease-sweep.log"), "compute", "job", "reap",
            "--orphaned")
+
+
+def spawn_reap(
+    run_id: str,
+    workspace: Path,
+    package: str,
+    *,
+    wait_seconds: float = 2.0,
+) -> list[str]:
+    """Reap `run_id`'s batch jobs detached, waiting up to `wait_seconds`.
+
+    Fast cancels finish synchronously before the caller exits; slow cancels
+    keep running in their own session past tight harness SessionEnd caps.
+    """
+    pending = [r.job_id for r in _batch_jobs(run_id)]
+    if not pending:
+        return []
+    proc = _spawn(_path(run_id, "session-end-reap.log"), "compute",
+                  "job", "reap", "--package", package, "--workspace",
+                  str(workspace), "--run-id", run_id)
+    try:
+        proc.wait(timeout=wait_seconds)
+    except subprocess.TimeoutExpired:
+        return []
+    return [
+        jid for jid in pending if (rec := jobs.JobRecord.load(jid)) is not None
+        and rec.status == "CANCELLED"
+    ]
 
 
 def watch(

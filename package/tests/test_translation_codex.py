@@ -49,8 +49,8 @@ from framework.builder import package_checks, package_loader  # noqa: E402
 
 Path = pathlib.Path
 
-SANDBOX_TIERS = ("read-only", "workspace-write", "danger-unrestricted")
-APPROVAL_POLICIES = ("never", "on-demand", "always")
+SANDBOX_TIERS = ("read-only", "workspace-write", "danger-full-access")
+APPROVAL_POLICIES = ("never", "on-request", "untrusted")
 
 
 def capability_sets(
@@ -82,8 +82,8 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
     """Validates that package/ translates correctly to Codex."""
 
     HARNESS = "codex"
-    TARGET_ID = "codex-0.147"
-    VERSION_RANGE = ">=0.145.0,<0.160.0"
+    TARGET_ID = "codex-0.167"
+    VERSION_RANGE = ">=0.145.0,<1.0.0"
     VERSION_COMMAND = ["codex", "--version"]
     SKILL_INSTALL_DEST = ".agents/skills/tpu-agent"
     AGENTS_INSTALL_DEST = ".codex/agents"
@@ -121,27 +121,32 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
         self.assertEqual(plan["json_merges"], [],
                          "Codex configures via TOML, not JSON merges")
 
-        # Keyed by section as well as key: `enabled` appears under both
-        # `agents` and `hooks`, so keying by name alone silently drops one and
-        # asserts against whichever happened to be written last.
         by_key = {
             (entry["section"], entry["key"]): entry
             for entry in plan["toml_sets"]
         }
         self.assertIn(("agents", "enabled"), by_key)
         self.assertIn(("agents", "max_concurrent_threads_per_session"), by_key)
-        self.assertIn(("sandbox", "allowed_paths"), by_key)
+        self.assertIn(("agents", "max_depth"), by_key)
+        self.assertIn(("features", "hooks"), by_key)
+        self.assertIn(("sandbox_workspace_write", "writable_roots"), by_key)
         for entry in plan["toml_sets"]:
             self.assertEqual(entry["path"], ".codex/config.toml")
-            # `hooks` appears once the package declares a lifecycle hook.
-            self.assertIn(entry["section"], ("agents", "sandbox", "hooks"))
+            self.assertIn(
+                entry["section"],
+                ("agents", "features", "sandbox_workspace_write"),
+            )
         self.assertIs(by_key[("agents", "enabled")]["value"], True)
         # A nested chain holds one thread per level.
         self.assertGreaterEqual(
             by_key[("agents", "max_concurrent_threads_per_session")]["value"],
             package_checks.MAX_DELEGATION_DEPTH)
-        self.assertEqual(by_key[("sandbox", "allowed_paths")]["value"],
-                         ["~/.tpu-agent-suite"])
+        self.assertEqual(by_key[("agents", "max_depth")]["value"],
+                         package_checks.MAX_DELEGATION_DEPTH)
+        self.assertIs(by_key[("features", "hooks")]["value"], True)
+        self.assertEqual(
+            by_key[("sandbox_workspace_write", "writable_roots")]["value"],
+            ["~/.tpu-agent-suite"])
 
         # The tpu-knowledge-base routing block targets the AGENTS.md memory file
         # Two blocks: tpu-knowledge-base routing, and the compute rule the
@@ -187,7 +192,7 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
         for agent in self.manifest["agents"]:
             tools = set(agent.get("tools", []))
             if tools & exec_like:
-                expected = "danger-unrestricted"
+                expected = "danger-full-access"
             elif tools & write_like:
                 expected = "workspace-write"
             else:
@@ -228,6 +233,8 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
                 continue
             instructions = self._agent_toml(
                 agent["name"])["developer_instructions"]
+            self.assertIn("spawn_agent", instructions)
+            self.assertIn("Delegate in whole pieces", instructions)
             for delegate in agent["delegates"]:
                 self.assertIn(delegate, instructions)
 
@@ -240,6 +247,16 @@ class TestCodexTranslationParity(TranslationParityBase, unittest.TestCase):
         self.assertFalse(
             (self.dist_dir / "project").exists(),
             "Codex builds must not emit the Claude-only project/ mirror")
+
+    def test_session_end_hooks_capped_at_three_seconds(self):
+        """Codex clamps SessionEnd hook timeouts at 3s and --timeout at 2s."""
+        hooks = jsonio.load_json(self.dist_dir / ".codex" /
+                                 "hooks.json")["hooks"]
+        entries = [h for group in hooks["SessionEnd"] for h in group["hooks"]]
+        self.assertTrue(entries)
+        for entry in entries:
+            self.assertEqual(entry["timeout"], 3)
+            self.assertIn("--timeout 2 ", entry["command"])
 
 
 if __name__ == "__main__":

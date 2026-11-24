@@ -148,7 +148,12 @@ class TestSessionEndReapHook(unittest.TestCase):
         # Session records are central: keep this class's out of the real store.
         self.tmp, self.workspace = helpers.isolated_workspace(self, "home")
 
-    def _dispatch(self, harness, event, payload, session="sess-1"):
+    def _dispatch(self,
+                  harness,
+                  event,
+                  payload,
+                  session="sess-1",
+                  timeout=None):
         run_state.record_session_run(session, self.RUN_ID, package=self.PKG)
         return dispatch.dispatch_hook(
             harness=harness,
@@ -156,6 +161,7 @@ class TestSessionEndReapHook(unittest.TestCase):
             hook_name="session-end-reap",
             event=event,
             builtin="reap-jobs",
+            timeout=timeout,
             workspace=self.workspace,
             raw_input_text=json.dumps(payload),
         )
@@ -215,6 +221,18 @@ class TestSessionEndReapHook(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("kubectl: unauthorized", stderr.getvalue())
         self.assertIn(self.RUN_ID, stderr.getvalue())
+
+    @mock.patch("framework.compute.lease.spawn_reap", return_value=["job-1"])
+    def test_codex_session_end_uses_detached_reap(self, mock_spawn_reap):
+        res, code = self._dispatch("codex",
+                                   "SessionEnd", {"session_id": "sess-1"},
+                                   timeout=2.0)
+        self.assertEqual(code, 0)
+        mock_spawn_reap.assert_called_once_with(self.RUN_ID,
+                                                self.workspace.resolve(),
+                                                self.PKG,
+                                                wait_seconds=1.5)
+        self.assertIn("job-1", res.get("systemMessage", ""))
 
 
 if __name__ == "__main__":

@@ -72,7 +72,6 @@ def _reported(*traces) -> dict:
     return {
         "status": "reported",
         "summary": "read it",
-        "run_id": RUN_ID,
         "profiling_report_artifact": "artifacts/3/tpu_profiling_report.md",
         "xprof_version": "xprof 2.24.0",
         "traces": list(traces) or [_trace()],
@@ -171,7 +170,6 @@ class TestDiagnosticsSchemas(unittest.TestCase):
         self.assertIn("```json", body)
         block = json.loads(_JSON_BLOCK.search(body).group(1).strip())
         self.assertEqual(block["status"], "reported")
-        block["run_id"] = RUN_ID  # the placeholder the agent fills
         self.assertEqual(self._result_errors(block), [])
         self.assertIn("levers", block["traces"][0])
 
@@ -811,7 +809,7 @@ class TestDiagnosticsSchemas(unittest.TestCase):
             ("failure_reason outside the enum",
              dict(base, status="failed", failure_reason="it_broke")),
             ("unknown status", dict(base, status="partial")),
-            ("malformed run_id", dict(base, run_id="x")),
+            ("the retired run_id", dict(base, run_id=RUN_ID)),
         ]:
             with self.subTest(case=label):
                 self.assertTrue(self._result_errors(payload))
@@ -854,7 +852,6 @@ class TestDiagnosticsSchemas(unittest.TestCase):
             self._result_errors({
                 "status": "failed",
                 "summary": "x",
-                "run_id": RUN_ID
             }))
 
     def test_unhappy_paths_need_no_deliverables(self):
@@ -863,24 +860,20 @@ class TestDiagnosticsSchemas(unittest.TestCase):
             {
                 "status": "invalid_input",
                 "summary": "no traces and no workload",
-                "run_id": RUN_ID
             },
             {
                 "status": "invalid_input",
                 "summary": "nothing at that path",
-                "run_id": RUN_ID,
                 "failure_reason": "trace_not_found",
                 "error_message": "no .xplane.pb under /w/3/tensorboard",
             },
             {
                 "status": "needs_input",
                 "summary": "the workload does not construct its inputs",
-                "run_id": RUN_ID
             },
                 *({
                     "status": "failed",
                     "summary": "x",
-                    "run_id": RUN_ID,
                     "failure_reason": reason,
                     "error_message": "tool output",
                 } for reason in ("trace_empty_or_partial", "capture_failed",
@@ -896,7 +889,6 @@ class TestDiagnosticsSchemas(unittest.TestCase):
             self._result_errors({
                 "status": "failed",
                 "summary": "B is empty; A was read",
-                "run_id": RUN_ID,
                 "failure_reason": "trace_empty_or_partial",
                 "traces": [dict(_trace(), label="A")],
             }), [])

@@ -304,7 +304,7 @@ class GoogleHarness(base.Harness):
         """Whether a SessionEnd is fully idle with a completed reason."""
         if event_payload.get("event") != "SessionEnd":
             return False
-        term = event_payload.get("termination", {})
+        term = event_payload.get("termination") or {}
         return (term.get("fully_idle") is True and _termination_reason_in(
             term.get("reason"), _COMPLETED_SESSION_TERMINATION_REASONS))
 

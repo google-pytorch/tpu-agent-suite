@@ -311,6 +311,23 @@ class TestSpawn(_LeaseTestCase):
              ["compute", "job", "reap", "--orphaned"]])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
+    def test_spawn_reap(self):
+        with patch.object(lease, "subprocess") as mock_subprocess:
+            mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired
+            proc = mock_subprocess.Popen.return_value
+            self.assertEqual(lease.spawn_reap(RUN, self.tmp, "pkg@1"), [])
+            mock_subprocess.Popen.assert_not_called()
+
+            rec = self._live("job-1")
+            proc.wait.side_effect = lambda timeout: rec.mark("CANCELLED")
+            self.assertEqual(lease.spawn_reap(RUN, self.tmp, "pkg@1"),
+                             ["job-1"])
+
+            self._live("job-2")
+            proc.wait.side_effect = subprocess.TimeoutExpired("reap", 2.0)
+            self.assertEqual(lease.spawn_reap(RUN, self.tmp, "pkg@1"), [])
+            proc.kill.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

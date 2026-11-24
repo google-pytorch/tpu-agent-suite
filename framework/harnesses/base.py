@@ -191,6 +191,25 @@ class Harness:
         """Whether `event_payload` marks the actual end of the root session."""
         return event_payload.get("event") == "SessionEnd"
 
+    def max_event_timeout(self, canonical_event: str) -> int | None:
+        """The harness's hard ceiling (seconds) on `canonical_event` hooks, or None."""
+        del canonical_event
+        return None
+
+    def is_encrypted_delegation(self, prompt: Any) -> bool:
+        """Whether a `delegate` prompt was encrypted by the harness before PreToolUse."""
+        del prompt
+        return False
+
+    def normalize_tool_args(
+        self,
+        canonical_tool: str,
+        normalized_args: dict[str, Any],
+        raw_args: dict[str, Any],
+    ) -> None:
+        """Populate harness-specific canonical tool args absent from `tool-mappings.json`."""
+        del canonical_tool, normalized_args, raw_args
+
     # Runtime: dispatch lifecycle.
 
     def before_dispatch(self, ctx: DispatchContext) -> HookReply | None:
@@ -206,8 +225,8 @@ class Harness:
     # Runtime: outbound.
 
     # Whether the hook's `message` is announced on stderr before the reply.
-    # True for harnesses whose reply has no field for it; Claude Code carries
-    # it in the reply instead.
+    # True for harnesses whose reply has no field for it; Claude Code and Codex
+    # carry it as `systemMessage` in the reply instead.
     message_on_stderr: bool = False
 
     def render_reply(self, reply: HookReply) -> dict[str, Any]:

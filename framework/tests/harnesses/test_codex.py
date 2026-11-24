@@ -37,9 +37,10 @@ class CodexTest(conformance.HarnessConformance):
         }, "Stop", "resume-after-quota")
         self.assertEqual(retry["decision"], "block")
         self.assertIn("waited", retry["reason"])
+        self.assertNotIn("hookSpecificOutput", retry)
         allow = self._reply({"decision": "allow"}, "Stop",
                             "resume-after-quota")
-        self.assertEqual(allow["decision"], "allow")
+        self.assertEqual(allow, {})
 
     def test_session_start_reply(self):
         allow = self._reply(
@@ -47,15 +48,56 @@ class CodexTest(conformance.HarnessConformance):
                 "decision": "allow",
                 "context": "Context for codex"
             }, "SessionStart", "init-guard")
-        self.assertEqual(allow.get("decision"), "allow")
-        self.assertEqual(allow.get("additional_context"), "Context for codex")
+        self.assertNotIn("decision", allow)
+        self.assertEqual(
+            allow.get("hookSpecificOutput"), {
+                "hookEventName": "SessionStart",
+                "additionalContext": "Context for codex",
+            })
         deny = self._reply(
             {
                 "decision": "deny",
                 "reason": "GCE cluster unavailable"
             }, "SessionStart", "init-guard")
-        self.assertEqual(deny.get("decision"), "block")
-        self.assertEqual(deny.get("reason"), "GCE cluster unavailable")
+        self.assertIs(deny.get("continue"), False)
+        self.assertEqual(deny.get("stopReason"), "GCE cluster unavailable")
+
+    def test_tool_replies(self):
+        self.assertEqual(self._reply({"decision": "allow"}, "PreToolUse"), {})
+
+        rewrite = self._reply(
+            {
+                "decision": "allow",
+                "updated_args": {
+                    "message": "Sanitized"
+                }
+            }, "PreToolUse")
+        self.assertEqual(
+            rewrite["hookSpecificOutput"], {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": {
+                    "message": "Sanitized"
+                },
+            })
+
+        deny = self._reply({"decision": "deny"}, "PreToolUse", "schema-guard")
+        self.assertEqual(
+            deny["hookSpecificOutput"], {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Denied by hook schema-guard",
+            })
+
+        post_ctx = self._reply({
+            "decision": "allow",
+            "context": "Note"
+        }, "PostToolUse")
+        self.assertNotIn("decision", post_ctx)
+        self.assertEqual(post_ctx["hookSpecificOutput"], {
+            "hookEventName": "PostToolUse",
+            "additionalContext": "Note",
+        })
 
 
 if __name__ == "__main__":

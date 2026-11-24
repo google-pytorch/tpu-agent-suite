@@ -52,8 +52,7 @@ Return `recorded` with `action` and what the table lists for it.
   "status": "recorded",
   "action": "commit",
   "summary": "Committed the fused decode kernel on hyp/2-rpa.",
-  "plugin": {"repo": "<repo>", "base_sha": "<base sha>", "ref": "hyp/2-rpa", "sha": "<commit>", "patch": "<work>/patches/hyp-2-rpa-<sha7>.patch"},
-  "run_id": "<run_id>"
+  "plugin": {"repo": "<repo>", "base_sha": "<base sha>", "ref": "hyp/2-rpa", "sha": "<commit>", "patch": "<work>/patches/hyp-2-rpa-<sha7>.patch"}
 }
 ```
 

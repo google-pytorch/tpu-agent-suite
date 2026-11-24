@@ -165,7 +165,6 @@ class TestCodeStackSchemas(unittest.TestCase):
             "action": "push",
             "summary": "no image registry configured",
             "reason": "IMAGE_REGISTRY_NOT_CONFIGURED",
-            "run_id": RUN_ID,
         }
         self.assertEqual(_errors(skipped, schema), [])
         del skipped["reason"]
@@ -178,7 +177,6 @@ class TestCodeStackSchemas(unittest.TestCase):
             "action": "commit",
             "summary": "committed on hyp/2-rpa",
             "plugin": PLUGIN,
-            "run_id": RUN_ID,
         }
         self.assertEqual(_errors(recorded, schema), [])
         del recorded["plugin"]

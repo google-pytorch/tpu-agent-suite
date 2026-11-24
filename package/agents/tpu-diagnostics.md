@@ -600,7 +600,6 @@ other keys.
 {
   "status": "reported",
   "summary": "<what was read or captured, the headline finding>",
-  "run_id": "<run_id>",
   "profiling_report_artifact": "<report path>",
   "xprof_version": "xprof <version>",
   "traces": [

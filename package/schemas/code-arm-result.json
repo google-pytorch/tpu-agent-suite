@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "changed": [
@@ -194,10 +193,6 @@
     "failure_reason": {
       "type": "string",
       "description": "What failed, when status is 'failed'."
-    },
-    "run_id": {
-      "type": "string",
-      "description": "Identifier of the active TPU agent suite run namespace."
     }
   },
   "examples": [
@@ -223,8 +218,7 @@
         "op_after_ms": 0.0384,
         "outputs_match": true,
         "review": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/3-moe-gather-critical.md"
-      },
-      "run_id": "20260921T120000Z-abcdef012345"
+      }
     },
     {
       "status": "refuted",
@@ -237,14 +231,12 @@
         ],
         "op_before_ms": 0.061,
         "outputs_match": false
-      },
-      "run_id": "20260921T120000Z-abcdef012345"
+      }
     },
     {
       "status": "blocked",
       "summary": "The copy is emitted by torch_tpu, outside the vllm_torchtpu plugin.",
-      "reason": "fix outside plugin: torch_tpu's lowering of index_select emits the copy.",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "reason": "fix outside plugin: torch_tpu's lowering of index_select emits the copy."
     }
   ]
 }

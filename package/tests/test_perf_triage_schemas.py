@@ -28,7 +28,6 @@ if str(_REPO_ROOT) not in sys.path:
 from framework import agent_contracts, compiler, jsonio, utils  # noqa: E402
 from framework.builder import package_discovery  # noqa: E402
 
-RUN_ID = "20260921T120000Z-abcdef012345"
 REQUEST = "schemas/perf-triage-request.json"
 RESULT = "schemas/perf-triage-result.json"
 
@@ -119,7 +118,6 @@ class TestPerfTriageSchemas(unittest.TestCase):
                     "status": "failed",
                     "summary": "trace export failed",
                     "failure_reason": "trace_empty_or_partial",
-                    "run_id": RUN_ID,
                 }, schema), [])
 
     def test_missing_inputs_are_invalid_input(self):
@@ -131,7 +129,6 @@ class TestPerfTriageSchemas(unittest.TestCase):
                 {
                     "status": "invalid_input",
                     "summary": "no baseline traces",
-                    "run_id": RUN_ID,
                 }, schema), [])
 
     def test_agent_binds_its_pair_and_delegates(self):

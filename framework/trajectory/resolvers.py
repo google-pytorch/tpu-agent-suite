@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import json
 import os
 import pathlib
 import re
@@ -43,12 +44,14 @@ class Cut:
     # skill-tool-use | slash-command | skill-file-read | user-consented-all |
     # none
     basis: str
-    # Record index (claude-code) or step_index (Google harnesses).
+    # Record index (claude-code, codex) or step_index (Google harnesses).
     key: Any = None
     # How `key` selects records. "index" slices by position; any other value
     # names a record field compared with >=. Keeping this on the cut lets
     # slicing stay generic, so harness knowledge lives only in the resolver.
     mode: str = "index"
+    # Pre-cut record positions retained at the top of an "index" slice.
+    header_indices: tuple[int, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,12 +109,57 @@ def _tool_uses(record: dict[str, Any]) -> Iterable[dict[str, Any]]:
             yield block
 
 
+def _content_text(
+    content: Any, block_types: tuple[str, ...] = ("text", )) -> str:
+    """Plain text from a string or a list of typed content blocks."""
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "") for block in content
+            if isinstance(block, dict) and block.get("type") in block_types)
+    return content if isinstance(content, str) else ""
+
+
 def file_size(path: Path) -> int:
     """Size in bytes, 0 when the file is gone. Follows symlinks by design."""
     try:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _included_agents(
+    agents: dict[str, dict[str, Any]],
+    root_id: str,
+    cut_index: int,
+    spawn_order: Callable[[dict[str, Any], str, int | None], int | None],
+) -> dict[str, tuple[str, int, int]]:
+    """Select subagents launched at or after `cut_index`, including nested ones.
+
+    `spawn_order(entry, parent_id, parent_order)` returns the launch record
+    index when `parent_id` spawned `entry`, or None. `parent_order` is None for
+    root launches and the parent's own launch order for nested spawns.
+    Returns `agent_id -> (parent_id, order, depth)`.
+    """
+    included: dict[str, tuple[str, int, int]] = {}
+    for agent_id, entry in agents.items():
+        order = spawn_order(entry, root_id, None)
+        if order is not None and order >= cut_index:
+            included[agent_id] = (root_id, order, 1)
+
+    changed = True
+    while changed:
+        changed = False
+        for agent_id, entry in agents.items():
+            if agent_id in included:
+                continue
+            for parent_id, (_, parent_order,
+                            parent_depth) in list(included.items()):
+                order = spawn_order(entry, parent_id, parent_order)
+                if order is not None:
+                    included[agent_id] = (parent_id, order, parent_depth + 1)
+                    changed = True
+                    break
+    return included
 
 
 # Claude Code resolver.
@@ -147,14 +195,8 @@ def _slash_command(record: dict[str, Any]) -> str:
     """
     if record.get("type") != "user":
         return ""
-    content = (record.get("message") or {}).get("content")
-    if isinstance(content, list):
-        content = "\n".join(
-            str(block.get("text") or "") for block in content
-            if isinstance(block, dict) and block.get("type") == "text")
-    if not isinstance(content, str):
-        return ""
-    match = _COMMAND_NAME.search(content)
+    text = _content_text((record.get("message") or {}).get("content"))
+    match = _COMMAND_NAME.search(text)
     return match.group(1) if match else ""
 
 
@@ -222,46 +264,22 @@ def _claude_included_agents(
     root_tool_uses: dict[str, int],
     cut_index: int,
     root_id: str,
-) -> dict[str, tuple[str, int]]:
-    """Select subagents launched at or after the cut, including nested ones.
-
-    An agent is in scope when the `Agent` call that launched it sits at or
-    after the cut in the root, or anywhere inside an already-included agent.
-    Returns agent id -> (parent id, launch order), where a top-level agent's
-    parent is `root_id` so the tree joins on agent ids alone.
-    """
-    # Index which transcript contains each tool_use id, so a nested agent can
-    # be attributed to the agent that launched it rather than to the root.
-    agent_tool_uses = {
-        agent_id: _claude_owned_tool_uses(read_transcript(entry["path"]))
-        for agent_id, entry in agents.items()
+) -> dict[str, tuple[str, int, int]]:
+    """Select Claude Code subagents launched at or after the cut."""
+    tool_uses_by_parent = {
+        root_id: root_tool_uses,
+        **{
+            agent_id: _claude_owned_tool_uses(read_transcript(entry["path"]))
+            for agent_id, entry in agents.items()
+        },
     }
 
-    included: dict[str, tuple[str, int]] = {}
-    # Seed with agents launched directly by the root at or after the cut.
-    for agent_id, entry in agents.items():
+    def _order(entry: dict[str, Any], parent_id: str,
+               _parent_order: int | None) -> int | None:
         tool_use_id = str(entry["meta"].get("toolUseId") or "")
-        order = root_tool_uses.get(tool_use_id)
-        if order is not None and order >= cut_index:
-            included[agent_id] = (root_id, order)
+        return tool_uses_by_parent.get(parent_id, {}).get(tool_use_id)
 
-    # Then walk outward: any agent launched from inside an included agent is
-    # itself in scope, at any depth.
-    changed = True
-    while changed:
-        changed = False
-        for agent_id, entry in agents.items():
-            if agent_id in included:
-                continue
-            tool_use_id = str(entry["meta"].get("toolUseId") or "")
-            for parent_id in list(included):
-                order = agent_tool_uses.get(parent_id, {}).get(tool_use_id)
-                if order is None:
-                    continue
-                included[agent_id] = (parent_id, order)
-                changed = True
-                break
-    return included
+    return _included_agents(agents, root_id, cut_index, _order)
 
 
 def resolve_claude_code(session_id: str, entrypoint: str) -> SessionBundle:
@@ -307,8 +325,9 @@ def resolve_claude_code(session_id: str, entrypoint: str) -> SessionBundle:
                                            _claude_owned_tool_uses(records),
                                            cut_index, session_id)
         # Sort by launch order so the bundle reads in the order work happened.
-        for agent_id, (parent_id, order) in sorted(included.items(),
-                                                   key=lambda kv: kv[1][1]):
+        for agent_id, (parent_id, order,
+                       depth) in sorted(included.items(),
+                                        key=lambda kv: kv[1][1]):
             meta = agents[agent_id]["meta"]
             path = agents[agent_id]["path"]
             transcripts.append(
@@ -316,7 +335,7 @@ def resolve_claude_code(session_id: str, entrypoint: str) -> SessionBundle:
                               label=str(meta.get("agentType") or "subagent"),
                               agent_id=agent_id,
                               parent_id=parent_id,
-                              depth=int(meta.get("spawnDepth") or 1),
+                              depth=int(meta.get("spawnDepth") or depth),
                               path=path,
                               order=order,
                               bytes=file_size(path)))
@@ -547,12 +566,356 @@ def resolve_google_harness(harness: str, session_id: str,
                          missing=missing)
 
 
+# --------------------------------------------------------------------------
+# Codex resolver
+# --------------------------------------------------------------------------
+
+
+def _codex_sessions_dir() -> Path:
+    """Sessions directory under $CODEX_HOME, defaulting to ~/.codex/sessions."""
+    config = os.environ.get("CODEX_HOME")
+    return Path(config or Path.home() / ".codex") / "sessions"
+
+
+def _codex_root_transcript(session_id: str) -> Path | None:
+    """Locate the rollout transcript for `session_id` under the sessions tree."""
+    sessions = _codex_sessions_dir()
+    if not sessions.is_dir():
+        return None
+    matches = sorted(p for p in sessions.rglob(f"*{session_id}.jsonl")
+                     if p.name == f"{session_id}.jsonl"
+                     or p.name.endswith(f"-{session_id}.jsonl"))
+    return matches[-1] if matches else None
+
+
+_CODEX_SKILL_NAME = re.compile(r"<skill>\s*<name>\s*([^<\s]+)\s*</name>")
+
+
+def _codex_slash_command(payload: dict[str, Any], entrypoint: str) -> bool:
+    """Whether a Codex user message carries an expanded `<skill>` block for `entrypoint`."""
+    text = _content_text(payload.get("content"), ("input_text", "text"))
+    return entrypoint in _CODEX_SKILL_NAME.findall(text)
+
+
+def _codex_cut(records: list[dict[str, Any]], entrypoint: str) -> Cut:
+    """Find the most recent activation of `entrypoint` in a Codex rollout."""
+    needle = f"skills/{entrypoint}/SKILL.md"
+    cut_index = -1
+    basis = "none"
+    for index, record in enumerate(records):
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        if ptype == "message" and payload.get("role") == "user":
+            if _codex_slash_command(payload, entrypoint):
+                cut_index, basis = index, "slash-command"
+        elif ptype in ("function_call", "custom_tool_call"):
+            call_text = str(
+                payload.get("arguments") or payload.get("input") or "")
+            if needle in call_text:
+                cut_index, basis = index, "skill-file-read"
+    if cut_index < 0:
+        return Cut(detected=False, basis="none")
+    meta_idx = next((i for i in range(cut_index)
+                     if records[i].get("type") == "session_meta"), None)
+    turn_idx = next((i for i in range(cut_index - 1, -1, -1)
+                     if records[i].get("type") == "turn_context"), None)
+    headers = tuple(sorted(i for i in (meta_idx, turn_idx) if i is not None))
+    return Cut(detected=True,
+               basis=basis,
+               key=cut_index,
+               header_indices=headers)
+
+
+def _codex_date_parts(sessions_dir: Path,
+                      directory: Path) -> tuple[int, ...] | None:
+    """Leading numeric `(YYYY[, MM[, DD]])` parts under `sessions_dir`, or None."""
+    try:
+        parts = directory.relative_to(sessions_dir).parts
+    except ValueError:
+        return None
+    if not (1 <= len(parts) <= 3 and all(p.isdigit() for p in parts)):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def _codex_rollout_paths(sessions_dir: Path,
+                         root_path: Path | None = None) -> Iterable[Path]:
+    """Yield `.jsonl` rollouts under `sessions_dir`, skipping dates before `root_path`."""
+    min_date = (_codex_date_parts(sessions_dir, root_path.parent)
+                if root_path is not None else None)
+    if min_date is not None and len(min_date) != 3:
+        min_date = None
+    for dirpath, dirs, files in os.walk(sessions_dir):
+        current = Path(dirpath)
+        if min_date is not None:
+            dirs[:] = sorted(
+                d for d in dirs
+                if (dp := _codex_date_parts(sessions_dir, current / d)) is None
+                or dp >= min_date[:len(dp)])
+        else:
+            dirs.sort()
+        for name in sorted(files):
+            if name.endswith(".jsonl"):
+                yield current / name
+
+
+def _codex_collect_agents(
+    sessions_dir: Path,
+    root_id: str,
+    root_path: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Scan rollout headers for subagent threads belonging to `root_id`."""
+    agents: dict[str, dict[str, Any]] = {}
+    if not sessions_dir.is_dir():
+        return agents
+    for path in _codex_rollout_paths(sessions_dir, root_path):
+        if path == root_path:
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as f:
+                first_line = f.readline().strip()
+        except OSError:
+            continue
+        if not first_line:
+            continue
+        try:
+            first = json.loads(first_line)
+        except ValueError:
+            continue
+        if not isinstance(first, dict) or first.get("type") != "session_meta":
+            continue
+        meta = first.get("payload")
+        if not isinstance(meta, dict):
+            continue
+        agent_id = str(meta.get("id") or "")
+        parent_id = str(meta.get("parent_thread_id") or "")
+        if not agent_id or not parent_id or agent_id == root_id:
+            continue
+        meta_session = str(meta.get("session_id") or "")
+        if meta_session and meta_session != root_id:
+            continue
+        agents[agent_id] = {"meta": meta, "path": path}
+    return agents
+
+
+def _is_codex_spawn_call(payload: dict[str, Any]) -> bool:
+    """Whether a Codex tool-call payload invokes a subagent spawn tool.
+
+    MultiAgentV1 uses `spawn_agent` / `multi_agent_v1__spawn_agent`;
+    MultiAgentV2 flattens the `collaboration` namespace into
+    `collaborationspawn_agent`. Code Mode / JS REPL invokes them via `exec` or
+    `js_repl` custom tool calls.
+    """
+    name = str(payload.get("name") or "")
+    if name.endswith("spawn_agent"):
+        return True
+    # Gate on exec/js_repl so custom_tool_calls like apply_patch are ignored.
+    if payload.get("type") == "custom_tool_call" and name in ("exec",
+                                                              "js_repl"):
+        call_text = str(payload.get("input") or payload.get("arguments") or "")
+        return "spawn_agent" in call_text
+    return False
+
+
+def _codex_parent_outputs(
+        records: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+    """Return `(call_index, output_obj)` for each spawn tool output in `records`."""
+    call_by_id: dict[str, int] = {}
+    outputs: list[tuple[int, dict[str, Any]]] = []
+    for index, record in enumerate(records):
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        call_id = str(payload.get("call_id") or "")
+        # Track only spawn calls so shell/read outputs cannot spoof a spawn.
+        if (ptype in ("function_call", "custom_tool_call") and call_id
+                and _is_codex_spawn_call(payload)):
+            call_by_id[call_id] = index
+        elif (ptype in ("function_call_output", "custom_tool_call_output")
+              and call_id in call_by_id):
+            # Code Mode exec outputs arrive as [{"type": "input_text", ...}].
+            text = _content_text(payload.get("output"), ("input_text", "text"))
+            for obj in utils.extract_all_json_objects(text):
+                outputs.append((call_by_id[call_id], obj))
+    return outputs
+
+
+def _codex_creation_key(
+        item: tuple[str, dict[str, Any]]) -> tuple[bool, float, str, str]:
+    """Creation-order sort key for pairing repeated V2 `agent_path` spawns."""
+    agent_id, entry = item
+    # Parse ISO timestamps so "15:00:00Z" sorts before "15:00:00.500Z".
+    parsed = utils.parse_iso_utc(entry["meta"].get("timestamp"))
+    return (
+        parsed is None,
+        parsed.timestamp() if parsed is not None else 0.0,
+        entry["path"].name,
+        agent_id,
+    )
+
+
+def _codex_child_orders(
+    records: list[dict[str, Any]],
+    children: list[tuple[str, dict[str, Any]]],
+) -> dict[str, int]:
+    """Map `child_agent_id -> spawn_call_index` for one parent thread."""
+    orders: dict[str, int] = {}
+    path_spawns: dict[str, list[int]] = {}
+    for order, obj in _codex_parent_outputs(records):
+        # MultiAgentV1: output carries the child's unique UUID directly.
+        obj_id = str(obj.get("agent_id") or "").strip()
+        if obj_id:
+            orders.setdefault(obj_id, order)
+            continue
+        # MultiAgentV2: output carries only task_name (e.g. "/root/diag"), not UUID.
+        task_path = str(obj.get("task_name") or obj.get("agent_path")
+                        or "").strip()
+        if task_path:
+            path_spawns.setdefault(task_path, []).append(order)
+
+    if not path_spawns:
+        return orders
+
+    by_path: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for agent_id, entry in children:
+        if agent_id in orders:
+            continue
+        agent_path = str(entry["meta"].get("agent_path") or "").strip()
+        if agent_path in path_spawns:
+            by_path.setdefault(agent_path, []).append((agent_id, entry))
+
+    # Pair rollouts sharing an agent_path 1-to-1 with its spawns in time order;
+    # _included_agents then drops pre-cut pairs via `order >= cut_index`.
+    for agent_path, group in by_path.items():
+        for (agent_id, _), order in zip(sorted(group, key=_codex_creation_key),
+                                        path_spawns[agent_path]):
+            orders[agent_id] = order
+    return orders
+
+
+def _codex_included_agents(
+    agents: dict[str, dict[str, Any]],
+    root_records: list[dict[str, Any]],
+    cut_index: int,
+    root_id: str,
+) -> dict[str, tuple[str, int, int]]:
+    """Select Codex subagents launched at or after the cut."""
+    children_by_parent: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for agent_id, entry in agents.items():
+        parent_id = str(entry["meta"].get("parent_thread_id") or "")
+        if parent_id:
+            children_by_parent.setdefault(parent_id, []).append(
+                (agent_id, entry))
+
+    orders_by_parent: dict[str, dict[str, int]] = {
+        root_id:
+        _codex_child_orders(root_records, children_by_parent.get(root_id, []))
+    }
+
+    def _order(entry: dict[str, Any], parent_id: str,
+               parent_order: int | None) -> int | None:
+        if str(entry["meta"].get("parent_thread_id") or "") != parent_id:
+            return None
+        if parent_id not in orders_by_parent:
+            orders_by_parent[parent_id] = _codex_child_orders(
+                read_transcript(agents[parent_id]["path"]),
+                children_by_parent.get(parent_id, []),
+            )
+        agent_id = str(entry["meta"].get("id") or "")
+        order = orders_by_parent[parent_id].get(agent_id)
+        # Nested subagents inherit parent_order if the parent's output wasn't flushed.
+        return parent_order if order is None else order
+
+    return _included_agents(agents, root_id, cut_index, _order)
+
+
+def resolve_codex(session_id: str, entrypoint: str) -> SessionBundle:
+    """Resolve root and subagent transcripts for a Codex session."""
+    root_path = _codex_root_transcript(session_id)
+    if root_path is None:
+        raise TpuAgentSuiteError(
+            f"no Codex transcript found for session {session_id}")
+
+    records = read_transcript(root_path)
+    cut = _codex_cut(records, entrypoint)
+    cut_index = int(cut.key) if cut.detected else 0
+
+    harness_version = ""
+    models: dict[str, Any] = {"observed": [], "usage": {}, "source": "none"}
+    current_model = ""
+    for record in records:
+        rtype = record.get("type")
+        payload = record.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if rtype == "session_meta" and not harness_version:
+            harness_version = str(payload.get("cli_version") or "")
+        elif rtype == "turn_context":
+            model = str(payload.get("model") or "")
+            if model:
+                current_model = model
+                if model not in models["observed"]:
+                    models["observed"].append(model)
+                    models["source"] = "transcript"
+        elif rtype == "event_msg" and payload.get("type") == "token_count":
+            total_usage = (payload.get("info") or {}).get("total_token_usage")
+            if isinstance(total_usage, dict):
+                key = current_model or "codex"
+                models["usage"][key] = total_usage
+
+    transcripts = [
+        TranscriptRef(kind="root",
+                      label="root",
+                      agent_id=session_id,
+                      parent_id="",
+                      depth=0,
+                      path=root_path,
+                      order=-1,
+                      bytes=file_size(root_path))
+    ]
+
+    agents = _codex_collect_agents(_codex_sessions_dir(), session_id,
+                                   root_path)
+    included = _codex_included_agents(agents, records, cut_index, session_id)
+    for agent_id, (parent_id, order, depth) in sorted(included.items(),
+                                                      key=lambda kv:
+                                                      (kv[1][1], kv[0])):
+        entry = agents[agent_id]
+        meta = entry["meta"]
+        path = entry["path"]
+        transcripts.append(
+            TranscriptRef(kind="subagent",
+                          label=str(meta.get("agent_role") or "subagent"),
+                          agent_id=agent_id,
+                          parent_id=parent_id,
+                          depth=depth,
+                          path=path,
+                          order=order,
+                          bytes=file_size(path)))
+
+    return SessionBundle(harness="codex",
+                         session_id=session_id,
+                         cut=cut,
+                         transcripts=transcripts,
+                         harness_version=harness_version,
+                         models=models,
+                         missing=[])
+
+
 # A missing entry here is what produces the "not supported" refusal, so adding
 # a harness is a resolver plus one line, with no change to any skill document.
 # Google harnesses need neither: each member of harnesses.GOOGLE_HARNESSES is
 # registered with the shared resolver, bound to its own name.
-RESOLVERS: dict[str, Callable[[str, Path, str], SessionBundle]] = {
+RESOLVERS: dict[str, Callable[[str, str], SessionBundle]] = {
     "claude-code": resolve_claude_code,
+    "codex": resolve_codex,
     **{
         harness: functools.partial(resolve_google_harness, harness)
         for harness in sorted(harnesses.GOOGLE_HARNESSES)

@@ -424,17 +424,25 @@ def _lease_run(package: str, workspace: Path, run_id: str) -> None:
 
 def _is_session_over(event_payload: dict[str, Any]) -> bool:
     """Return True if a canonical SessionEnd event marks the end of the session."""
-    harness = str(event_payload.get("context", {}).get("harness") or "")
+    harness = str((event_payload.get("context") or {}).get("harness") or "")
     adaptor = harnesses.get(harness)
     if adaptor is None:
         return event_payload.get("event") == "SessionEnd"
     return adaptor.is_session_over(event_payload)
 
 
+# Cloud CLIs (kubectl / gcloud) routinely take several seconds per job; under a
+# tight hook budget (e.g. Codex clamps SessionEnd to 2s inside its 3s cap),
+# detach the reap and leave headroom inside run_builtin_hook_action.
+_DETACHED_REAP_MAX_TIMEOUT_S = 5.0
+_DETACHED_REAP_HEADROOM_S = 0.5
+
+
 def _builtin_reap_jobs(
     package: str,
     workspace: Path,
     event_payload: dict[str, Any] | None = None,
+    timeout: float = utils.DEFAULT_HOOK_TIMEOUT,
     **_kwargs: Any,
 ) -> dict[str, Any]:
     """Builtin hook handler: cancel compute jobs left running when a session ends."""
@@ -453,8 +461,16 @@ def _builtin_reap_jobs(
                                       run_id=run_id,
                                       job_id=job_id)
 
+    failed: dict[str, str] = {}
     try:
-        reaped, failed = compute.reap_jobs(run_id, _resolve_driver)
+        if timeout <= _DETACHED_REAP_MAX_TIMEOUT_S:
+            wait_s = max(0.5, timeout - _DETACHED_REAP_HEADROOM_S)
+            reaped = compute.lease.spawn_reap(run_id,
+                                              workspace,
+                                              package,
+                                              wait_seconds=wait_s)
+        else:
+            reaped, failed = compute.reap_jobs(run_id, _resolve_driver)
     except Exception as exc:  # noqa: BLE001 - reported, the reply still owed
         print(f"runtime: reap of run {run_id} failed -- {exc}",
               file=sys.stderr)

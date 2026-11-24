@@ -5,8 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "status",
-    "run_id"
+    "status"
   ],
   "status_requires": {
     "optimized": [
@@ -41,10 +40,6 @@
         "failed"
       ],
       "description": "What the loop ended up with. 'optimized' means it kept a kernel that compiled, passed its tests and beat the baseline; 'invalid_input' and 'failed' are the ways it can end with nothing to hand back. 'no_speedup' means kernels compiled and passed, but none beat the baseline in the harness's paired timing: the fastest attempt's measurements come back so the caller can see by how much, and the caller keeps the baseline rather than integrating it. 'needs_input' means the loop stopped before its first iteration for a setting only the user can give -- a `gke_job` profile with no `staging_bucket`, say, which cannot bring profile traces back -- and `summary` carries the question and the setup command. Only the fields a given outcome can actually produce are required -- the measurements are owed by 'optimized' and 'no_speedup' alone, declared in `status_requires` and enforced by the runtime, because this validator has no conditional keywords."
-    },
-    "run_id": {
-      "type": "string",
-      "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$"
     },
     "slot": {
       "type": "string",
@@ -202,7 +197,6 @@
   "examples": [
     {
       "status": "optimized",
-      "run_id": "20260914T120000Z-000000000000",
       "slot": "k01",
       "base_kernel_path": "/workspace/work/base.py",
       "summary": "Kept iteration 3: block-wise softmax with a fused epilogue, 2.31x over the baseline.",

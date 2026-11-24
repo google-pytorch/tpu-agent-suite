@@ -88,7 +88,6 @@ class TestRooflineSchemas(unittest.TestCase):
             self._result_errors({
                 "status": "invalid_input",
                 "summary": "workload not given",
-                "run_id": RUN_ID,
             }), [])
 
     def test_request_carries_affected_rows_and_cell_shapes(self):

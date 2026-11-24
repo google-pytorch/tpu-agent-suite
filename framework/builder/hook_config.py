@@ -203,9 +203,18 @@ def build_harness_hooks_config(
             matcher_str = "|".join(matchers)
 
         # Always spelled out, default included: the command line is the one
-        # place the policy is read from when dispatch cannot start.
+        # place the policy is read from when dispatch cannot start. Some
+        # harnesses clamp event timeouts (e.g. Codex caps SessionEnd at 3s);
+        # keep --timeout below that cap so dispatch settles on_failure itself.
         on_failure = hook.get("on_failure", utils.DEFAULT_HOOK_ON_FAILURE)
         on_failure_args = f" --on-failure {on_failure}"
+        adaptor = harnesses.get(harness)
+        max_timeout = (adaptor.max_event_timeout(event)
+                       if adaptor is not None else None)
+        harness_timeout = timeout + HOOK_DISPATCH_HEADROOM_S
+        if max_timeout is not None:
+            harness_timeout = min(harness_timeout, max_timeout)
+            timeout = min(timeout, max(1, max_timeout - 1))
 
         base_cmd = (
             f"python3 {runtime_prefix}/packages/{pkg_tag}/framework/runtime.py hook-dispatch "
@@ -243,15 +252,13 @@ def build_harness_hooks_config(
         else:
             dispatch_cmd = f"{base_cmd}{action_args}"
 
-        # The policy is applied by dispatch, which has to be running for
-        # that. The shell applies it when dispatch is not.
         hook_entry = {
             "type":
             "command",
             "command":
             fail_safe_hook_command(dispatch_cmd, hook_name, on_failure, event),
             "timeout":
-            timeout + HOOK_DISPATCH_HEADROOM_S,
+            harness_timeout,
         }
 
         if hook_name not in hooks_dict:

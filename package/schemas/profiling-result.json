@@ -2,13 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "profiling-result.json",
   "title": "tpu-diagnostics Result",
-  "description": "Output deliverable for the tpu-diagnostics agent. What the package owns is typed and closed: the status, the failure reason, the run id, artifact paths, the traces read and the wrapper around each metric. What XProf owns is passed through untouched: metric names, values, its own status and reason strings, provenance and op tables. XProf's tools and outputs change between nightlies, and the pin is a floor, so a schema that named them would reject a correct result from the next one.",
+  "description": "Output deliverable for the tpu-diagnostics agent. What the package owns is typed and closed: the status, the failure reason, artifact paths, the traces read and the wrapper around each metric. What XProf owns is passed through untouched: metric names, values, its own status and reason strings, provenance and op tables. XProf's tools and outputs change between nightlies, and the pin is a floor, so a schema that named them would reject a correct result from the next one.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "reported": [
@@ -34,11 +33,6 @@
     "summary": {
       "type": "string",
       "description": "What was read or captured and how, the headline finding -- including any comparison between traces -- and for any other status what went wrong or what is needed."
-    },
-    "run_id": {
-      "type": "string",
-      "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$",
-      "description": "The run id the request carried, verbatim."
     },
     "profiling_report_artifact": {
       "type": "string",
@@ -446,7 +440,6 @@
     {
       "status": "reported",
       "summary": "Read session 2026_09_21_12_30_00 in 41s. The step is 38% idle on the TensorCore, dominated by infeed; MXU utilization is a lower bound because two custom calls carry no cost model.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "profiling_report_artifact": "/runs/20260921T120000Z-abcdef012345/artifacts/3/tpu_profiling_report.md",
       "xprof_version": "xprof 2.24.0",
       "traces": [
@@ -490,7 +483,6 @@
     {
       "status": "reported",
       "summary": "Captured the Pallas flash-attention workload on v6e with LLO debug info registered and read it in 9s: one kernel holds 99.9% of device time at 1.5389 ms per step, stall-bound rather than compute- or memory-bound.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "profiling_report_artifact": "/runs/20260921T120000Z-abcdef012345/artifacts/iter2/profile_summary.md",
       "xprof_version": "xprof 2.24.0",
       "traces": [
@@ -559,7 +551,6 @@
     {
       "status": "reported",
       "summary": "Run A has the shorter step: 233.82 ms against 312.40 ms. Both ran on TPU v6 Lite. The trace of run B was captured without LLO debug info, so its Pallas kernel reads as one opaque block.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "profiling_report_artifact": "/runs/20260921T120000Z-abcdef012345/artifacts/tpu-diagnostics/report.md",
       "xprof_version": "xprof 2.24.0",
       "traces": [
@@ -602,7 +593,6 @@
     {
       "status": "reported",
       "summary": "Read the serving trace in 63s and ranked it by decode steps, since the caller cares about per-token latency. The tensor-parallel all-reduce is the biggest bottleneck at 26% of decode step time, ahead of the paged-attention kernel at 21%.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "profiling_report_artifact": "/runs/20260921T120000Z-abcdef012345/artifacts/tpu-diagnostics/report.md",
       "xprof_version": "xprof 2.24.0",
       "traces": [
@@ -644,7 +634,6 @@
     {
       "status": "failed",
       "summary": "The supplied trace holds a session with no device events. It was not replaced by a capture: re-send it once the run is re-profiled.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "failure_reason": "trace_empty_or_partial",
       "error_message": "get_overview returned no steps for /runs/20260921T120000Z-abcdef012345/artifacts/3/tensorboard, session 2026_09_21_12_30_00"
     }

@@ -121,9 +121,10 @@ class HomeIsolatedTestCase(unittest.TestCase):
         env = unittest.mock.patch.dict(os.environ, {"HOME": str(self.home)})
         env.start()
         self.addCleanup(env.stop)
-        # CLAUDE_CONFIG_DIR overrides the home-relative path, so a caller who
-        # has one exported would otherwise send every lookup elsewhere.
+        # CLAUDE_CONFIG_DIR and CODEX_HOME override home-relative paths, so a
+        # caller who has one exported would otherwise send lookups elsewhere.
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("CODEX_HOME", None)
 
 
 class GoogleHarnessTestCase(HomeIsolatedTestCase):
@@ -353,6 +354,17 @@ class SlicingAndCapTest(unittest.TestCase):
                              "step_index": 4
                          }])
 
+    def test_index_mode_keeps_header_indices(self) -> None:
+        records = [{"seq": i} for i in range(6)]
+        cut = trajectory.Cut(detected=True,
+                             basis="slash-command",
+                             key=4,
+                             header_indices=(0, 3))
+        self.assertEqual(
+            trajectory.slice_root_records(cut, records),
+            [records[0], records[3], records[4], records[5]],
+        )
+
     def test_oversized_artifacts_are_dropped_and_reported(self) -> None:
         """A file over the cap is excluded, but never silently."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -458,18 +470,307 @@ class PushFeedbackTest(HomeIsolatedTestCase):
         self.assertIn(journal.RENDERED_FILE, names)
 
 
+class CodexResolverTest(HomeIsolatedTestCase):
+    """The Codex resolver: rollout discovery, cut detection, and subagents."""
+
+    SESSION = "01a1cd0b-1075-7cf3-9dde-967d55ec183f"
+
+    def _rollout(
+        self,
+        thread_id: str,
+        records: list[dict] = (),
+        *,
+        codex_home: Path | None = None,
+        date: tuple[str, str, str] = ("2026", "11", "11"),
+        **meta: object,
+    ) -> Path:
+        root = codex_home or (self.home / ".codex")
+        y, m, d = date
+        path = (root / "sessions" / y / m / d /
+                f"rollout-{y}-{m}-{d}T15-00-00-{thread_id}.jsonl")
+        header = {
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "cli_version": "0.167.0",
+                **meta
+            },
+        }
+        _write_jsonl(path, [header, *records])
+        return path
+
+    @staticmethod
+    def _msg(role: str, text: str) -> dict:
+        return {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": role,
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }],
+            },
+        }
+
+    @staticmethod
+    def _call(call_id: str,
+              name: str,
+              text: str,
+              custom: bool = False) -> dict:
+        key = "input" if custom else "arguments"
+        ptype = "custom_tool_call" if custom else "function_call"
+        return {
+            "type": "response_item",
+            "payload": {
+                "type": ptype,
+                "call_id": call_id,
+                "name": name,
+                key: text
+            },
+        }
+
+    @staticmethod
+    def _output(call_id: str, output: str, custom: bool = False) -> dict:
+        ptype = "custom_tool_call_output" if custom else "function_call_output"
+        return {
+            "type": "response_item",
+            "payload": {
+                "type": ptype,
+                "call_id": call_id,
+                "output": output
+            },
+        }
+
+    def test_cut_ignores_injected_preamble_and_tracks_latest_activation(
+            self) -> None:
+        """Developer/AGENTS.md headers are ignored; the latest activation wins."""
+        records = [
+            {
+                "type": "turn_context",
+                "payload": {
+                    "model": "old-model"
+                }
+            },
+            self._msg("developer", ".agents/skills/tpu-agent/SKILL.md"),
+            self._msg("user", "# AGENTS.md instructions for /w\n$tpu-agent"),
+        ]
+        self._rollout(self.SESSION, records)
+        self.assertFalse(
+            trajectory.resolve_codex(self.SESSION, "tpu-agent").cut.detected)
+
+        records.extend([
+            {
+                "type": "turn_context",
+                "payload": {
+                    "model": "active-model"
+                }
+            },
+            self._msg("user", "<skill>\n<name>tpu-agent</name>\n</skill>"),
+        ])
+        path = self._rollout(self.SESSION, records)
+        disk = jsonio.read_jsonl(path)
+        bundle = trajectory.resolve_codex(self.SESSION, "tpu-agent")
+        self.assertEqual((bundle.cut.basis, bundle.cut.key),
+                         ("slash-command", 5))
+        self.assertEqual(bundle.cut.header_indices, (0, 4))
+        self.assertEqual(
+            trajectory.slice_root_records(bundle.cut, disk),
+            [disk[0], disk[4], disk[5]],
+        )
+
+        records.append(
+            self._call(
+                "c1",
+                "exec",
+                'tools.exec_command({cmd:"cat .agents/skills/tpu-agent/SKILL.md"})',
+                custom=True))
+        self._rollout(self.SESSION, records)
+        bundle = trajectory.resolve_codex(self.SESSION, "tpu-agent")
+        self.assertEqual((bundle.cut.basis, bundle.cut.key),
+                         ("skill-file-read", 6))
+        self.assertEqual(bundle.cut.header_indices, (0, 4))
+
+    def test_excludes_pre_cut_and_includes_nested_subagents(self) -> None:
+        """Pre-cut spawns are dropped; post-cut and nested spawns are kept."""
+        codex_home = self.home / "custom-codex"
+        os.environ["CODEX_HOME"] = str(codex_home)
+        root_records = [
+            self._call("c_pre", "spawn_agent", '{"agent_type":"old-agent"}'),
+            self._output("c_pre", '{"agent_id":"sub-old"}'),
+            self._call("c_cut", "exec_command",
+                       '{"cmd":"cat .agents/skills/tpu-agent/SKILL.md"}'),
+            self._call("c_post", "spawn_agent", '{"agent_type":"onboarding"}'),
+            self._output("c_post", '{"agent_id":"sub-kid"}'),
+            {
+                "type": "turn_context",
+                "payload": {
+                    "model": "gpt-5.4"
+                }
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                        }
+                    },
+                },
+            },
+        ]
+        self._rollout(self.SESSION, root_records, codex_home=codex_home)
+        self._rollout("sub-old",
+                      codex_home=codex_home,
+                      parent_thread_id=self.SESSION,
+                      agent_role="old-agent")
+        self._rollout(
+            "sub-kid",
+            [
+                self._call("c_deep",
+                           "exec",
+                           "tools.multi_agent_v1__spawn_agent({})",
+                           custom=True),
+                self._output(
+                    "c_deep", '{"agent_id":"sub-grandkid"}', custom=True),
+            ],
+            codex_home=codex_home,
+            parent_thread_id=self.SESSION,
+            agent_role="tpu-model-onboarding",
+        )
+        self._rollout("sub-grandkid",
+                      codex_home=codex_home,
+                      parent_thread_id="sub-kid",
+                      agent_role="tpu-kernel-development")
+
+        bundle = trajectory.resolve_codex(self.SESSION, "tpu-agent")
+        self.assertEqual(bundle.harness_version, "0.167.0")
+        self.assertEqual(bundle.models["observed"], ["gpt-5.4"])
+        self.assertIn("gpt-5.4", bundle.models["usage"])
+        by_label = {ref.label: ref for ref in bundle.transcripts}
+        self.assertEqual(
+            sorted(by_label),
+            ["root", "tpu-kernel-development", "tpu-model-onboarding"])
+        self.assertEqual((by_label["tpu-model-onboarding"].parent_id,
+                          by_label["tpu-model-onboarding"].depth),
+                         (self.SESSION, 1))
+        self.assertEqual((by_label["tpu-kernel-development"].parent_id,
+                          by_label["tpu-kernel-development"].depth),
+                         ("sub-kid", 2))
+
+    def test_skips_date_dirs_older_than_root_rollout(self) -> None:
+        """Rollout dirs older than root's YYYY/MM/DD are skipped; newer stay."""
+        self._rollout("sub-stale",
+                      date=("2026", "11", "10"),
+                      parent_thread_id=self.SESSION,
+                      agent_role="stale-agent")
+        self._rollout(
+            self.SESSION,
+            [
+                self._call("c1", "spawn_agent",
+                           '{"agent_type":"stale-agent"}'),
+                self._output("c1", '{"agent_id":"sub-stale"}'),
+                self._call("c2", "spawn_agent", '{"agent_type":"next-day"}'),
+                self._output("c2", '{"agent_id":"sub-next"}'),
+            ],
+            date=("2026", "11", "11"),
+        )
+        self._rollout("sub-next",
+                      date=("2026", "11", "12"),
+                      parent_thread_id=self.SESSION,
+                      agent_role="next-day")
+        bundle = trajectory.resolve_codex(self.SESSION, "tpu-agent")
+        self.assertEqual([ref.label for ref in bundle.transcripts],
+                         ["root", "next-day"])
+
+    def test_agent_path_prefix_does_not_match_longer_sibling(self) -> None:
+        """`/root/worker_1` does not match `/root/worker_10` or `/root/worker_11`."""
+        self._rollout(
+            self.SESSION,
+            [
+                self._call("c0", "collaborationspawn_agent", "{}"),
+                self._output("c0", '{"task_name":"/root/worker_10"}'),
+                self._msg("user", "<skill>\n<name>tpu-agent</name>\n</skill>"),
+                self._call("c1", "collaborationspawn_agent", "{}"),
+                self._output("c1", '{"task_name":"/root/worker_11"}'),
+                self._call("c2", "collaborationspawn_agent", "{}"),
+                self._output("c2", '{"task_name":"/root/worker_1"}'),
+            ],
+        )
+        for num, role in ((10, "worker-10"), (11, "worker-11"), (1,
+                                                                 "worker-1")):
+            self._rollout(f"sub-v2-{num}",
+                          parent_thread_id=self.SESSION,
+                          agent_path=f"/root/worker_{num}",
+                          agent_role=role)
+
+        bundle = trajectory.resolve_codex(self.SESSION, "tpu-agent")
+        self.assertEqual([ref.label for ref in bundle.transcripts],
+                         ["root", "worker-11", "worker-1"])
+
+    def test_filters_to_spawn_calls_and_pairs_repeated_agent_path(
+            self) -> None:
+        """Non-spawn tools are ignored; repeated `agent_path` and `exec` list outputs match."""
+        self._rollout(
+            self.SESSION,
+            [
+                self._call("c_pre", "collaborationspawn_agent", "{}"),
+                self._output("c_pre", '{"task_name":"/root/diag"}'),
+                self._msg("user", "<skill>\n<name>tpu-agent</name>\n</skill>"),
+                self._call("c_sh", "exec_command", '{"cmd":"echo hi"}'),
+                self._output("c_sh", '{"agent_id":"sub-spoof"}'),
+                self._call(
+                    "c_patch", "apply_patch", "+spawn_agent", custom=True),
+                self._output(
+                    "c_patch", '{"agent_id":"sub-spoof"}', custom=True),
+                self._call("c_post", "collaborationspawn_agent", "{}"),
+                self._output("c_post", '{"task_name":"/root/diag"}'),
+                self._call(
+                    "c_js", "exec", "tools.spawn_agent({})", custom=True),
+                self._output(
+                    "c_js",
+                    [{
+                        "type": "input_text",
+                        "text": '{"agent_id":"sub-js"}'
+                    }],
+                    custom=True,
+                ),
+            ],
+        )
+        self._rollout("sub-spoof",
+                      parent_thread_id=self.SESSION,
+                      agent_role="spoofed")
+        self._rollout("sub-pre",
+                      parent_thread_id=self.SESSION,
+                      agent_path="/root/diag",
+                      agent_role="pre-diag",
+                      timestamp="2026-11-11T15:00:00Z")
+        self._rollout("sub-post",
+                      parent_thread_id=self.SESSION,
+                      agent_path="/root/diag",
+                      agent_role="post-diag",
+                      timestamp="2026-11-11T15:00:00.500Z")
+        self._rollout("sub-js",
+                      parent_thread_id=self.SESSION,
+                      agent_role="js-worker")
+
+        bundle = trajectory.resolve_codex(self.SESSION, "tpu-agent")
+        self.assertEqual([ref.label for ref in bundle.transcripts],
+                         ["root", "post-diag", "js-worker"])
+
+
 class UnsupportedHarnessTest(unittest.TestCase):
-    """Codex and Cursor ship the skill but refuse the export."""
+    """Cursor ships the skill but refuses the export."""
 
     def test_refusal_names_the_harness(self) -> None:
         """A missing resolver entry is what produces the refusal."""
-        for harness in ("codex", "cursor"):
-            with self.subTest(harness=harness):
-                self.assertFalse(trajectory.supported(harness))
-                with self.assertRaises(TpuAgentSuiteError) as caught:
-                    trajectory.resolve_session(harness, "s", "tpu-agent")
-                self.assertIn(harness, str(caught.exception))
-                self.assertIn("not supported", str(caught.exception))
+        self.assertFalse(trajectory.supported("cursor"))
+        with self.assertRaises(TpuAgentSuiteError) as caught:
+            trajectory.resolve_session("cursor", "s", "tpu-agent")
+        self.assertIn("cursor", str(caught.exception))
+        self.assertIn("not supported", str(caught.exception))
 
 
 class RuntimeCliTest(HomeIsolatedTestCase):

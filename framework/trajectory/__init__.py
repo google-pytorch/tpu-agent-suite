@@ -28,8 +28,9 @@ from .bundle import (ARTIFACT_BYTE_CAP, BUNDLE_NAME, MANIFEST_NAME,
                      object_prefix, resolve_for_export, slice_root_records,
                      stage_session_dir, verify_bucket_exists, write_bundle)
 from .resolvers import (RESOLVERS, Cut, SessionBundle, TranscriptRef,
-                        resolve_claude_code, resolve_google_harness,
-                        resolve_session, supported, unsupported_message)
+                        resolve_claude_code, resolve_codex,
+                        resolve_google_harness, resolve_session, supported,
+                        unsupported_message)
 
 __all__ = [
     "ARTIFACT_BYTE_CAP",
@@ -49,6 +50,7 @@ __all__ = [
     "stage_session_dir",
     "export_trajectory",
     "resolve_claude_code",
+    "resolve_codex",
     "resolve_google_harness",
     "resolve_session",
     "slice_root_records",

@@ -198,7 +198,7 @@ class ShippedFrameworkTest(unittest.TestCase):
         """The hooks run framework/runtime.py by path, from any directory."""
         result = self._run([
             str(self.package / "framework" / "runtime.py"), "trajectory",
-            "export", "--harness", "codex", "--entrypoint", "tpu-agent"
+            "export", "--harness", "cursor", "--entrypoint", "tpu-agent"
         ], self.elsewhere)
         self.assertEqual(result.returncode, 1)
         self.assertIn("not supported", result.stderr)

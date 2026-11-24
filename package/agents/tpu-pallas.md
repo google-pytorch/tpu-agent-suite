@@ -89,8 +89,7 @@ image's. Return `failed` with `failure_reason: base mismatch: …`.
   "plugin": {"repo": "<campaign repo>", "base_sha": "<base sha>", "ref": "<checkout.branch>", "sha": "<kernel commit>", "patch": "<runs>/<run_id>/artifacts/tpu-pallas/<slug>/final/kernel_patch.diff"},
   "applies_to": {"image": "<stack_head.image>", "stack_sha": "<checkout.revision>", "exit_code": 0, "job_id": "<job_id>"},
   "carried": ["end-to-end mmlu_pro on the stacked image -> caller (tpu-serving-bench eval)"],
-  "final_report": "<runs>/<run_id>/artifacts/tpu-pallas/<slug>/final/final_report.md",
-  "run_id": "<run_id>"
+  "final_report": "<runs>/<run_id>/artifacts/tpu-pallas/<slug>/final/final_report.md"
 }
 ```
 

@@ -96,7 +96,7 @@ def _build_event_context(
 
 def event_session_id(event_payload: dict[str, Any]) -> str:
     """Extract canonical session_id from event context."""
-    return str(event_payload.get("context", {}).get("session_id") or "")
+    return str((event_payload.get("context") or {}).get("session_id") or "")
 
 
 def _normalize_subagent_stop_event(
@@ -328,6 +328,10 @@ def _normalize_tool_event(
                 normalized_args[canonical_k] = (str(val) if canonical_k
                                                 in ("subagent",
                                                     "prompt") else val)
+        adaptor = harnesses.get(harness)
+        if adaptor is not None:
+            adaptor.normalize_tool_args(normalized_tool, normalized_args,
+                                        raw_args)
 
     session_id_val = str(
         extract_canonical_field(raw_payload, fields.get("session_id", []))

@@ -162,7 +162,7 @@ class TestKernelRequestInlineSource(unittest.TestCase):
         so a result that resolved a slot owes the path."""
         result = jsonio.load_json(PACKAGE_DIR / "schemas" /
                                   "kernel-result.json")
-        base = {"status": "needs_input", "run_id": RUN_ID, "slot": "k01"}
+        base = {"status": "needs_input", "slot": "k01"}
         self.assertEqual(utils.validate_instance(base, result), [
             "$/base_kernel_path: required property is missing when slot is"
             " present"
@@ -177,11 +177,9 @@ class TestKernelRequestInlineSource(unittest.TestCase):
         # Before a slot is resolved there is no path to owe; an optimized
         # result has always resolved one (`status_requires` is the runtime's).
         self.assertEqual(
-            utils.validate_instance(
-                {
-                    "status": "invalid_input",
-                    "run_id": RUN_ID
-                }, result), [])
+            utils.validate_instance({
+                "status": "invalid_input",
+            }, result), [])
         self.assertIn("slot", result["status_requires"]["optimized"])
 
     def test_router_passes_pasted_text_verbatim(self):
@@ -537,7 +535,6 @@ class TestKernelSlotRoundTrip(unittest.TestCase):
         the kernel by both."""
         result = {
             "status": "invalid_input",
-            "run_id": RUN_ID,
             "slot": "k02",
             "base_kernel_path": "/abs/path/model.py",
         }
@@ -548,8 +545,6 @@ class TestKernelSlotRoundTrip(unittest.TestCase):
         result = {
             "status":
             "optimized",
-            "run_id":
-            RUN_ID,
             "slot":
             "k03",
             "base_kernel_path":
@@ -611,8 +606,6 @@ class TestKernelResultCarriesState(unittest.TestCase):
         return {
             "status":
             "optimized",
-            "run_id":
-            RUN_ID,
             "summary":
             "Kept iteration 5: 1.1008x over gmm_v2.",
             "best_latency_ms":
@@ -678,8 +671,6 @@ class TestKernelResultNoSpeedup(unittest.TestCase):
         return {
             "status":
             "no_speedup",
-            "run_id":
-            RUN_ID,
             "slot":
             "k01",
             "base_kernel_path":

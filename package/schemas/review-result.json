@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "reviewed": [
@@ -183,10 +182,6 @@
     "failure_reason": {
       "type": "string",
       "description": "Diagnostic message when status is 'failed'."
-    },
-    "run_id": {
-      "type": "string",
-      "description": "Identifier of the active TPU agent suite run namespace."
     }
   },
   "examples": [
@@ -202,8 +197,7 @@
           "traced_to": "artifact"
         }
       ],
-      "report_artifact": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/g03-critical.md",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "report_artifact": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/g03-critical.md"
     },
     {
       "status": "reviewed",
@@ -223,8 +217,7 @@
           "drop_if": "a padded-vs-unpadded microbench shows under 0.05 ms"
         }
       ],
-      "report_artifact": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/g01-exit.md",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "report_artifact": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/review/g01-exit.md"
     },
     {
       "status": "invalid_input",
@@ -234,8 +227,7 @@
           "input": "artifacts",
           "reason": "A review recomputes from raw sources; none was given."
         }
-      ],
-      "run_id": "20260921T120000Z-abcdef012345"
+      ]
     }
   ]
 }

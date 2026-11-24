@@ -54,6 +54,22 @@ class TestHarnessTranslation(helpers.CompilerTestCase):
         self.assertEqual([t["name"] for t in written["script_tools"]],
                          ["custom_runner"])
 
+    def test_unrestricted_skill_twin_agent_gets_full_tools(self):
+        pkg_dir = self._create_valid_package()
+        manifest = self._read_manifest(pkg_dir)
+        del manifest["native_tools"]
+        self._write_manifest(pkg_dir, manifest)
+        for harness in ("codex", "claude-code"):
+            translators.translate(pkg_dir, harness, self.temp_dir / harness)
+        entry_toml = (self.temp_dir / "codex" / "agents" /
+                      "entry.toml").read_text(encoding="utf-8")
+        self.assertIn('sandbox_mode = "danger-full-access"', entry_toml)
+        self.assertIn("## Session journal", entry_toml)
+        claude_build = jsonio.load_json(self.temp_dir / "claude-code" /
+                                        "tpu-agent-suite-build.json")
+        self.assertIsNone(claude_build["skill_allowed_tools"]["entry"])
+        self.assertIn("shell", claude_build["agent_tools"]["entry"])
+
 
 class TestDelegationContract(helpers.CompilerTestCase):
     """How each harness is told to delegate, or that it cannot."""
@@ -253,9 +269,9 @@ class TestHookTranslation(helpers.CompilerTestCase):
         self.assertIn(
             {
                 "path": ".codex/config.toml",
-                "section": "hooks",
-                "key": "enabled",
-                "value": True
+                "section": "features",
+                "key": "hooks",
+                "value": True,
             }, plan["toml_sets"])
 
     def test_hooks_validation_errors(self):
@@ -503,6 +519,19 @@ class TestStandaloneArchives(unittest.TestCase):
             names = tar.getnames()
             self.assertIn("test-pkg-claude-code-v1.2.3", names)
             self.assertIn("test-pkg-claude-code-v1.2.3/test.txt", names)
+
+    def test_codex_approval_policy_tiers(self):
+
+        def tool(approval):
+            return [{"action_level": {"approval": approval}}]
+
+        self.assertEqual(harness_rules.codex_approval_policy(tool("never")),
+                         "never")
+        self.assertEqual(
+            harness_rules.codex_approval_policy(tool("on-demand")),
+            "on-request")
+        self.assertEqual(harness_rules.codex_approval_policy(tool("always")),
+                         "untrusted")
 
 
 if __name__ == "__main__":

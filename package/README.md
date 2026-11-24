@@ -345,7 +345,6 @@ And the following kernel-worker result example (`schemas/kernel-worker-result.js
   "additionalProperties": false,
   "required": [
     "iteration",
-    "run_id",
     "status"
   ],
   "status_requires": {
@@ -353,7 +352,6 @@ And the following kernel-worker result example (`schemas/kernel-worker-result.js
   },
   "properties": {
     "iteration": { "type": "integer", "minimum": 1 },
-    "run_id": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$" },
     "status": {
       "type": "string",
       "enum": ["optimized", "invalid_input", "failed"]

@@ -241,7 +241,7 @@ Packages declare lifecycle hooks using portable primitives. Hooks can be declare
 At runtime, the embedded hook dispatcher (`runtime.py hook-dispatch`) wraps both types into a unified cross-harness lifecycle:
 - **Normalized Inbound Payload**: Normalizes inbound payloads from Claude Code, Codex, Antigravity (`agy`), and Cursor into a single unified JSON schema on `stdin`.
 - **Deterministic Working Directory**: Always executes hook actions with the target **workspace root** as `cwd`, avoiding harness-specific working directory discrepancies (such as `.agent/` vs `.`).
-- **Timeout Enforcement**: Enforces an execution timeout (`--timeout <seconds>`, defaulting to 10s or configured via `timeout` in `package.release.json`). If hook execution exceeds the timeout, the child process is terminated and the hook is settled by its `on_failure` policy (below). The harness itself is registered with the declared timeout plus `HOOK_DISPATCH_HEADROOM_S` (5s), so the dispatcher's verdict reaches the harness before the harness gives up on the hook and kills it.
+- **Timeout Enforcement**: Enforces an execution timeout (`--timeout <seconds>`, defaulting to 10s or configured via `timeout` in `package.release.json`). If hook execution exceeds the timeout, the child process is terminated and the hook is settled by its `on_failure` policy (below). The harness itself is registered with the declared timeout plus `HOOK_DISPATCH_HEADROOM_S` (5s); when `Harness.max_event_timeout` imposes a lower ceiling (such as Codex's 3s cap on `SessionEnd`), the harness timeout is clamped to that ceiling and `--timeout` is clamped 1s below it (`max(1, max_timeout - 1)`), so the dispatcher's verdict reaches the harness before the harness gives up on the hook and kills it.
 - **Batched Delegations**: When one tool call delegates to several subagents at once (Antigravity's `invoke_subagent` with more than one entry in `Subagents`), each `PreToolUse` hook runs once per subagent, concurrently, each run under the hook's own timeout, so the batch fits the same harness budget as a single call. Subagents the hook denies are removed from the call and the rest proceed; if it denies all of them, the call is denied. A hook script may therefore run alongside other copies of itself, and must be safe to do so.
 - **Outbound Adaptation**: Validates `stdout` against `hook-output.schema.json` and adapts it to the host harness's native contract.
 
@@ -265,7 +265,7 @@ The policy also covers the dispatcher's own failure to start. `hook-dispatch` pu
 Command hooks allow running arbitrary CLI commands with standard Unix exit code semantics without writing harness-specific adapter code:
 
 - **Exit Code `0` (Success)**:
-  - **Empty Output (`""`)**: Automatically synthesized into an `"allow"` decision tailored for the host harness (`hookSpecificOutput.permissionDecision = "allow"` for Claude Code, `{"decision": "allow"}` for Antigravity, `{}` for Cursor).
+  - **Empty Output (`""`)**: Automatically synthesized into an `"allow"` decision tailored for the host harness (`hookSpecificOutput.permissionDecision = "allow"` for Claude Code, `{"decision": "allow"}` for Antigravity, `{}` for Codex and Cursor).
   - **JSON Output**: Validated against `hook-output.schema.json` and translated to the host harness.
 - **Non-Zero Exit Code (Failure)**:
   - Settled by `on_failure`: a `"deny"` under the default, with `stderr` (or a fallback exit code message) as the `reason`. To block under either policy, print a JSON deny instead.

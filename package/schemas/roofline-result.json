@@ -163,10 +163,6 @@
     "failure_reason": {
       "type": "string",
       "description": "Diagnostic message when status is 'failed'."
-    },
-    "run_id": {
-      "type": "string",
-      "description": "Identifier of the active TPU agent suite run namespace."
     }
   },
   "examples": [
@@ -186,8 +182,7 @@
         "sources": [
           "https://docs.cloud.google.com/tpu/docs/tpu7x"
         ]
-      },
-      "run_id": "20260914T120000Z-000000000000"
+      }
     },
     {
       "status": "invalid_input",
@@ -197,8 +192,7 @@
           "input": "workload",
           "reason": "ISL, OSL, max-num-batched-tokens and decode concurrency set every phase time."
         }
-      ],
-      "run_id": "20260914T120000Z-000000000000"
+      ]
     },
     {
       "status": "modeled",
@@ -230,8 +224,7 @@
         "sources": [
           "https://docs.cloud.google.com/tpu/docs/tpu7x"
         ]
-      },
-      "run_id": "20260914T120000Z-000000000000"
+      }
     }
   ]
 }

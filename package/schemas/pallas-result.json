@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "patched": [
@@ -158,10 +157,6 @@
     "failure_reason": {
       "type": "string",
       "description": "What stopped the campaign, when status is 'blocked' or 'failed'."
-    },
-    "run_id": {
-      "type": "string",
-      "description": "Identifier of the active TPU agent suite run namespace."
     }
   },
   "examples": [
@@ -185,14 +180,12 @@
       "carried": [
         "end-to-end mmlu_pro on the stacked image -> caller (tpu-serving-bench eval)"
       ],
-      "final_report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-pallas/rpa-g02/final/final_report.md",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "final_report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-pallas/rpa-g02/final/final_report.md"
     },
     {
       "status": "blocked",
       "summary": "The relayout the gap needs is in torch_tpu, outside the vllm_torchtpu plugin.",
-      "failure_reason": "fix outside plugin: the copy is emitted by torch_tpu's lowering of index_select, which no vllm_torchtpu patch reaches.",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "failure_reason": "fix outside plugin: the copy is emitted by torch_tpu's lowering of index_select, which no vllm_torchtpu patch reaches."
     }
   ]
 }

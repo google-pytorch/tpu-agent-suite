@@ -26,7 +26,7 @@ import pathlib
 import sys
 from typing import Any
 
-from framework import jsonio, paths, utils
+from framework import harnesses, jsonio, paths, utils
 
 Path = pathlib.Path
 TpuAgentSuiteError = utils.TpuAgentSuiteError
@@ -179,28 +179,6 @@ def delegation_graph(
     return edges, roots, int(block.get("max_depth") or 0)
 
 
-def _delegate_routing_keys() -> set[str]:
-    """Return delegation routing/metadata argument keys declared in `tool-mappings.json`."""
-    keys: set[str] = set()
-    try:
-        blocks = utils.get_tool_mappings().get("delegate",
-                                               {}).get("harnesses", {})
-    except TpuAgentSuiteError:
-        return keys
-
-    for h_info in blocks.values():
-        for meta_key in h_info.get("metadata", []):
-            if isinstance(meta_key, str) and meta_key:
-                keys.add(meta_key)
-        for canonical_key, raw_spec in h_info.get("args", {}).items():
-            keys.add(canonical_key)
-            specs = raw_spec if isinstance(raw_spec, list) else [raw_spec]
-            for spec in specs:
-                if isinstance(spec, str) and spec:
-                    keys.add(spec.split(".", 1)[0])
-    return keys
-
-
 def _delegation_denial_reason(
     subagent_name: str,
     errors: list[str],
@@ -309,8 +287,13 @@ def builtin_validate_schema(
         if tool_name != "delegate" or not accepts_schema:
             return {"decision": "allow"}
 
-        args = event_payload.get("args", {})
+        args = event_payload.get("args") or {}
         prompt_val = args.get("prompt")
+        ctx = event_payload.get("context") or {}
+        adaptor = harnesses.get(str(ctx.get("harness") or ""))
+        if adaptor is not None and adaptor.is_encrypted_delegation(prompt_val):
+            return {"decision": "allow"}
+
         schema_props = accepts_schema.get("properties", {})
         candidates = utils.extract_all_json_objects(prompt_val)
 
@@ -347,19 +330,9 @@ def builtin_validate_schema(
                                  subagent_name, [],
                                  run_id=ctx_run_id)
         else:
-            if "prompt" in args or "run_id" in args:
-                payload_to_validate = dict(args)
-                routing_keys = _delegate_routing_keys()
-            else:
-                payload_to_validate = {"prompt": prompt_val or ""}
-                routing_keys = set()
-
-            payload_to_validate = {
-                k: v
-                for k, v in payload_to_validate.items()
-                if k not in routing_keys or k in schema_props
-            }
-
+            payload_to_validate = ({
+                "prompt": prompt_val or ""
+            } if "prompt" in schema_props else {})
             val_errors = utils.validate_instance(payload_to_validate,
                                                  accepts_schema)
             _record_schema_check("accepts",

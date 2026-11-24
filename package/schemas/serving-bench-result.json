@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "measured": [
@@ -514,10 +513,6 @@
     "logs": {
       "type": "string",
       "description": "serve or bench that failed: the saved log of the last server that failed, for the caller to pass on."
-    },
-    "run_id": {
-      "type": "string",
-      "description": "Identifier of the active TPU agent suite run namespace."
     }
   },
   "examples": [
@@ -607,8 +602,7 @@
         }
       ],
       "replay": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/serving_bench_request.json",
-      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/REPORT.md",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/e2e/REPORT.md"
     },
     {
       "status": "evaluated",
@@ -659,8 +653,7 @@
       "gate": "pass",
       "gate_pp": 1.5,
       "delta_pp": -0.29,
-      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/accuracy-qwen3.5-397b-fp8-tp1-dp8-ep.md",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/accuracy-qwen3.5-397b-fp8-tp1-dp8-ep.md"
     },
     {
       "status": "served",
@@ -691,8 +684,7 @@
           "sweep_dir": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/stack/sweep",
           "verification": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-serving-bench/accuracy/stack/verification.json"
         }
-      ],
-      "run_id": "20260921T120000Z-abcdef012345"
+      ]
     },
     {
       "status": "stopped",
@@ -701,8 +693,7 @@
       "summary": "Cancelled accuracy-stack-s1-4; slot gke-v7x/0 free.",
       "stopped": [
         "accuracy-stack-s1-4"
-      ],
-      "run_id": "20260921T120000Z-abcdef012345"
+      ]
     },
     {
       "status": "invalid_input",
@@ -713,16 +704,14 @@
           "input": "arms[].baseline",
           "reason": "exactly one arm is the baseline every other arm is compared with"
         }
-      ],
-      "run_id": "20260921T120000Z-abcdef012345"
+      ]
     },
     {
       "status": "blocked",
       "action": "bench",
       "engine": "vllm",
       "summary": "No slot of the hardware key.",
-      "failure_reason": "no slot of tpu7x|2x2x1|8",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "failure_reason": "no slot of tpu7x|2x2x1|8"
     }
   ]
 }

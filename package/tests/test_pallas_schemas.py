@@ -27,7 +27,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from framework import agent_contracts, compiler, jsonio, utils  # noqa: E402
 
-RUN_ID = "20260921T120000Z-abcdef012345"
 REQUEST = "schemas/pallas-request.json"
 RESULT = "schemas/pallas-result.json"
 
@@ -93,7 +92,6 @@ class TestPallasSchemas(unittest.TestCase):
                     "status": "failed",
                     "summary": "kernel commit does not apply on the image",
                     "failure_reason": "base mismatch: apply exit 4",
-                    "run_id": RUN_ID,
                 }, schema), [])
         patched = next(e for e in schema["examples"]
                        if e["status"] == "patched")
@@ -106,12 +104,10 @@ class TestPallasSchemas(unittest.TestCase):
         schema = _load(RESULT)
         self.assertNotIn("needs_input", schema["properties"]["status"]["enum"])
         self.assertNotEqual(
-            _errors(
-                {
-                    "status": "invalid_input",
-                    "summary": "no stack head",
-                    "run_id": RUN_ID,
-                }, schema), [])
+            _errors({
+                "status": "invalid_input",
+                "summary": "no stack head",
+            }, schema), [])
 
 
 if __name__ == "__main__":

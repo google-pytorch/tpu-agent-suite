@@ -155,26 +155,9 @@ def is_root_agent(manifest: dict[str, Any], agent: dict[str, Any]) -> bool:
 # A harness that runs every agent in one context, by construction. Cursor is
 # the case: `translators.translate_cursor` inlines each agent into one rules
 # file as a persona, so there is no subagent to call and saying otherwise
-# would be a lie.
+# would be a lie. The delegate mapping still lists a tool for it; that tool is
+# for intercepting a call this build never emits.
 DELEGATION_NONE = "@none"
-
-# A harness whose delegation call has not been confirmed. The contract stays
-# silent about the mechanism rather than naming one that may not exist, and the
-# build warns. This is a placeholder, not a resting state: an unnamed mechanism
-# is what lets a model fall back to running an agent's instructions inline.
-DELEGATION_UNVERIFIED = "@unverified"
-
-# Harnesses whose delegation call the runtime intercepts but nobody has watched
-# a model actually make. The name is known; that it works is not. Naming an
-# unconfirmed mechanism in a contract is worse than saying nothing, because a
-# model that tries it and fails falls back to running the agent inline.
-UNVERIFIED_DELEGATION_HARNESSES: frozenset[str] = frozenset({"codex"})
-
-# Harnesses that run every agent in one context by construction. Cursor is the
-# case: `translators.translate_cursor` inlines each agent into one rules file
-# as a persona, so there is no subagent to call and saying otherwise would be a
-# lie. The delegate mapping still lists a tool for it; that tool is for
-# intercepting a call this build never emits.
 INLINING_HARNESSES: frozenset[str] = frozenset({"cursor"})
 
 
@@ -193,8 +176,6 @@ def load_harness_delegation_tools() -> dict[str, str]:
     for harness, spec in blocks.items():
         if harness in INLINING_HARNESSES:
             tools[harness] = DELEGATION_NONE
-        elif harness in UNVERIFIED_DELEGATION_HARNESSES:
-            tools[harness] = DELEGATION_UNVERIFIED
         else:
             names = spec.get("tools") or []
             if names:
@@ -238,13 +219,6 @@ def delegation_tool_for(harness: str, delegates: list[str]) -> str:
             f"harness {harness} has no delegation mechanism declared, but"
             f" delegation to {sorted(delegates)} was requested; add its"
             " `delegate` entry to tool-mappings.json or drop the routing")
-    if tool == DELEGATION_UNVERIFIED:
-        print(
-            f"WARNING: harness {harness} delegates to {sorted(delegates)} but"
-            " its delegation tool is unverified; the generated contract cannot"
-            " name how to delegate.",
-            file=sys.stderr,
-        )
     return tool
 
 
@@ -268,7 +242,7 @@ def delegation_mechanism_lines(harness: str,
     every harness and cannot know which one it is on.
     """
     tool = delegation_tool_for(harness, delegates)
-    if not tool or tool == DELEGATION_UNVERIFIED:
+    if not tool:
         return ""
     if tool == DELEGATION_NONE:
         return ("\n- This harness runs every agent in one context: there is no"
@@ -278,14 +252,14 @@ def delegation_mechanism_lines(harness: str,
            " definition and following it yourself is not delegation: it"
            " discards the isolation delegating exists to provide, and is"
            " never the fallback when the call seems unavailable.")
-    if not harnesses.is_google_harness(harness):
+    if harness == "claude-code":
         # How to wait on a handle is left to the agent: the idle gate refuses
         # a stop that would deliver the pause as the result, and says what to
         # do. Claude Code is foreground by default and returns the report;
         # only `run_in_background` returns a handle. Naming both keeps a
         # headless subagent from backgrounding everything and meeting the
-        # gate. Other harnesses are unobserved and keep the handle-only line.
-        if harness == "claude-code" and not shell:
+        # gate.
+        if not shell:
             # Headless, a background child's report reaches its parent only
             # with a tool result the parent requests; an agent without a
             # shell has no call to make, so it launches in the foreground.
@@ -294,20 +268,32 @@ def delegation_mechanism_lines(harness: str,
                 f"\n- `{tool}` runs the subagent and returns its report as"
                 " the tool result. Launch in the foreground: without a"
                 " shell you cannot wait for background work.")
-        elif harness == "claude-code":
+        else:
             returns = (
                 f"\n- `{tool}` runs the subagent and returns its report as"
                 " the tool result. With `run_in_background: true` it returns"
                 " a handle instead and the report reaches you later.")
-        else:
-            returns = (f"\n- `{tool}` returns a handle, not a result, while"
-                       " the work runs; the result reaches you later.")
         return how + returns + (
             "\n- A launch that fails with `Concurrent subagent limit reached`"
             " started nothing: launch it again once one of your subagents"
             " has reported."
-            "\n- Delegate in whole pieces: handing over the job costs one call"
-            " plus what you choose to read.")
+            "\n- Delegate in whole pieces: pass a self-contained task so"
+            " intermediate output stays in the subagent's context.")
+    if harness == "codex":
+        return how + (
+            f"\n- `{tool}` returns a handle, not a result: call `wait_agent`"
+            ' (repeating on `"timed_out": true`) until the subagent finishes;'
+            " ending your turn early aborts it."
+            "\n- If the subagent limit is reached, wait for one to finish (and"
+            " call `close_agent` if available) before retrying."
+            "\n- Delegate in whole pieces: pass a self-contained task so"
+            " intermediate output stays in the subagent's context.")
+    if not harnesses.is_google_harness(harness):
+        return how + (
+            f"\n- `{tool}` returns a handle, not a result, while the work"
+            " runs; the result reaches you later."
+            "\n- Delegate in whole pieces: pass a self-contained task so"
+            " intermediate output stays in the subagent's context.")
     # Antigravity: the call returns a handle while the work runs and the
     # result arrives as a message that wakes the parent. A headless run drops
     # an idle *root* after 30 minutes, so the root alone keeps a heartbeat;
@@ -442,7 +428,7 @@ def codex_sandbox_mode(resolved_tools: list[dict[str, Any]]) -> str:
         or t.get("action_level", {}).get("effect") == "execute"
         or t.get("name") == "shell" for t in resolved_tools)
     if has_host_or_exec:
-        return "danger-unrestricted"
+        return "danger-full-access"
 
     has_workspace_write = any(
         (t.get("action_level", {}).get("scope") == "workspace"
@@ -459,9 +445,9 @@ def codex_approval_policy(resolved_tools: list[dict[str, Any]]) -> str:
     if any(
             t.get("action_level", {}).get("approval") == "always"
             for t in resolved_tools):
-        return "always"
+        return "untrusted"
     if any(
             t.get("action_level", {}).get("approval") == "on-demand"
             for t in resolved_tools):
-        return "on-demand"
+        return "on-request"
     return "never"

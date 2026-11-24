@@ -153,8 +153,6 @@ class TestHelloWorldSchemas(unittest.TestCase):
             "native-tpu",
             "parity_passed":
             True,
-            "run_id":
-            "20260914T120000Z-000000000000",
             "summary":
             "Computed on native-tpu and verified against CPU reference.",
         }

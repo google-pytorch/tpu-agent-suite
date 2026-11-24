@@ -28,7 +28,6 @@ if str(_REPO_ROOT) not in sys.path:
 from framework import agent_contracts, compiler, jsonio, utils  # noqa: E402
 from framework.builder import package_discovery  # noqa: E402
 
-RUN_ID = "20260921T120000Z-abcdef012345"
 REVIEW_REQUEST = "schemas/review-request.json"
 REVIEW_RESULT = "schemas/review-result.json"
 SCHEMAS = (REVIEW_REQUEST, REVIEW_RESULT)
@@ -100,7 +99,6 @@ class TestReviewSchemas(unittest.TestCase):
                         {
                             "status": "invalid_input",
                             "summary": "no claim",
-                            "run_id": RUN_ID,
                         }, schema), [])
 
     def _review_example(self, kind: str) -> dict:

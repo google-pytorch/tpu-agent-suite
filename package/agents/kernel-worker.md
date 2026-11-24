@@ -202,10 +202,11 @@ Whenever this document names an agent and tells you to invoke it, you MUST NOT e
    section exists to prevent.
 
    `run_id` is not decoration. A subagent never sees `SessionStart`, so the
-   delegation is its only source for the value, and every artifact it writes
-   and every result it returns has to carry it. Dispatched without one, it
-   either fails its own output contract or writes under the wrong run.
-   Add the phase's typed fields to the same object when it names any.
+   delegation is its only source for the value, which tells it where to place
+   every artifact under the active run (`{{runs}}/<run_id>/artifacts/...`).
+   Dispatched without one, it returns `invalid_input` or writes outside the
+   active run. Add the phase's typed fields to the same object when it names
+   any.
 3. Stop calling tools and wait for the subagent to report back. DO NOT proceed until you receive a message from the subagent containing its results.
 
 ## Complete Workflow
@@ -1221,7 +1222,6 @@ the run's artifacts directory (e.g. `artifacts/tpu-kernel-development/<slot>/ite
 ```json
 {
   "status": "optimized",
-  "run_id": "<run_id>",
   "iteration": 3,
   "latency_ms": 1.83,
   "speedup_factor": 2.31,

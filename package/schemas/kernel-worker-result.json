@@ -36,10 +36,6 @@
          "description": "Path to the optimized kernel artifact. Owed by an 'optimized' result; absent otherwise.",
          "type": "string"
       },
-      "run_id": {
-         "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$",
-         "type": "string"
-      },
       "speedup_factor": {
          "minimum": 0,
          "type": "number"
@@ -57,7 +53,6 @@
    },
    "required": [
       "iteration",
-      "run_id",
       "status"
    ],
    "type": "object",
@@ -67,7 +62,6 @@
          "iteration": 1,
          "latency_ms": 1.0,
          "speedup_factor": 1.5,
-         "run_id": "20260914T120000Z-000000000000",
          "optimized_kernel_artifact": "artifacts/kernel.py"
       }
    ]

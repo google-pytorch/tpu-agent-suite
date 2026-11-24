@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "triaged": [
@@ -34,9 +33,6 @@
     "summary": {
       "type": "string",
       "description": "The top gaps with their e2e ceilings, and the ops with no floor."
-    },
-    "run_id": {
-      "type": "string"
     },
     "failure_reason": {
       "type": "string",
@@ -331,7 +327,6 @@
     {
       "status": "triaged",
       "summary": "3 gaps above 0.5%: MoE dispatch all-to-all 6.1%, MLA decode attention 3.4%, router top-k 0.9%. Fused EP MoE kernel has no floor.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "engine": "vllm",
       "gaps": [
         {
@@ -408,7 +403,6 @@
     {
       "status": "invalid_input",
       "summary": "The baseline arm has no traces.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "missing": [
         {
           "input": "baseline",
@@ -419,7 +413,6 @@
     {
       "status": "failed",
       "summary": "tpu-diagnostics could not export the events parquet.",
-      "run_id": "20260921T120000Z-abcdef012345",
       "failure_reason": "trace_empty_or_partial"
     }
   ]

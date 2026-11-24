@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "recorded": [
@@ -280,10 +279,6 @@
     "failure_reason": {
       "type": "string",
       "description": "Diagnostic message when status is 'failed'."
-    },
-    "run_id": {
-      "type": "string",
-      "description": "Identifier of the active TPU agent suite run namespace."
     }
   },
   "examples": [
@@ -297,8 +292,7 @@
         "ref": "hyp/2-rpa",
         "sha": "89abcdef0123456789abcdef0123456789abcdef",
         "patch": "./.work/GLM-5.2-FP8/hill-climb/j-0a1b/patches/hyp-2-rpa-89abcde.patch"
-      },
-      "run_id": "20260921T120000Z-abcdef012345"
+      }
     },
     {
       "status": "conflict",
@@ -307,15 +301,13 @@
       "reason": "cherry-pick of 4d5e6f7 conflicts",
       "conflicts": [
         "vllm_torchtpu/layers/rope.py"
-      ],
-      "run_id": "20260921T120000Z-abcdef012345"
+      ]
     },
     {
       "status": "skipped",
       "action": "push",
       "summary": "No image registry configured; stack not pushed.",
-      "reason": "IMAGE_REGISTRY_NOT_CONFIGURED",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "reason": "IMAGE_REGISTRY_NOT_CONFIGURED"
     }
   ]
 }

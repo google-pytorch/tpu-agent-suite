@@ -23,11 +23,6 @@
       ],
       "description": "What this agent did, not what it read about. 'summarized' means the report was produced -- a clear account of a failed compilation is a summarized result, and whether the underlying work succeeded is `succeeded`. Reserve the other two for not being able to summarize at all: the record was missing, unreadable, or never written. The fields 'summarized' owes are declared in `status_requires`."
     },
-    "run_id": {
-      "type": "string",
-      "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$",
-      "description": "Session run id, passed verbatim. Optional, but pattern-checked when present so a malformed id fails here rather than resolving to the wrong artifact root."
-    },
     "succeeded": {
       "type": "boolean",
       "description": "Did the work being summarized succeed? Owed by a 'summarized' result. Deliberately separate from `status`, which is about this agent: compilation failing, a check failing and a sweep finding nothing are all `succeeded: false` inside a perfectly successful summary."
@@ -59,7 +54,6 @@
   "examples": [
     {
       "status": "summarized",
-      "run_id": "20260914T120000Z-000000000000",
       "succeeded": true,
       "summary": "Entry point `flash_fwd_kernel`: FlashAttention-2 forward, one block per (batch, head, query tile). 4 ALGORITHMIC, 3 STRUCTURAL, 5 NON_PORTABLE items; the key ALGORITHMIC idea is the online softmax that never materializes the full score matrix. No base.py and nothing outside ref/ was written.",
       "summary_artifact": "artifacts/tpu-kernel-development/k01/ref/ref_cuda_context.md"

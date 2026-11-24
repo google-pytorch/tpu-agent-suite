@@ -84,8 +84,7 @@ Return `modeled` with:
   "results": {"roofline_ms": 0.21},
   "rows": [{"operator": "MLA: QK Rope", "cell": "decode-b64", "layer_total_ms": 0.21, "bound_by": "MXU"}],
   "hardware": {"accelerator_type": "tpu7x-8", "sources": ["https://docs.cloud.google.com/tpu/docs/tpu7x"]},
-  "artifacts": ["<output_dir>/qk_rope_rows.md", "<output_dir>/roofline_data.json"],
-  "run_id": "<run_id>"
+  "artifacts": ["<output_dir>/qk_rope_rows.md", "<output_dir>/roofline_data.json"]
 }
 ```
 

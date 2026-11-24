@@ -27,8 +27,8 @@ import shutil
 from typing import Any, Callable, Sequence
 
 from framework import compute, frontmatter, harnesses, paths, utils
-from framework.builder import (harness_rules, hook_config, package_discovery,
-                               package_loader, tokens)
+from framework.builder import (harness_rules, hook_config, package_checks,
+                               package_discovery, package_loader, tokens)
 
 Path = pathlib.Path
 
@@ -411,8 +411,14 @@ def harness_install_specs(
                 },
                 {
                     "path": ".codex/config.toml",
-                    "section": "sandbox",
-                    "key": "allowed_paths",
+                    "section": "agents",
+                    "key": "max_depth",
+                    "value": package_checks.MAX_DELEGATION_DEPTH,
+                },
+                {
+                    "path": ".codex/config.toml",
+                    "section": "sandbox_workspace_write",
+                    "key": "writable_roots",
                     "value": [paths.TPU_AGENT_SUITE_HOME_SPELLING],
                 },
             ],
@@ -654,8 +660,8 @@ def build_install_plan(
         elif harness == "codex":
             toml_sets.append({
                 "path": ".codex/config.toml",
-                "section": "hooks",
-                "key": "enabled",
+                "section": "features",
+                "key": "hooks",
                 "value": True,
             })
 

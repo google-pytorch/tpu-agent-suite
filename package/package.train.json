@@ -175,8 +175,8 @@
     },
     {
       "harness": "codex",
-      "name": "codex-0.147",
-      "versions": ">=0.145.0,<0.160.0"
+      "name": "codex-0.167",
+      "versions": ">=0.145.0,<1.0.0"
     },
     {
       "harness": "antigravity",

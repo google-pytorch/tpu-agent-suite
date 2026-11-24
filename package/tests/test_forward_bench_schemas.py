@@ -28,7 +28,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from framework import agent_contracts, compiler, frontmatter, jsonio, utils
 
-RUN_ID = "20260921T120000Z-abcdef012345"
 REQUEST = "schemas/forward-bench-request.json"
 RESULT = "schemas/forward-bench-result.json"
 
@@ -139,7 +138,6 @@ class TestForwardBenchSchemas(unittest.TestCase):
                             "status": status,
                             "summary": "stopped",
                             "failure_reason": "no slot",
-                            "run_id": RUN_ID,
                         }, schema), [])
 
     def test_unreviewed_adapter_is_named_with_its_path(self):
@@ -157,12 +155,10 @@ class TestForwardBenchSchemas(unittest.TestCase):
         schema = _load(RESULT)
         self.assertNotIn("needs_input", schema["properties"]["status"]["enum"])
         self.assertNotEqual(
-            _errors(
-                {
-                    "status": "invalid_input",
-                    "summary": "no baseline arm",
-                    "run_id": RUN_ID,
-                }, schema), [])
+            _errors({
+                "status": "invalid_input",
+                "summary": "no baseline arm",
+            }, schema), [])
 
     def test_agent_binds_its_pair_and_delegates(self):
         agent, _ = frontmatter.parse_frontmatter_document(

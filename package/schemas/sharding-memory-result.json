@@ -6,16 +6,10 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "run_id",
     "status",
     "summary"
   ],
   "properties": {
-    "run_id": {
-      "type": "string",
-      "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$",
-      "description": "Session run identifier namespace."
-    },
     "status": {
       "type": "string",
       "enum": [
@@ -46,7 +40,6 @@
   },
   "examples": [
     {
-      "run_id": "20260921T120000Z-abcdef012345",
       "status": "completed",
       "summary": "Successfully ingested rule for Qwen3.5-397B ep=8 on v6e_2x2x1 with tags [SHARDING, MOE].",
       "entry_id": "qwen35-397b-v6e-ep8-collective-opt"

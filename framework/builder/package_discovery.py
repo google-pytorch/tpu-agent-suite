@@ -305,10 +305,22 @@ def discover_units(package_dir: Path, manifest: dict[str, Any]) -> None:
             # reports an unresolved delegate against the unit that named it.
 
     # A skill that delegates is also selectable as an agent (`--agent <skill>`)
-    # carrying the same delegation contract.
+    # carrying the same delegation contract. Omitting `tools:` on a skill means
+    # all tools are allowed, whereas `tools: []` on an agent grants none.
+    native_tools = manifest.get("native_tools")
+    if native_tools is None:
+        native_tools = utils.get_native_tools_catalog().get("native_tools", [])
+    unrestricted_tools = [
+        t["name"] for t in (*native_tools, *manifest.get("script_tools", ()),
+                            *manifest.get("mcp_servers", ()))
+        if t.get("visibility") != "internal"
+    ]
     for skill in skills:
         if skill["delegates"] and skill["name"] not in agents:
-            agents[skill["name"]] = dict(skill)
+            twin = dict(skill)
+            if not twin.get("tools"):
+                twin["tools"] = list(unrestricted_tools)
+            agents[skill["name"]] = twin
 
     manifest["skills"] = skills
     manifest["delegated_skills"] = delegated_skills

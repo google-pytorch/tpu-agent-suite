@@ -28,7 +28,6 @@ if str(_REPO_ROOT) not in sys.path:
 from framework import agent_contracts, compiler, jsonio, utils  # noqa: E402
 from framework.builder import package_checks  # noqa: E402
 
-RUN_ID = "20260921T120000Z-abcdef012345"
 REQUEST = "schemas/serving-bench-request.json"
 RESULT = "schemas/serving-bench-result.json"
 
@@ -195,7 +194,6 @@ class TestServingBenchSchemas(unittest.TestCase):
                             "status": status,
                             "summary": "stopped",
                             "failure_reason": "no slot",
-                            "run_id": RUN_ID,
                         }, schema), [])
 
     def test_missing_inputs_are_invalid_input(self):
@@ -203,12 +201,10 @@ class TestServingBenchSchemas(unittest.TestCase):
         schema = _load(RESULT)
         self.assertNotIn("needs_input", schema["properties"]["status"]["enum"])
         self.assertNotEqual(
-            _errors(
-                {
-                    "status": "invalid_input",
-                    "summary": "no workload",
-                    "run_id": RUN_ID,
-                }, schema), [])
+            _errors({
+                "status": "invalid_input",
+                "summary": "no workload",
+            }, schema), [])
 
     def test_agent_binds_its_pair_and_delegates(self):
         agents = {

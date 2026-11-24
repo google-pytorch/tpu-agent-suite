@@ -194,7 +194,8 @@ class TestPackageMultiHarnessInstallIntegration(unittest.TestCase):
         self.assertTrue(config_toml.is_file(), "Missing .codex/config.toml")
         content = config_toml.read_text(encoding="utf-8")
         self.assertIn("[agents]", content)
-        self.assertIn("[sandbox]", content)
+        self.assertIn("[features]", content)
+        self.assertIn("[sandbox_workspace_write]", content)
 
         self.assertTrue((workspace / "AGENTS.md").is_file(),
                         "Missing AGENTS.md memory file")

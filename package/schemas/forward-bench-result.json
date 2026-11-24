@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "summary",
-    "run_id"
+    "summary"
   ],
   "status_requires": {
     "measured": [
@@ -323,10 +322,6 @@
       "type": "string",
       "description": "What stopped the request, when status is 'blocked' or 'failed'."
     },
-    "run_id": {
-      "type": "string",
-      "description": "Identifier of the active TPU agent suite run namespace."
-    },
     "unscored": {
       "type": "boolean",
       "description": "True for a kernel_trace request: its traces are for diagnosis, and no verdict, speedup or T_mix from it is an A/B."
@@ -433,8 +428,7 @@
       ],
       "cost_model": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-forward-bench/j-58d59d77/2-moe-gate/stack.cost_model.json",
       "replay": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-forward-bench/j-58d59d77/2-moe-gate/forward_bench_request.json",
-      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-forward-bench/j-58d59d77/2-moe-gate/REPORT.md",
-      "run_id": "20260921T120000Z-abcdef012345"
+      "report": "~/.tpu-agent-suite/runs/20260921T120000Z-abcdef012345/artifacts/tpu-forward-bench/j-58d59d77/2-moe-gate/REPORT.md"
     },
     {
       "status": "blocked",
@@ -443,8 +437,7 @@
       "adapter": {
         "path": "./.work/models/Llama-4-Scout/model.py",
         "reviewed": false
-      },
-      "run_id": "20260921T120000Z-abcdef012345"
+      }
     },
     {
       "status": "invalid_input",
@@ -454,8 +447,7 @@
           "input": "arms[].baseline",
           "reason": "exactly one arm is the baseline every other arm is scored against"
         }
-      ],
-      "run_id": "20260921T120000Z-abcdef012345"
+      ]
     }
   ]
 }
