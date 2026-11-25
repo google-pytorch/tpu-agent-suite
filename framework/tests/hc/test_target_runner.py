@@ -304,6 +304,42 @@ class TestTargetRunner(unittest.TestCase):
             self.assertEqual(target_runner.run_eval(self.workdir, []), 1)
         self.assertTrue((self.workdir / "summary.json").is_file())
 
+    def test_run_microbenchmark_forward_run_and_runner_mode_dispatch(
+            self) -> None:
+        (self.workdir / "plan.steps.json").write_text("{}", encoding="utf-8")
+        (self.workdir / "forward_run.py").write_text(
+            "import json, pathlib, sys\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+            "out.mkdir(parents=True, exist_ok=True)\n"
+            "pt = [{'point': {'input': 1024, 'output': 1024, 'concurrency': 16}, "
+            "'twin_model': {'output_tok_per_s': 980.0}}]\n"
+            "(out / 'result.json').write_text(json.dumps({'repeats': [pt, pt], 'points': pt}))\n",
+            encoding="utf-8",
+        )
+        (self.workdir / "__hc_context.json").write_text(
+            json.dumps({
+                "runner_mode": "run-microbenchmark",
+                "engine": "vllm",
+                "image": "img@sha256:cafe",
+                "microbenchmark_target": "plan.steps.json",
+                "min_replicates": 2,
+            }),
+            encoding="utf-8",
+        )
+        self.assertEqual(target_runner.main(["--workdir",
+                                             str(self.workdir)]), 0)
+        summary = json.loads(
+            (self.workdir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(
+            [
+                r["output_tokens_per_s"]
+                for r in summary["cells"][0]["replicates"]
+            ],
+            [980.0, 980.0],
+        )
+        self.assertEqual(summary["environment"]["image_digest"], "sha256:cafe")
+
 
 if __name__ == "__main__":
     unittest.main()

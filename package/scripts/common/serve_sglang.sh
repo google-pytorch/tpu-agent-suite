@@ -146,6 +146,30 @@ echo "serve_sglang: timeouts $TIMEOUT_LOG" >&2
 
 echo "serve_sglang: profiler armed (SGLANG_TORCH_PROFILER_DIR=$PROFILE_DIR, PYTHON_TRACER_LEVEL=$PYTHON_TRACER_LEVEL)" >&2
 
+"$PY" - "$PROFILE_DIR/server_env.json" sglang <<'PY' 2>/dev/null || true
+import json, os, pathlib, platform, sys
+from importlib import metadata
+
+def ver(name):
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+env_doc = {
+    "python_version": platform.python_version(),
+    "jax_version": ver("jax"),
+    "jaxlib_version": ver("jaxlib"),
+    "torch_version": ver("torch"),
+    "torch_tpu_version": ver("torch_tpu"),
+    "engine_version": ver(sys.argv[2]),
+    "libtpu_init_args": os.environ.get("LIBTPU_INIT_ARGS") or None,
+    "xla_flags": os.environ.get("XLA_FLAGS") or None,
+}
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps(env_doc, indent=2) + "\n", encoding="utf-8")
+PY
+
 FILES_LOG="${PROFILE_DIR%/}.files.log"
 "$PY" -m http.server "$FILES_PORT" --directory "$PROFILE_DIR" \
   >"$FILES_LOG" 2>&1 &

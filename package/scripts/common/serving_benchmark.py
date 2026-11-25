@@ -74,6 +74,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -116,6 +117,7 @@ BENCH_CLIENTS = ("vllm", "sglang")
 EXIT_OK = 0
 EXIT_CELL_FAILED = 1
 EXIT_SETUP = 2
+DEFAULT_FILES_PORT = 8790
 
 GCS_SCHEME = "gs://"
 
@@ -374,6 +376,34 @@ def shape_ok(shape_cells: list[dict[str, Any]], stop_on_failure: bool) -> bool:
 def http_json(url: str, timeout: float = 10.0) -> Any:
     with urllib.request.urlopen(url, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_server_environment(
+    base_url: str,
+    files_port: int | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Best-effort GET of `server_env.json` from the server's file server."""
+    if files_port is None:
+        raw_port = (os.environ.get("VLLM_PROFILE_FILES_PORT")
+                    or os.environ.get("SGLANG_PROFILE_FILES_PORT") or "")
+        try:
+            files_port = (int(raw_port)
+                          if raw_port.strip() else DEFAULT_FILES_PORT)
+        except ValueError:
+            files_port = DEFAULT_FILES_PORT
+    parsed = urllib.parse.urlsplit(base_url)
+    host = parsed.hostname
+    if not host:
+        return {}
+    netloc = f"[{host}]:{files_port}" if ":" in host else f"{host}:{files_port}"
+    scheme = parsed.scheme or "http"
+    try:
+        data = http_json(f"{scheme}://{netloc}/server_env.json",
+                         timeout=timeout)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def wait_ready(base_url: str, timeout_s: float) -> None:
@@ -2015,11 +2045,14 @@ def main(argv: list[str] | None = None) -> int:
             "each run its own seed instead",
             file=sys.stderr,
             flush=True)
+    environment = ({} if args.dry_run else fetch_server_environment(
+        args.base_url))
     run = {
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "base_url": args.base_url,
         "model": model,
         "client": client_name(args),
+        "environment": environment,
         "settings": {
             "engine":
             args.engine,

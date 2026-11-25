@@ -11,22 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Target-side runner for Hillclimber serving, patching, and accuracy jobs.
+"""Target-side runner for Hillclimber serving, microbenchmark, and accuracy jobs.
 
 Staged into a job's working directory beside canonical launcher scripts
-(`serve_vllm.sh`, `serve_sglang.sh`, `eval_recipe.sh`) to run `serve-vllm`,
-`serve-sglang`, or `eval-vllm` from sealed `__hc_context.json`, candidate
-`__flags.json`, and optional `candidate.patch`.
+(`serve_vllm.sh`, `serve_sglang.sh`, `eval_recipe.sh`, `forward_run.py`) to run
+`serve-vllm`, `serve-sglang`, `eval-vllm`, or `run-microbenchmark` from sealed
+`__hc_context.json`, candidate `__flags.json`, and optional `candidate.patch`.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import importlib.util
 import json
 import math
 import os
 import pathlib
+import platform
 import re
 import shlex
 import shutil
@@ -424,24 +426,259 @@ def run_eval(workdir: Path, cli_args: Sequence[str]) -> int:
     return 0 if summary["status"] == "ok" else (proc.returncode or 1)
 
 
+def _pkg_version(name: str) -> str | None:
+    if not name:
+        return None
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _collect_environment(
+    ctx: Mapping[str, Any],
+    env: Mapping[str, str],
+    effective_env: Any = None,
+) -> dict[str, str | None]:
+    """Capture the 8–10 runtime environment fields inside the TPU job pod."""
+    eff = {
+        str(item["name"]): str(item["value"])
+        for item in (effective_env if isinstance(effective_env, list) else ())
+        if isinstance(item, Mapping) and "name" in item and "value" in item
+    }
+    engine = str(ctx.get("engine") or "").strip()
+    env_doc: dict[str, str | None] = {
+        "python_version":
+        platform.python_version(),
+        "jax_version":
+        _pkg_version("jax"),
+        "jaxlib_version":
+        _pkg_version("jaxlib"),
+        "torch_version":
+        _pkg_version("torch"),
+        "torch_tpu_version":
+        _pkg_version("torch_tpu"),
+        "engine_version":
+        _pkg_version(engine),
+        "libtpu_init_args": (eff.get("LIBTPU_INIT_ARGS")
+                             or env.get("LIBTPU_INIT_ARGS") or None),
+        "xla_flags": (eff.get("XLA_FLAGS") or env.get("XLA_FLAGS") or None),
+    }
+    raw_image = str(ctx.get("image") or "").strip()
+    if raw_image:
+        env_doc["image"] = raw_image
+        _, sep, digest = raw_image.partition("@sha256:")
+        if sep and digest:
+            env_doc["image_digest"] = f"sha256:{digest}"
+    return env_doc
+
+
+def _point_metrics(rec: Mapping[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    twin = rec.get("twin_model")
+    if isinstance(twin, Mapping):
+        for k, v in twin.items():
+            fv = _finite_float(v)
+            if fv is not None:
+                out[str(k)] = fv
+    if "output_tok_per_s" in out and "output_tokens_per_s" not in out:
+        out["output_tokens_per_s"] = out["output_tok_per_s"]
+    dec = rec.get("decode_ms")
+    if isinstance(dec, Mapping):
+        fv = _finite_float(dec.get("median_after_first"))
+        if fv is not None:
+            out.setdefault("decode_ms", fv)
+    mixed = rec.get("mixed_ms")
+    if isinstance(mixed, list) and mixed and isinstance(mixed[0], Mapping):
+        fv = _finite_float(mixed[0].get("median_after_first"))
+        if fv is not None:
+            out.setdefault("mixed_ms", fv)
+    return out
+
+
+def _reduce_forward_result(
+    result: Mapping[str, Any],
+    protocol_cells: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    points = result.get("points")
+    if not isinstance(points, list):
+        return []
+    repeats = result.get("repeats")
+    cells: list[dict[str, Any]] = []
+    for idx, pt_rec in enumerate(points):
+        if not isinstance(pt_rec, Mapping):
+            continue
+        pt = pt_rec.get("point") if isinstance(pt_rec.get("point"),
+                                               Mapping) else {}
+        prefill = pt.get("input")
+        decode = pt.get("output")
+        conc = pt.get("concurrency")
+        cell_idx = idx
+        for pc in protocol_cells:
+            if (pc.get("prefill") == prefill and pc.get("decode") == decode
+                    and pc.get("concurrency") == conc
+                    and isinstance(pc.get("cell_index"), int)):
+                cell_idx = int(pc["cell_index"])
+                break
+        reps: list[dict[str, float]] = []
+        if isinstance(repeats, list) and repeats:
+            for rep in repeats:
+                if (isinstance(rep, list) and idx < len(rep)
+                        and isinstance(rep[idx], Mapping)):
+                    m = _point_metrics(rep[idx])
+                    if m:
+                        reps.append(m)
+        elif (m := _point_metrics(pt_rec)):
+            reps.append(m)
+        if not reps:
+            continue
+        cell: dict[str, Any] = {
+            "cell_index": cell_idx,
+            "status": "ok",
+            "replicates": reps,
+        }
+        if isinstance(prefill, int):
+            cell["prefill"] = prefill
+        if isinstance(decode, int):
+            cell["decode"] = decode
+        if isinstance(conc, int):
+            cell["concurrency"] = conc
+        cells.append(cell)
+    return cells
+
+
+def run_microbenchmark(workdir: Path, cli_args: Sequence[str]) -> int:
+    """Run `forward_run.py` or a `.py` microbenchmark and emit canonical `summary.json`."""
+    ctx = _load_json_dict(workdir / CONTEXT_FILENAME, required=True)
+    flags = _load_json_dict(workdir / FLAGS_FILENAME)
+    env = _job_env(flags)
+    engine = str(ctx.get("engine") or "").strip()
+
+    patch_file = workdir / PATCH_FILENAME
+    if _has_nonempty_patch(patch_file):
+        applier = workdir / "apply_vllm_patch.sh"
+        if engine == "vllm" and applier.is_file():
+            rc = subprocess.run(
+                ["bash", str(applier), PATCH_FILENAME],
+                cwd=workdir,
+                env=env,
+                check=False,
+            ).returncode
+            if rc != 0:
+                return rc
+        elif engine == "sglang":
+            apply_patch(workdir)
+
+    target = str(ctx.get("microbenchmark_target") or "").strip()
+    if not target or not (workdir / target).is_file():
+        raise FileNotFoundError(
+            f"microbenchmark_target {target!r} missing in {workdir}")
+    raw_pcells = ctx.get("protocol_cells")
+    protocol_cells = ([c for c in raw_pcells if isinstance(c, Mapping)]
+                      if isinstance(raw_pcells, list) else [])
+
+    python = _resolve_python()
+    if target.endswith(".json"):
+        runner = workdir / "forward_run.py"
+        if not runner.is_file():
+            raise FileNotFoundError(f"forward_run.py missing in {workdir}")
+        parsed_cli, _ = _parse_flags(cli_args, "--repeats", "--out")
+        out_dir = Path(parsed_cli.out
+                       or "wmb_out") if parsed_cli.out else workdir / "wmb_out"
+        if not out_dir.is_absolute():
+            out_dir = workdir / out_dir
+        cmd = [python, str(runner), "--steps", str(workdir / target)]
+        if parsed_cli.repeats is None:
+            cmd += ["--repeats", str(int(ctx.get("min_replicates") or 1))]
+        if parsed_cli.out is None:
+            cmd += ["--out", str(out_dir)]
+        cmd += [str(a) for a in cli_args]
+        proc = subprocess.run(cmd, cwd=workdir, env=env, check=False)
+        if _is_multihost_worker(os.environ):
+            return proc.returncode
+        res_doc = _load_json_dict(out_dir / "result.json")
+        cells = _reduce_forward_result(res_doc, protocol_cells)
+        env_doc = _collect_environment(ctx, env, res_doc.get("effective_env"))
+        ok = proc.returncode == 0 and bool(cells)
+        summary: dict[str, Any] = {
+            "status": "ok" if ok else "failed",
+            "exit_code": proc.returncode,
+            "environment": env_doc,
+            "cells": cells,
+        }
+    else:
+        cmd = [python, str(workdir / target), *[str(a) for a in cli_args]]
+        proc = subprocess.run(cmd, cwd=workdir, env=env, check=False)
+        if _is_multihost_worker(os.environ):
+            return proc.returncode
+        raw_summary = _load_json_dict(workdir / "summary.json")
+        raw_cells = raw_summary.get("cells")
+        if isinstance(raw_cells, list):
+            cells = raw_cells
+        elif "replicates" in raw_summary:
+            base_cell: dict[str, Any] = {
+                "cell_index": 0,
+                "status": "ok",
+                "replicates": raw_summary["replicates"],
+            }
+            if len(protocol_cells) == 1:
+                for k in ("prefill", "decode", "concurrency"):
+                    if isinstance(protocol_cells[0].get(k), int):
+                        base_cell[k] = protocol_cells[0][k]
+            cells = [base_cell]
+        else:
+            cells = []
+        env_doc = _collect_environment(ctx, env)
+        if isinstance(raw_summary.get("environment"), Mapping):
+            env_doc.update({
+                str(k): v
+                for k, v in raw_summary["environment"].items() if v is not None
+            })
+        ok = (proc.returncode == 0 and raw_summary.get("status", "ok") == "ok"
+              and bool(cells))
+        summary = {
+            "status": "ok" if ok else "failed",
+            "exit_code": proc.returncode,
+            "environment": env_doc,
+            "cells": cells,
+        }
+
+    (workdir / "summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return 0 if summary["status"] == "ok" else (proc.returncode or 1)
+
+
+_COMMANDS = ("serve-vllm", "serve-sglang", "eval-vllm", "run-microbenchmark")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Dispatch `serve-vllm`, `serve-sglang`, or `eval-vllm` for `--workdir`."""
+    """Dispatch `serve-vllm`, `serve-sglang`, `eval-vllm`, or `run-microbenchmark`."""
     parser = argparse.ArgumentParser(
         description="Hillclimber target-side job runner")
     parser.add_argument("--workdir", type=Path, default=Path.cwd())
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    for name in ("serve-vllm", "serve-sglang", "eval-vllm"):
+    sub = parser.add_subparsers(dest="cmd", required=False)
+    for name in _COMMANDS:
         sub.add_parser(name).add_argument("extra", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     workdir = args.workdir.resolve()
-    extra = list(args.extra or [])
+    cmd = args.cmd
+    extra = list(getattr(args, "extra", None) or [])
+    if cmd is None:
+        ctx = _load_json_dict(workdir / CONTEXT_FILENAME, required=True)
+        cmd = str(ctx.get("runner_mode") or "").strip()
+        if cmd not in _COMMANDS:
+            raise ValueError(
+                f"missing CLI subcommand and invalid runner_mode={cmd!r} in {CONTEXT_FILENAME}"
+            )
     if extra[:1] == ["--"]:
         extra = extra[1:]
-    if args.cmd == "serve-vllm":
+    if cmd == "serve-vllm":
         return serve(workdir, "vllm", extra)
-    if args.cmd == "serve-sglang":
+    if cmd == "serve-sglang":
         return serve(workdir, "sglang", extra)
-    return run_eval(workdir, extra)
+    if cmd == "eval-vllm":
+        return run_eval(workdir, extra)
+    return run_microbenchmark(workdir, extra)
 
 
 if __name__ == "__main__":

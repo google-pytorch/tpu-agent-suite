@@ -18,10 +18,14 @@ The script runs for real, against a stub `python3` beside it: the stub's
 with to a file.
 """
 
+import json
 import os
+import pathlib
+import platform
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -36,6 +40,7 @@ ALL_FIELDS = "watchdog_timeout dist_timeout"
 STUB_PYTHON = """#!/bin/bash
 case "$*" in
   *http.server*) exec sleep 30 ;;
+  *server_env.json*) [ -n "$STUB_REAL_PY" ] && exec "$STUB_REAL_PY" "$@"; exit 0 ;;
   *sglang.launch_server*)
     shift 2
     {
@@ -98,7 +103,16 @@ class ServeSglangTimeoutsTest(unittest.TestCase):
         return argv, envs, proc.stderr
 
     def test_defaults_are_tpu_sized(self):
-        argv, envs, stderr = self._serve("--port", "8000")
+        argv, envs, stderr = self._serve("--port",
+                                         "8000",
+                                         STUB_REAL_PY=sys.executable)
+        env_json = json.loads(
+            pathlib.Path(self.dir, "profile",
+                         "server_env.json").read_text(encoding="utf-8"))
+        self.assertEqual(env_json["python_version"], platform.python_version())
+        self.assertEqual(env_json["libtpu_init_args"],
+                         "--xla_xprof_register_llo_debug_info=true")
+        self.assertIn("engine_version", env_json)
         self.assertEqual(envs, {"SGLANG_WARMUP_TIMEOUT": "3600"})
         self.assertEqual(argv[:4],
                          ["--model-path", "/model", "--port", "8000"])

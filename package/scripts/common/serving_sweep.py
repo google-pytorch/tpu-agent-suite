@@ -276,6 +276,17 @@ def with_image(kind: str | None, image: str | None) -> str | None:
     return hardware._replace(image=image).key
 
 
+def image_environment(image: str | None) -> dict[str, str]:
+    """Container image fields for `summary.json['environment']`."""
+    if not image:
+        return {}
+    out = {"image": image}
+    _, sep, digest = image.partition("@sha256:")
+    if sep and digest:
+        out["image_digest"] = f"sha256:{digest}"
+    return out
+
+
 def flag_name(arg: str) -> str:
     return arg.split("=", 1)[0]
 
@@ -604,6 +615,9 @@ class Sweep:
                     list(self.queue),
                     "shapes":
                     copy.deepcopy(self.shapes),
+                    **({
+                        "image": self.image
+                    } if self.image else {}),
                     **self.pinned(),
                 }
             status_path = self.out / "sweep_status.json"
@@ -1220,8 +1234,12 @@ class Sweep:
                         not self.stop_requested else "the sweep was stopped")
                 self.queue.clear()
             self.save_status()
-        merged = merge(self.plan, self.out, self.shapes, self.servers,
-                       self.pinned())
+        merged = merge(self.plan,
+                       self.out,
+                       self.shapes,
+                       self.servers,
+                       self.pinned(),
+                       image=self.image)
         mirror_file(self.out, self.mirror,
                     self.out / CLIENT_DIR / "summary.json")
         mirror_file(self.out, self.mirror,
@@ -1243,7 +1261,8 @@ def merge(plan: dict[str, Any],
           out: Path,
           shapes: dict[str, dict[str, Any]] | None = None,
           servers: list[dict[str, Any]] | None = None,
-          pinned: dict[str, Any] | None = None) -> dict[str, Any]:
+          pinned: dict[str, Any] | None = None,
+          image: str | None = None) -> dict[str, Any]:
     """The shapes' summaries as one serving_benchmark.py summary.json.
 
     Each shape is judged as the client judges it, by `shape_ok`; the sweep is
@@ -1257,6 +1276,7 @@ def merge(plan: dict[str, Any],
     shards, errors, warnings = [], [], []
     base: dict[str, Any] | None = None
     base_sid = None
+    shard_env: dict[str, Any] = {}
     for shape in sorted(plan["shapes"], key=lambda s: s["index"]):
         sid = shape["id"]
         got = shapes.get(sid, {})
@@ -1268,6 +1288,8 @@ def merge(plan: dict[str, Any],
             # the ones its own filter skipped included.
             shape_cells = list(summary.get("cells", []))
             warnings += [f"{sid}: {w}" for w in summary.get("warnings") or []]
+            if not shard_env and isinstance(summary.get("environment"), dict):
+                shard_env = dict(summary["environment"])
             if base is None:
                 base, base_sid = summary, sid
             elif _comparable(summary) != _comparable(base):
@@ -1337,6 +1359,14 @@ def merge(plan: dict[str, Any],
         **((base or {}).get("settings") or {})
     }
     settings["seed"] = plan["settings"]["seed"]
+    resolved_image = image
+    if not resolved_image:
+        for s in servers:
+            hw = tpu_slots.Hardware.parse(s.get("hardware"))
+            if hw and hw.image:
+                resolved_image = hw.image
+                break
+    environment = {**shard_env, **image_environment(resolved_image)}
     merged = {
         "status":
         "ok" if ok else "failed",
@@ -1350,6 +1380,8 @@ def merge(plan: dict[str, Any],
         None,
         "model": (base or {}).get("model"),
         "client": (base or {}).get("client"),
+        "environment":
+        environment,
         "settings":
         settings,
         "cells":
@@ -1674,10 +1706,16 @@ def main(argv: list[str] | None = None) -> int:
         state = (json.loads(status.read_text(
             encoding="utf-8")) if status.is_file() else {})
         merged = merge(
-            plan, out, state.get("shapes"), state.get("servers"), {
+            plan,
+            out,
+            state.get("shapes"),
+            state.get("servers"),
+            {
                 k: state[k]
                 for k in ("patches", "patch_sha256", "hardware") if k in state
-            })
+            },
+            image=state.get("image"),
+        )
         print(
             json.dumps({
                 "status": merged["status"],

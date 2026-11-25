@@ -22,9 +22,11 @@ to a file, and the stub Ray each call it gets.
 import json
 import os
 import pathlib
+import platform
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -43,6 +45,7 @@ LLO_ON = "--xla_xprof_register_llo_debug_info=true"
 STUB_PYTHON = """#!/bin/bash
 case "$*" in
   *http.server*) exec sleep 30 ;;
+  *server_env.json*) [ -n "$STUB_REAL_PY" ] && exec "$STUB_REAL_PY" "$@"; exit 0 ;;
   *distributed_timeout_seconds*) [ "$STUB_HAS_DIST_FLAG" = 1 ] ;;
   *"- worker-0.svc"*) echo "2002:db8::1" ;;
   *) exit 0 ;;
@@ -145,7 +148,17 @@ class ServeVllmTimeoutsTest(unittest.TestCase):
         return argv, envs, stderr
 
     def test_defaults_are_tpu_sized(self):
-        argv, envs, stderr = self._serve("--port", "8000")
+        argv, envs, stderr = self._serve("--port",
+                                         "8000",
+                                         STUB_REAL_PY=sys.executable,
+                                         XLA_FLAGS="--xla_test=1")
+        env_json = json.loads(
+            pathlib.Path(self.dir, "profile",
+                         "server_env.json").read_text(encoding="utf-8"))
+        self.assertEqual(env_json["python_version"], platform.python_version())
+        self.assertEqual(env_json["libtpu_init_args"], LLO_ON)
+        self.assertEqual(env_json["xla_flags"], "--xla_test=1")
+        self.assertIn("engine_version", env_json)
         self.assertEqual(
             envs, {
                 "VLLM_ENGINE_READY_TIMEOUT_S": "3600",

@@ -141,12 +141,20 @@ class _FakeServer(http.server.BaseHTTPRequestHandler):
         }],
     }
     server_info = None
+    environment = {
+        "python_version": "3.12.3",
+        "engine_version": "0.8.5",
+        "libtpu_init_args": "--xla_xprof_register_llo_debug_info=true",
+    }
 
     def do_GET(self):  # noqa: N802
         if self.path == "/health":
             body = b""
         elif self.path == "/v1/models":
             body = json.dumps(self.models).encode()
+        elif (self.path == "/server_env.json"
+              and self.environment is not None):
+            body = json.dumps(self.environment).encode()
         elif self.path == "/get_server_info" and self.server_info is not None:
             body = json.dumps(self.server_info).encode()
         else:
@@ -354,6 +362,14 @@ class TestPureFunctions(unittest.TestCase):
         args = serving_benchmark.parse_args(
             ["--output-dir", "/tmp/x", "--base-url", "http://h:1/v1/"])
         self.assertEqual(args.base_url, "http://h:1")
+        with unittest.mock.patch.object(serving_benchmark,
+                                        "http_json",
+                                        side_effect=OSError("refused")):
+            self.assertEqual(
+                serving_benchmark.fetch_server_environment(
+                    "http://[2001:db8::1]:8000", files_port=8790),
+                {},
+            )
 
     def test_vllm_runs_as_this_script_by_default(self):
         with unittest.mock.patch.object(serving_benchmark.importlib.util,
@@ -482,11 +498,16 @@ class TestEndToEnd(unittest.TestCase):
         return [json.loads(line) for line in path.read_text().splitlines()]
 
     def test_sweep_writes_summary_with_discovered_model(self):
-        rc = self._main("--isl-osl", "512:128", "--concurrency", "1,4",
-                        "--replicates", "2")
+        with unittest.mock.patch.dict(
+                os.environ,
+            {"VLLM_PROFILE_FILES_PORT": str(self.server.server_port)},
+        ):
+            rc = self._main("--isl-osl", "512:128", "--concurrency", "1,4",
+                            "--replicates", "2")
         self.assertEqual(rc, serving_benchmark.EXIT_OK)
         summary = json.loads((self.out / "summary.json").read_text())
         self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["environment"], _FakeServer.environment)
         self.assertEqual(summary["model"]["id"], "org/model")
         self.assertEqual([c["cell"] for c in summary["cells"]],
                          ["isl512_osl128_c1", "isl512_osl128_c4"])

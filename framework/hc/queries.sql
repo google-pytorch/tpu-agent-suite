@@ -207,3 +207,122 @@ INSERT INTO Reviews (
     :candidate, :hypothesis, :human_authored, :reviewer, :approval,
     :short_comments, :conditions, :comments
 );
+
+-- name: insert_measurement
+INSERT INTO Measurements (
+    trial, subject, protocol, env_image, env_image_digest,
+    env_python_version, env_jax_version, env_jaxlib_version,
+    env_torch_version, env_torch_tpu_version, env_engine_version,
+    env_libtpu_init_args, env_xla_flags
+) VALUES (
+    :trial, :subject, :protocol, :env_image, :env_image_digest,
+    :env_python_version, :env_jax_version, :env_jaxlib_version,
+    :env_torch_version, :env_torch_tpu_version, :env_engine_version,
+    :env_libtpu_init_args, :env_xla_flags
+);
+
+-- name: insert_measurement_metric
+INSERT INTO Measurement_Metrics (
+    measurement_id, cell_id, metric_name, value, n, stdev, min_val, max_val
+) VALUES (
+    :measurement_id, :cell_id, :metric_name, :value, :n, :stdev, :min_val, :max_val
+);
+
+-- name: insert_measurement_artifact
+INSERT INTO Measurement_Artifacts (measurement_id, artifact_index, artifact_path)
+VALUES (:measurement_id, :artifact_index, :artifact_path);
+
+-- name: insert_measurement_job
+INSERT INTO Measurement_Jobs (measurement_id, job_index, job_id)
+VALUES (:measurement_id, :job_index, :job_id);
+
+-- name: set_job_measurement
+UPDATE Jobs
+SET measurement = :measurement_id
+WHERE job_id = :job_id;
+
+-- name: get_measurement_primary_metrics
+SELECT cell_id, value, n
+FROM Measurement_Metrics
+WHERE measurement_id = :measurement_id AND metric_name = :metric_name;
+
+-- name: get_existing_decision
+SELECT id, verdict, reason
+FROM Decisions
+WHERE is_e2e = :is_e2e
+  AND subject_measurement = :subject_measurement
+  AND reference_measurement = :reference_measurement
+ORDER BY id DESC
+LIMIT 1;
+
+-- name: insert_decision
+INSERT INTO Decisions (
+    round, is_e2e, subject_measurement, reference_measurement, verdict, reason
+) VALUES (
+    :round, :is_e2e, :subject_measurement, :reference_measurement, :verdict, :reason
+);
+
+-- name: get_campaign_measurement
+SELECT m.*
+FROM Measurements m
+JOIN Candidates c ON c.id = m.subject
+WHERE m.id = :measurement_id AND c.campaign_id = :campaign_id;
+
+-- name: get_measurement_by_id
+SELECT *
+FROM Measurements
+WHERE id = :id;
+
+-- name: list_candidate_decisions
+SELECT d.*,
+       sm.trial AS subj_trial,
+       rm.subject AS ref_subject,
+       rm.protocol AS ref_protocol,
+       rm.trial AS ref_trial
+FROM Decisions d
+JOIN Measurements sm ON sm.id = d.subject_measurement
+JOIN Measurements rm ON rm.id = d.reference_measurement
+WHERE sm.subject = :candidate_id
+ORDER BY d.id DESC;
+
+-- name: get_latest_settled_accuracy
+SELECT passed_accuracy
+FROM Jobs
+WHERE candidate = :candidate_id
+  AND kind = :kind
+  AND status = :status
+  AND passed_accuracy IS NOT NULL
+ORDER BY rowid DESC
+LIMIT 1;
+
+-- name: has_dispatched_e2e_or_accuracy_job
+SELECT 1
+FROM Jobs
+WHERE candidate = :candidate_id
+  AND kind IN (:e2e_kind, :accuracy_kind)
+  AND status = :status
+LIMIT 1;
+
+-- name: has_paired_champion_e2e_in_flight
+SELECT 1
+FROM Jobs cj
+JOIN Jobs bj ON bj.trial = cj.trial AND bj.protocol = cj.protocol
+WHERE cj.candidate = :candidate_id
+  AND cj.kind = :e2e_kind
+  AND cj.status = :succeeded_status
+  AND cj.trial IS NOT NULL
+  AND bj.candidate = :champion_candidate_id
+  AND bj.kind = :e2e_kind
+  AND bj.status = :dispatched_status
+LIMIT 1;
+
+-- name: has_dispatched_job_by_kind
+SELECT 1
+FROM Jobs
+WHERE candidate = :candidate_id AND kind = :kind AND status = :status
+LIMIT 1;
+
+-- name: get_protocol_by_id
+SELECT *
+FROM Protocols
+WHERE id = :id;

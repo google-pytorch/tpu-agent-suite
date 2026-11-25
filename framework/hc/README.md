@@ -21,8 +21,11 @@ Agent sandboxes deny direct read/write access to `~/.tpu-agent-suite/campaigns/`
 | `hypothesis_ops.py` | Hypothesis registration (`hypothesis add`) and immutable refutation (`hypothesis refute`). |
 | `candidate_ops.py` | Candidate working-tree preparation (`candidate prepare`), immutable commit proposal (`candidate propose`), supersession, and abandonment (`candidate abandon`). |
 | `review_ops.py` | Qualitative candidate and hypothesis reviews (`review add`) with harness-inferred reviewer identity. |
+| `metrics.py` | Sealed benchmark and accuracy `summary.json` parsing, environment consistency checks, and trial-scoped raw-replicate measurement pooling. |
+| `decisions.py` | Multi-cell weighted geometric mean benchmark verdicts (`Win`, `Viable`, `Neutral`, `Loss`, `Invalid`), per-cell regression guardrails, and accuracy gate evaluation. |
+| `candidate_state.py` | On-the-fly strict-precedence `CandidateState` (`Promoted` down to `Untested`) and `prior_decisions_count` computation relative to a reference baseline. |
 | `cli.py` | Argument parser (`build_parser`) and top-level CLI dispatch / rejection logging. |
-| `target_runner.py` | Standalone stdlib-only runner staged into target TPU job working directories for `serve-vllm`, `serve-sglang`, and `eval-vllm`. |
+| `target_runner.py` | Standalone stdlib-only runner staged into target TPU job working directories for `serve-vllm`, `serve-sglang`, `eval-vllm`, and `run-microbenchmark`. |
 
 ---
 
@@ -77,6 +80,11 @@ Shipped benchmark and serving scripts are declared once in `package/package.rele
   - `candidate prepare <p1> [<p2>] [--discard]` populates `<workspace>/src/` from 1 or 2 distinct parent candidates; at least one parent must descend from (or equal) the current `champion`. Dirty edits in `<workspace>/src/` are refused unless `--discard` is passed.
   - `candidate propose` requires an `Open` round, verifies at least one staged parent descends from the round's `current_champion`, verifies linked `--hypotheses` are `Open`, commits `<workspace>/src/` + canonicalized `__flags.json`, computes `patch_sha` (`git diff initial_version..sha` excluding `__flags.json`), and pins `refs/candidates/<id>` inside the same `BEGIN IMMEDIATE` SQLite transaction.
   - `Abandoned` (`abandoned_reason IS NOT NULL`) and `Superseded` (`superseded_by IS NOT NULL`) are mutually exclusive; `initial_version` and `Promoted` candidates (ancestors of `champion`) can neither be abandoned nor superseded.
+  - `CandidateState` is never stored in SQLite; `candidate_state.py` derives it on the fly relative to reference baseline `B` (`current_baseline` or `--baseline-measurement`) in strict precedence order: `Promoted` -> `Superseded` -> `Abandoned` -> `E2E_In_Flight` -> `E2E_Passed` / `E2E_Accuracy_Failed` / `E2E_Pending_Accuracy` / `E2E_Viable` / `E2E_Regressed` (`Neutral`, `Loss`, or `Invalid`) -> `Microbenchmark_In_Flight` -> `Microbench_Passed` / `Microbench_Regressed` (`Neutral`, `Loss`, or `Invalid`) -> `Untested`.
+- **Measurements & Decisions (`DecisionVerdict`):**
+  - Benchmark jobs emit canonical `summary.json` (`{"status": "ok", "cells": [{..., "replicates": [...]}], "environment": {...}}` from `serving_benchmark.py` / `serving_sweep.py` via `$PROFILE_DIR/server_env.json` or normalized by `target_runner.py` `run-microbenchmark`), and accuracy jobs emit `{"status": "ok", "scores": {<metric>: <float>}}` via `target_runner.py`.
+  - `Measurements` are stateless snapshots pooling raw per-replicate samples across all verified `Succeeded` jobs for `(trial, subject, protocol)` with identical 10-field `environment` metadata.
+  - `Decisions` evaluate `min_replicates` and `max_cell_regression_percentage` across every protocol cell (`Invalid` on violation), then classify the weighted geometric mean speedup delta `(prod_i (r_i ** w_i) - 1) * 100` against inclusive `[-noise_floor_percentage, +noise_floor_percentage]` (`Neutral`), `-noise_floor_percentage` (`Loss`), and `min_win_percentage` (`Win` vs. `Viable`).
 - **Telemetry:**
   - Queued in `TelemetryBuffer` and flushed strictly after SQLite `COMMIT`. Failed CLI invocations emit `cmd.rejected` with `[error_code]` and exit code (`2` for `INVALID_ARGS`, `1` for domain errors).
 

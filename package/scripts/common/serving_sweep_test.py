@@ -313,6 +313,10 @@ class FakeCompute:
                 "model": MODEL,
                 "base_url": _flag(argv, "--base-url"),
                 "client": "vllm",
+                "environment": {
+                    "python_version": "3.12.3",
+                    "engine_version": "0.8.5",
+                },
                 "settings": settings,
                 "cells": cells,
                 "warnings": [f"note from {sid}"]
@@ -503,6 +507,15 @@ class TestRun(SweepCase):
         self.assertEqual({s["hardware"]
                           for s in merged["servers"]},
                          {"tpu7x|2x2x1|4|registry.example/patched@sha256:f"})
+        self.assertEqual(
+            merged["environment"],
+            {
+                "python_version": "3.12.3",
+                "engine_version": "0.8.5",
+                "image": "registry.example/patched@sha256:f",
+                "image_digest": "sha256:f",
+            },
+        )
         self.assertEqual(len(merged["warnings"]), 3)
 
     def test_servers_are_at_most_one_per_shape_and_the_slots(self):
