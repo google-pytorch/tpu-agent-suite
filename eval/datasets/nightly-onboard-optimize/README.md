@@ -2,18 +2,20 @@
 
 Serve a Hugging Face model on Cloud TPU with `torch_tpu` and vLLM, and prove
 it. Where [`hf-onboarding-torchtpu`](../hf-onboarding-torchtpu/) asks for an
-analysis and a benchmark script, this asks for a server that answers over
-HTTP, measured numbers from that server, and a commit history that shows how
-it got there.
+analysis and a benchmark script, this dataset asks for a server that answers
+over HTTP, measured numbers from that server, and a commit history that shows
+how it got there.
 
 ## Tasks
 
-One task per model. The verifier is identical across all four, and so are
-the brief and image of gemma, mistral and gpt-oss; Qwen3.8-27B, the
-control for `onboarding-frontier`, runs that dataset's overlay image and
-brief; the model is the variable, so "size the topology yourself"
-has more than one right answer and a run that hardcodes a slice stops
-scoring.
+### Standalone Onboarding (`onboarding-*`)
+
+One onboarding-only task per model, scored with the Onboarding-Only RewardKit
+suite. The verifier is identical across all four, and so are the brief and
+image of gemma, mistral and gpt-oss; Qwen3.8-27B, the control for
+`onboarding-frontier`, runs that dataset's overlay image and brief; the model
+is the variable, so "size the topology yourself" has more than one right answer
+and a run that hardcodes a slice stops scoring.
 
 | Task | Model | Params | Gated | Reachable with our key |
 | :--- | :--- | :--- | :--- | :--- |
@@ -21,6 +23,25 @@ scoring.
 | [`onboarding-gemma-4-31b-it`](./onboarding-gemma-4-31b-it/) | `google/gemma-4-31B-it` | 31.3B dense | no | yes |
 | [`onboarding-mistral-small-24b`](./onboarding-mistral-small-24b/) | `mistralai/Mistral-Small-24B-Instruct-2501` | 24B dense | no | yes |
 | [`onboarding-gpt-oss-20b`](./onboarding-gpt-oss-20b/) | `openai/gpt-oss-20b` | 20.2B / 4B MoE | no | yes |
+
+### Two-Phase Onboarding + Throughput Hill-Climbing (`onboard-hillclimb-*`)
+
+End-to-end two-phase tasks pairing standalone `torch_tpu` + vLLM bring-up
+(Phase 1, frozen under `onboarding/`) with hypothesis-driven throughput
+hill-climbing on the `8k/1k` serving workload to maximize per-chip output
+throughput (`output_tps_per_chip = output_tps / num_chips`), followed by a
+post-hill-climb `.xplane.pb` profile and residual bottlenecks report
+(`xprof_bottlenecks_and_gaps.md`) (Phase 2, saved under `hillclimb/`). Prompts
+are written neutrally so both the `agent-suite` arm and the `baseline` control
+arm run the exact same specification.
+
+| Task | Model | Params | Gated | Reachable with our key |
+| :--- | :--- | :--- | :--- | :--- |
+| [`onboard-hillclimb-glm-5-2-fp8`](./onboard-hillclimb-glm-5-2-fp8/) | `zai-org/GLM-5.2-FP8` | 753B / ~40B FP8 MoE | no | yes |
+| [`onboard-hillclimb-gemma-4-26b-a4b-it`](./onboard-hillclimb-gemma-4-26b-a4b-it/) | `google/gemma-4-26B-A4B-it` | 26B / 4B MoE | no | yes |
+| [`onboard-hillclimb-qwen3-5-27b`](./onboard-hillclimb-qwen3-5-27b/) | `Qwen/Qwen3.5-27B` | 27B dense | no | yes |
+| [`onboard-hillclimb-qwen3-6-27b`](./onboard-hillclimb-qwen3-6-27b/) | `Qwen/Qwen3.6-27B` | 27B dense | no | yes |
+| [`onboard-hillclimb-glm-5-3-flash`](./onboard-hillclimb-glm-5-3-flash/) | `zai-org/GLM-5.3-Flash` | 321B / 18B FP8 MoE | no | yes |
 
 Combined onboarding and kernel-optimization tasks (`tpu-inference-*-vllm`) live
 in [`tpu-inference-vllm`](../tpu-inference-vllm/), while kernel optimization on
@@ -30,9 +51,8 @@ an already-onboarded server lives in
 The model catalogue lives in
 [`hf-onboarding-torchtpu/README.md`](../hf-onboarding-torchtpu/README.md) --
 categories, target slices, recommended TP and gating for every model in scope.
-The four here are a subset of it, not a second list.
 
-Gating is per-account and manual for the marked model: the token in use has
+Gating is per-account and manual for any marked model: the token in use has
 `canReadGatedRepos`, so a 403 there means the account has not accepted that
 model's terms, not that the key is wrong. Accept at the model page, then check
 `https://huggingface.co/settings/gated-repos`. The briefs for gated models say
@@ -54,37 +74,50 @@ is a control arm and installs nothing.
 
 - **`HF_MODEL_URL`** -- set per task in its `task.toml`; the agent reads it
   from the environment rather than from the prompt.
-- **`HF_TOKEN`** -- required for the gated models, ignored by the rest. The
-  gated tasks declare `required_env = ["HF_TOKEN"]` under `[metadata]`. When
-  it is unset *or empty* on the host, `run.py` drops those tasks from a
-  dataset run (announced on stderr) so the rest still run, and refuses a task
-  named alone with `--task`. A missing CI secret arrives as `""`, which `${HF_TOKEN:-}` forwards unchanged, and the
-  trial would otherwise end at the first 401 inside the pod.
-- The image is built from each task's `environment/Dockerfile`: the
-  `nexus-host` image (`eval/images/nexus-host`), pinned by digest, plus
-  openssh-client, transformers, absl-py and pytest. Harbor's GKE path
-  never reads `task.toml`'s `docker_image` (`run.py:286`), so no image is
-  pinned there.
+- **`HF_TOKEN`** -- required for gated models, ignored by the rest. Any gated
+  task declares `required_env = ["HF_TOKEN"]` under `[metadata]`. When it is
+  unset *or empty* on the host, `run.py` drops those tasks from a dataset run
+  (announced on stderr) so the rest still run, and refuses a task named alone
+  with `--task`. A missing CI secret arrives as `""`, which `${HF_TOKEN:-}`
+  forwards unchanged, and the trial would otherwise end at the first 401 inside
+  the pod.
+- Both `onboarding-*` and `onboard-hillclimb-*` tasks build from `nexus-host`
+  (except `onboarding-qwen3-8-27b`, which builds from `nexus-tpu:latest` as the
+  `onboarding-frontier` control); workloads run inside `$TASK_DOCKER` on TPU.
+  Harbor's GKE path never reads `task.toml`'s `docker_image` (`run.py:286`), so
+  no image is pinned there.
 - The tasks need a real v6e or v7 slice. Export the `GKE_*` variables for the
   shared cluster before running; `run.py` does not read a `.env` file.
 
 ## Scoring
 
-`tests/test.sh` scores the checkable half of the brief and says which half
-that is: artifacts under one directory, the image digest and HF revision
-pinned, both required tables with a measured row, raw output retained, an HTTP
-response carrying content, and three or more local commits. "Coherent output"
-and a log that "reads as the story" are left to a reader.
-
-Two prohibitions are disqualifying gates rather than points -- `torch_xla` or
-`tpu_inference`, and committed credentials or weights -- so a run that
-produced nothing earns nothing for satisfying them.
+- For `onboarding-*`, `tests/test.sh` runs the Onboarding-Only RewardKit suite
+  (`onboarding_success`, `efficiency`, and `cheating`, plus diagnostic
+  `regime_sweep`, `execution_report`, `invoked_subagent`, and
+  `schema_compliance`).
+- For `onboard-hillclimb-*`, `tests/test.sh` and `tests/reward.toml` run the
+  canonical Onboard + Hill-Climb RewardKit suite with multiplicative gating:
+  - `reward = (0.3 * onboarding_success + 0.3 * hillclimb_success + 0.3 * speedup_score + 0.1 * efficiency) * (1 - cheating)`
+  - `speedup` is computed deterministically on verified per-chip output
+    throughput (`output_tps_per_chip = output_tps / num_chips`) across the
+    `8k/1k` concurrency sweep from `benchmark_results.json` cross-checked
+    against backing `raw_output_path` files (`tests/speedup/calculate_speedup.py`).
+  - `hillclimb_success` requires both `onboarding_success == 1` and verified
+    per-chip speedup `>= 1.01`; `speedup_score` and `efficiency` are gated on
+    both `onboarding_success` and `hillclimb_success`, and `cheating == 1`
+    zeroes the final reward.
+  - Diagnostic criteria (`execution_report`, `invoked_subagent`,
+    `schema_compliance`, and `post_hillclimb_xprof` in `reward-details.json`)
+    carry weight `0.0`.
 
 ## Running
 
 ```bash
-# one model, agent-suite arm
+# one standalone onboarding task, agent-suite arm
 python3 eval/run.py -c claude-code/agent-suite -t nightly-onboard-optimize/onboarding-qwen3-8-27b
+
+# one two-phase onboarding + hill-climb task, agent-suite arm
+python3 eval/run.py -c claude-code/agent-suite -t nightly-onboard-optimize/onboard-hillclimb-gemma-4-26b-a4b-it
 
 # the same model, control arm
 python3 eval/run.py -c claude-code/baseline -t nightly-onboard-optimize/onboarding-qwen3-8-27b

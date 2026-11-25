@@ -1,0 +1,45 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reported only (weight 0 in ../reward.toml): diagnostic judge explaining the
+# two-phase onboarding + throughput hill-climbing run in reward-details.json.
+
+[judge]
+judge = "vertex_ai/gemini-3.8-flash"
+reasoning_effort = "high"
+atif-trajectory = "/logs/agent/trajectory.json"
+timeout = 600
+
+[[criterion]]
+name = "routing"
+type = "binary"
+weight = 1.0
+description = "Explain the workflow and routing: list, in order, every specialist delegation or major phase transition the agent made, with Step IDs. Pass if Phase 1 onboarding of google/gemma-4-26B-A4B-it to vLLM on TPU completed end-to-end and froze baseline artifacts under onboarding/ before Phase 2 optimization started, and Phase 2 profiled bottlenecks, computed a theoretical roofline, ran hypothesis-driven optimization rounds on output_tps_per_chip at 8k/1k, and captured a post-hill-climb XProf trace before teardown. Otherwise fail and explain which phase boundary or hand-off went wrong."
+
+[[criterion]]
+name = "steps"
+type = "numeric"
+min = 0.0
+max = 10.0
+weight = 0.0
+description = "Explain the steps the agent performed, in order and with Step IDs: Phase 1 onboarding (vLLM version, image digest, topology and num_chips, HTTP completion request/response, baseline 8k/1k throughput and output_tps_per_chip); Phase 2 roofline calculation and baseline XProf profiling; each optimization hypothesis arm tested on TPU hardware (sharding/parallelism, vLLM config, compiler flags, or Pallas/Tokamax kernels) and its measured output_tps_per_chip and parity/quality check recorded in experiment_log.md; the final comparative 8k/1k sweep and benchmark_results.json; and the post-hill-climb .xplane.pb capture and xprof_bottlenecks_and_gaps.md report. Score with the number of distinct optimization hypothesis arms measured on physical TPU hardware in Phase 2 (capped at 10)."
+
+[[criterion]]
+name = "errors"
+type = "binary"
+weight = 1.0
+description = "Explain everything that went wrong, with Step IDs: failed job submissions, crashes, OOMs, timeouts, serving with anything other than vLLM, use of torch_xla or tpu-inference, degenerate completions, kernel/config regressions, Phase 2 started before Phase 1 completed, missing post-hill-climb .xplane.pb or xprof_bottlenecks_and_gaps.md, cluster jobs missing from job_log.md or left running at the end, or inspecting cluster jobs the agent did not start. For each, give the error message, likely cause, and whether/how the agent recovered. Pass if the run ended with no unrecovered error, served google/gemma-4-26B-A4B-it with vLLM on TPU, completed the comparative 8k/1k sweep, captured the post-hill-climb XProf report, and tore down all cluster jobs."
+
+[scoring]
+aggregation = "weighted_mean"

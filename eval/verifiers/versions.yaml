@@ -59,7 +59,7 @@ families:
       v1: sha256:0a4e22aa78073ea33e04bb26defe18d4cc3ff190b743b8a52690a2ecadac14ca
       v2: sha256:20062c1d74e5914e2b5868dbd482d24ce0e9e7104f6688d5ad3ec58c695669d4
   onboard_hillclimb:
-    current: v2
+    current: v3
     description: RewardKit verifiers and speedup calculator for hillclimb serving
       benchmarks
     source_paths:
@@ -74,9 +74,11 @@ families:
     history:
       v1: initial
       v2: 9edbed35e4000c62b6f0d350ff8cb723c1d4acb8
+      v3: 985513342140820b1962310fd14e924afde1f699
     inputs_sha256:
       v1: sha256:eaef1e14c5aaeaf2b4a3fd9aa70f45de934868e6b4094cc1c307603384cd34aa
       v2: sha256:23722e2b3ffd9097006856ec34bc84eae90d6eaacef0ac8568c97d2e48ae3d68
+      v3: sha256:20ec45c19668acef5dd23ea32f4ce470907dbc5f37c605d44ad4bab16b72f2ce
   onboarding_routing:
     current: v2
     description: Verifiers for onboarding topology and TP/DP routing checks

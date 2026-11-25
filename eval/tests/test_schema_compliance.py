@@ -46,6 +46,11 @@ ONBOARD_CARRIERS = (
     "onboarding-gpt-oss-20b",
     "onboarding-mistral-small-24b",
     "onboarding-qwen3-8-27b",
+    "onboard-hillclimb-gemma-4-26b-a4b-it",
+    "onboard-hillclimb-glm-5-2-fp8",
+    "onboard-hillclimb-glm-5-3-flash",
+    "onboard-hillclimb-qwen3-5-27b",
+    "onboard-hillclimb-qwen3-6-27b",
 )
 INFERENCE_CARRIERS = (
     "tpu-inference-gemma-4-31b-it-vllm",
