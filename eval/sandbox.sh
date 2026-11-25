@@ -142,6 +142,7 @@ BASELINE_CONFIG="${SANDBOX_BASELINE_CONFIG:-claude-code/baseline}"
 # The container is a daemon either way; this is only whether a shell to it
 # gets attached before this script exits.
 ATTACH=1
+SUITE_ARG=""
 TASK_ARG=""
 # Debugging only: install just these skills instead of the whole package.
 SKILLS_ARG=""
@@ -186,6 +187,7 @@ Required (one of):
 
 Options:
   --sleep, -d         Prepare the container, leave it running, do not attach
+  --suite, -s SUITE   Evaluation suite (path or declared name) to compile
   --task, -t TASK     Evaluation task whose instruction.md to mount
   --skills A[,B]      Debugging only: install just these skills instead of
                       the whole package. Not with a baseline config.
@@ -201,6 +203,7 @@ Environment:
 Examples:
   ./eval/sandbox.sh -c claude-code/agent-suite
   ./eval/sandbox.sh -c agy/agent-suite -t xprof-attention/kernel-tuning
+  SANDBOX_IMAGE=task:local ./eval/sandbox.sh -c claude-code/agent-suite -s nightly-onboard-optimize -t onboarding-gpt-oss-20b
   ./eval/sandbox.sh --baseline
   SANDCASTLE_NAME=sandcastle-b ./eval/sandbox.sh -c claude-code/agent-suite -d
 HELP
@@ -216,6 +219,10 @@ HELP
       ;;
     --config|-c)
       CONFIG_ARG="$2"
+      shift 2
+      ;;
+    --suite|-s)
+      SUITE_ARG="$2"
       shift 2
       ;;
     --task|-t)
@@ -378,7 +385,70 @@ step 5 "Resolving the task"
 # Resolved before the image is chosen, since a task declares what it runs in.
 # Datasets live in one place now, so this resolves by path rather than by
 # searching for whichever package happened to hold the task.
-if [ -n "$TASK_ARG" ]; then
+if [ -n "$SUITE_ARG" ]; then
+  SUITE_PYTHON=""
+  for py in python3 eval/.venv/bin/python .venv/bin/python; do
+    if command -v "$py" >/dev/null 2>&1 && "$py" -c "import pydantic, yaml" >/dev/null 2>&1; then
+      SUITE_PYTHON="$py"
+      break
+    fi
+  done
+  if [ -z "$SUITE_PYTHON" ]; then
+    echo "Error: --suite requires pydantic and pyyaml; run ./eval/setup.sh" >&2
+    exit 1
+  fi
+  TASK_DIR="$(PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$SUITE_PYTHON" - "$SUITE_ARG" "$TASK_ARG" <<'PYSUITE'
+import sys
+from pathlib import Path
+
+from eval.suite_to_harbor import suite_index, suite_to_harbor
+
+repo = Path.cwd()
+suite_spec, task_arg = sys.argv[1], sys.argv[2].strip()
+suites_dir = repo / "eval" / "suites"
+try:
+    resolved = suite_index.resolve_suite(suite_spec, suites_dir, repo)
+    target_dir = suite_index.suite_dataset_dir(
+        resolved, suites_dir, repo / "eval" / ".datasets")
+    compiled = suite_to_harbor.compile_suite_spec(
+        resolved, target_dir, clean=True)
+except Exception as exc:
+    sys.exit(f"Error: {exc}")
+
+if not compiled:
+    sys.exit(f"Error: suite '{suite_spec}' compiled zero tasks")
+if not task_arg:
+    if len(compiled) == 1:
+        print(compiled[0])
+        sys.exit(0)
+    names = ", ".join(sorted(p.name for p in compiled))
+    sys.exit(
+        f"Error: --suite '{suite_spec}' has {len(compiled)} cases; pass --task <case>.\n"
+        f"  Available cases: {names}"
+    )
+
+bare = task_arg.rsplit("/", 1)[-1]
+want = {
+    task_arg,
+    bare,
+    suite_to_harbor.sanitize_name(task_arg),
+    suite_to_harbor.sanitize_name(bare),
+}
+matches = [p for p in compiled if p.name in want]
+if len(matches) != 1:
+    names = ", ".join(sorted(p.name for p in compiled))
+    sys.exit(
+        f"Error: task '{task_arg}' not found in suite '{suite_spec}'.\n"
+        f"  Available cases: {names}"
+    )
+print(matches[0])
+PYSUITE
+)" || exit 1
+  if [ ! -f "$TASK_DIR/instruction.md" ]; then
+    echo "Error: cannot find instruction.md for compiled suite task '$TASK_DIR'" >&2
+    exit 1
+  fi
+elif [ -n "$TASK_ARG" ]; then
   TASK_DIR="$TASK_ARG"
   [ -f "$TASK_DIR/instruction.md" ] || TASK_DIR="eval/datasets/$TASK_ARG"
   [ -f "$TASK_DIR/instruction.md" ] || TASK_DIR="eval/datasets/$TASK_ARG/baseline"
@@ -412,12 +482,18 @@ IMAGE_TASK="${TASK_DIR:-$DEFAULT_IMAGE_TASK}"
 IMAGE="${SANDBOX_IMAGE:-$(task_docker_image "$IMAGE_TASK")}"
 
 # A task may name its image in environment/Dockerfile instead of pinning it.
-# Only usable when the Dockerfile adds nothing on top of FROM; if it installs
-# anything, the base is not what a scored run would execute.
+# Only usable when the Dockerfile adds nothing on top of FROM (ignoring
+# boilerplate WORKDIR and chmod /workspace lines from compiled suites); if it
+# installs packages, copies data, or runs setup scripts, the base is not what
+# a scored run would execute.
 if [ -z "$IMAGE" ]; then
   DF="$IMAGE_TASK/environment/Dockerfile"
-  if [ -f "$DF" ] && [ "$(grep -cvE '^\s*(#|$)' "$DF")" -eq 1 ]; then
-    IMAGE="$(sed -n 's/^FROM  *\([^ ]*\).*/\1/p' "$DF" | head -1)"
+  if [ -f "$DF" ]; then
+    NON_TRIVIAL="$(grep -Ev '^[[:space:]]*(#|$|FROM[[:space:]]+|WORKDIR[[:space:]]+[^[:space:]]+[[:space:]]*$|RUN[[:space:]]+chmod[[:space:]]+(-R[[:space:]]+)?[0-7]{3,4}[[:space:]]+[^[:space:];|&`<>()$]+[[:space:]]*$)' "$DF" || true)"
+    FROM_COUNT="$(grep -cE '^[[:space:]]*FROM[[:space:]]+' "$DF" || true)"
+    if [ -z "$NON_TRIVIAL" ] && [ "$FROM_COUNT" -eq 1 ]; then
+      IMAGE="$(sed -nE 's/^[[:space:]]*FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?([^[:space:]]+).*/\2/p' "$DF" | head -1)"
+    fi
   fi
 fi
 
@@ -908,7 +984,7 @@ echo "   Vertex Proj: $VERTEX_PROJECT ($VERTEX_LOCATION)"
 echo "   Workspace:   /workspace (empty; the agent's own)"
 echo "   Sandbox:     $SANDBOX_ROOT (env.txt, bootstrap.sh, venv, dist)"
 echo "   Bin:         $SANDBOX_BIN (on PATH)"
-if [ -n "$TASK_ARG" ]; then
+if [ -n "$TASK_DIR" ]; then
   echo "   Task:        $TASK_DIR"
 fi
 echo "========================================================================"

@@ -1,0 +1,94 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+# Nightly Serving Onboarding Suite
+# ==============================================================================
+name: nightly-onboard-optimize
+
+environment:
+  base_image: "us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host@sha256:7ff58a98ae2655dbcf25fa0aeb3e8081281bfb3061f97581a98951e98371fff4"
+  memory_mb: 65536
+  storage_mb: 102400
+  pip_packages:
+    - transformers
+
+evaluation:
+  timeout_sec: 21600.0
+  verifier_timeout_sec: 1800.0
+  verifiers:
+    - name: onboarding_success
+      files: //eval/verifiers/onboard/onboarding_success.toml
+    - name: execution_report
+      files: //eval/verifiers/onboard/execution_report.toml
+    - name: regime_sweep
+      files: //eval/verifiers/onboard/verify_regime_sweeps.py
+    - name: efficiency
+      files:
+        - //eval/verifiers/efficiency_metrics/valid_tool_calls.py
+        - //eval/verifiers/efficiency_metrics/trajectory_score.py
+        - //eval/verifiers/efficiency_metrics/framework_directed_penalty.py
+    - name: cheating
+      files: //eval/verifiers/trajectory_behavior_metrics/cheating_judge.toml
+    - name: invoked_subagent
+      files: //eval/verifiers/common/invoked_subagent.py
+    - name: schema_compliance
+      files: //eval/verifiers/common/schema_compliance.py
+  post_verify:
+    - //eval/verifiers/onboard/aggregate_reward.py
+
+  cases:
+    - name: onboarding-gemma-4-31b-it
+      description: "Onboard google/gemma-4-31B-it onto Cloud TPU with torch_tpu and vLLM, verify HTTP completions, and run baseline concurrency sweeps."
+      prompt_file: assets/prompts/onboarding_template.md
+      prompt_vars:
+        model_name: "gemma-4-31B-it"
+        model_url: "https://huggingface.co/google/gemma-4-31B-it"
+        job_prefix: "golden-gemma4"
+        topology_target: "31B model"
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/google/gemma-4-31B-it"
+
+    - name: onboarding-gpt-oss-20b
+      description: "Onboard openai/gpt-oss-20b onto Cloud TPU with torch_tpu and vLLM, verify HTTP completions, and run baseline concurrency sweeps."
+      prompt_file: assets/prompts/onboarding_template.md
+      prompt_vars:
+        model_name: "GPT-OSS-20B"
+        model_url: "https://huggingface.co/openai/gpt-oss-20b"
+        job_prefix: "golden-gpt"
+        topology_target: "20B-total / 4B-active MoE"
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/openai/gpt-oss-20b"
+
+    - name: onboarding-mistral-small-24b
+      description: "Onboard mistralai/Mistral-Small-24B-Instruct-2501 onto Cloud TPU with torch_tpu and vLLM, verify HTTP completions, and run baseline concurrency sweeps."
+      prompt_file: assets/prompts/onboarding_template.md
+      prompt_vars:
+        model_name: "Mistral-Small-24B-Instruct-2501"
+        model_url: "https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501"
+        job_prefix: "golden-mistral"
+        topology_target: "24B model"
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501"
+
+    - name: onboarding-qwen3-8-27b
+      description: "Onboard Qwen/Qwen3.8-27B onto Cloud TPU with torch_tpu and vLLM, verify HTTP completions, and run baseline concurrency sweeps."
+      prompt_file: assets/prompts/onboarding-qwen3-8-27b.md
+      environment:
+        dockerfile: assets/setup/Dockerfile.nexus-tpu-host
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/Qwen/Qwen3.8-27B"

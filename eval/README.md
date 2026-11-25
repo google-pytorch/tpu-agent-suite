@@ -35,8 +35,11 @@ source eval/.venv/bin/activate
 Run the verification script from the repository root:
 
 ```bash
-# Verify a specific package
-./eval/verify.sh <package_name>
+# Verify a specific dataset
+./eval/verify.sh <dataset_name>
+
+# Compile and verify a declarative suite by declared name or path
+./eval/verify.sh --suite <suite_name_or_path>
 ```
 
 The script performs the following checks:
@@ -45,8 +48,9 @@ The script performs the following checks:
 - Checks if the required api key environment variables are set.
 - Validates every YAML config under `eval/configs/`.
 - Validates every `task.toml` in the eval tree. Pass a dataset name
-  (`./eval/verify.sh smoke-check`) to scope the task check to one suite;
-  an unknown name exits non-zero.
+  (`./eval/verify.sh smoke-check`) or `--suite <suite>`
+  (`./eval/verify.sh --suite nightly-onboard-optimize`) to scope the task check to
+  one dataset or compiled suite; an unknown name exits non-zero.
 
 ## Running Evaluation Tasks
 
@@ -104,6 +108,7 @@ hand. A config is required: it decides the packages, the cluster and the arm.
 ```bash
 ./eval/sandbox.sh -c claude-code/agent-suite
 ./eval/sandbox.sh -c claude-code/agent-suite -t tpu-hello-world/baseline
+SANDBOX_IMAGE=task:local ./eval/sandbox.sh -c claude-code/agent-suite -s nightly-onboard-optimize -t onboarding-gpt-oss-20b
 ./eval/sandbox.sh --baseline                      # the control arm
 ./eval/sandbox.sh -c claude-code/agent-suite --sleep   # no shell
 ```

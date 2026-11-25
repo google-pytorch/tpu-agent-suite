@@ -451,6 +451,91 @@ class TestSandbox(unittest.TestCase):
         self.assertIn("baseline", proc.stderr)
         self.assertFalse([c for c in self._calls() if "run -d" in c])
 
+    def _write_suite(
+            self,
+            name_prefix: str,
+            cases: tuple[tuple[str, str], ...],
+            *,
+            stem: str | None = None,
+            pip_packages: tuple[str, ...] = (),
+    ) -> tuple[Path, Path]:
+        declared_name = f"{name_prefix}-{self.tmp.name}"
+        suite_file = self.tmp / f"{stem or declared_name}.yaml"
+        lines = [
+            f"name: {declared_name}",
+            "environment:",
+            "  base_image: example.invalid/org/nexus-host:v1",
+        ]
+        if pip_packages:
+            lines.append("  pip_packages:")
+            lines.extend(f"    - {pkg}" for pkg in pip_packages)
+        lines.extend(["evaluation:", "  cases:"])
+        for case_name, prompt in cases:
+            lines.append(f"    - name: {case_name}")
+            lines.append(f"      prompt: {prompt!r}")
+        suite_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        compiled_dir = _REPO / "eval" / ".datasets" / declared_name
+        self.addCleanup(shutil.rmtree, compiled_dir, ignore_errors=True)
+        return suite_file, compiled_dir
+
+    def test_suite_and_task_resolves_base_image_from_minimal_dockerfile(self):
+        suite_file, compiled_dir = self._write_suite(
+            "sample-suite",
+            (("case-a", "Run sample case A."),
+             ("case-b", "Run sample case B.")),
+            stem=f"different_stem_{self.tmp.name}",
+        )
+
+        proc = self._run(
+            _CONFIG_BASELINE,
+            "--suite",
+            str(suite_file),
+            "--task",
+            "case-b",
+        )
+        self.assertEqual(proc.returncode, 0, self._explain(proc))
+        self.assertTrue((compiled_dir / "case-b" / "instruction.md").is_file())
+        prompt = (self.staged / "sandbox" /
+                  "prompt.txt").read_text(encoding="utf-8")
+        self.assertEqual(prompt, "Run sample case B.")
+        runs = [c for c in self._calls() if c.startswith("docker run -d ")]
+        self.assertEqual(len(runs), 1, self._calls())
+        self.assertIn("example.invalid/org/nexus-host:v1", runs[0])
+
+    def test_suite_task_with_extra_installs_requires_sandbox_image(self):
+        suite_file, _ = self._write_suite(
+            "sandbox-pkg-suite",
+            (("case-a", "Run sample case A."), ),
+            pip_packages=("sample-pkg", ),
+        )
+
+        proc = self._run(
+            _CONFIG_BASELINE,
+            "--suite",
+            str(suite_file),
+            "--task",
+            "case-a",
+        )
+        self.assertNotEqual(proc.returncode, 0, self._explain(proc))
+        self.assertIn("SANDBOX_IMAGE", proc.stderr)
+        self.assertFalse([c for c in self._calls() if "run -d" in c])
+
+    def test_multi_case_suite_without_task_is_rejected(self):
+        suite_file, _ = self._write_suite(
+            "sandbox-multi-suite",
+            (("case-a", "Run sample case A."),
+             ("case-b", "Run sample case B.")),
+        )
+
+        proc = self._run(
+            _CONFIG_BASELINE,
+            "--suite",
+            str(suite_file),
+        )
+        self.assertNotEqual(proc.returncode, 0, self._explain(proc))
+        self.assertIn("--task", proc.stderr)
+        self.assertFalse([c for c in self._calls() if "run -d" in c])
+
 
 if __name__ == "__main__":
     unittest.main()
