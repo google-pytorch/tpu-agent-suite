@@ -19,7 +19,7 @@ The framework ships with 4 built-in compute drivers:
 | Backend | Description | Required Parameters (`environment.json` / CLI) | Optional Parameters |
 | :--- | :--- | :--- | :--- |
 | `local` | Direct execution on the local host machine. | None | `python_interpreter` (`--interpreter`, default `sys.executable`) |
-| `gce_tpu_vm` | Remote Cloud TPU VM via GCE API / SSH (see [Multi-host execution](#multi-host-execution-on-gce_tpu_vm)). | `tpu_name` (`--tpu-name`), `zone` (`--zone`), `project` (`--project`) | `python_interpreter` (`--interpreter`, default `python3`) |
+| `gce_tpu_vm` | Remote Compute Engine TPU VM(s) via `gcloud compute ssh/scp` (see [Multi-host execution](#multi-host-execution-on-gce_tpu_vm)). | `tpu_name` (`--tpu-name`), `zone` (`--zone`), `project` (`--project`) | `python_interpreter` (`--interpreter`, default `python3`), `tunnel_through_iap` (`--tunnel-through-iap`), `internal_ip` (`--internal-ip`) |
 | `gke_pod` | Exec into an existing Kubernetes pod on GKE via `kubectl exec`. | `pod` (`--pod`) | `namespace` (`--namespace`, default `"default"`), `container` (`--container`), `kube_context` (`--kube-context`), `python_interpreter` (`--interpreter`, default `python3`) |
 | `gke_job` | Dispatch a TPU Job onto GKE via `kubectl`, optionally scheduled via Kueue (see [Multi-host execution](#multi-host-execution-on-gke_job)). | `image` (`--image`), `tpu_accelerator` (`--tpu-accelerator`), `tpu_topology` (`--tpu-topology`) | Cluster, Kueue, staging, cache, and placement settings — see [`gke_job` optional parameters](#gke_job-optional-parameters) |
 
@@ -32,9 +32,9 @@ The framework ships with 4 built-in compute drivers:
 
 ### Multi-host execution on `gce_tpu_vm`
 
-- **All workers**: On a multi-host TPU VM slice, `run`, `submit`, `status`, and `cancel` address every worker (`--worker=all`).
-- **Worker environment**: Each worker has `TPU_NUM_HOSTS`, `TPU_WORKER_ID` / `TPU_NODE_ID` (`0` is the leader), `TPU_CHIPS_PER_HOST`, `TPU_HEAD_HOST`, and `TPU_WORKER_HOSTNAMES` set from the TPU VM's GCE metadata.
-- **Leader-only reads**: `inspect`, `logs`, `artifacts`, and `port-forward` read worker `0` (the leader).
+- **MIG or comma-separated hosts**: Set `tpu_name` (`--tpu-name`) to a Compute Engine Managed Instance Group (MIG) name (instances resolved and ordered by ICI `agent-worker-number`) or comma-separated VM names in worker order (e.g. `my-tpu-0,my-tpu-1`); `run`, `submit`, `status`, `cancel`, and `preflight` fan out across every host in parallel.
+- **Worker environment**: Each host has `TPU_NUM_HOSTS`, `TPU_WORKER_ID` / `TPU_NODE_ID` (`0` is the leader), `TPU_CHIPS_PER_HOST`, `TPU_HEAD_HOST`, and `TPU_WORKER_HOSTNAMES` exported automatically.
+- **Leader-only reads**: `inspect` (scaled by host count), `artifacts`, and `port-forward` read worker `0` (the leader); `logs` reads worker `0`, or the first failed worker on failure.
 
 ### `gke_job` optional parameters
 
@@ -148,7 +148,7 @@ problem, the `fix` that resolves it.
 | Backend | Checks |
 | :--- | :--- |
 | `local` | This host has TPU devices, and no other process holds them. |
-| `gce_tpu_vm` | `gcloud` and an active account; the TPU VM exists and is `READY`. |
+| `gce_tpu_vm` | `gcloud` and an active account; the Compute Engine TPU VM exists and is `RUNNING` (warns on non-TPU machine types or missing external IP without `tunnel_through_iap` / `internal_ip`). |
 | `gke_pod` | `kubectl`, and `gke-gcloud-auth-plugin` when the kubeconfig calls it; the cluster answers; the gcloud account and `$GOOGLE_APPLICATION_CREDENTIALS` (below); the pod is `Running`. With `kube_context`: the kubeconfig has that context (a warning when kubectl's current context is another one). |
 | `gke_job` | `kubectl`, and `gke-gcloud-auth-plugin` when the kubeconfig calls it; the cluster answers; the gcloud account and `$GOOGLE_APPLICATION_CREDENTIALS` (below); `image`, `tpu_accelerator` and `tpu_topology` are set; an Artifact Registry `image` exists (a warning when it cannot be checked), and, when it is in another project than the cluster's, whether the nodes' service account can read it (a warning unless the repository's policy shows it); the namespace exists and this account may create Jobs in it. With `kube_context`: the kubeconfig has that context (a warning when kubectl's current context is another one). With `queue`: the Kueue `LocalQueue` exists, and with `priority`, the `WorkloadPriorityClass`. With `staging_bucket`: `google-cloud-storage` imports, the staging credential (or else Application Default Credentials) exists and can sign a URL (a failure if not, unless `pod_service_account` is set: the pod cannot reach the bucket, so the profile is not READY), and the bucket, or the folder in it, can be listed. With `hf_cache_pvc`: the claim exists and is ReadWriteMany, and is Bound (a warning while Pending under a storage class that binds on first use; a failure otherwise). |
 
@@ -484,7 +484,7 @@ Establishes a port forward from a local port to a remote workload (Cloud TPU VM,
 ```
 
 - `--background` (`-b`): Runs the port forward in the background and prints its PID (`Port forward established in background (PID: <pid>)`), allowing automated agents and scripts to proceed without blocking. It returns once something accepts a connection on the local port, not after a fixed interval: a tunnel that exits, or that never binds within 30s, is reported as `PORT_FORWARD_FAILED` with the child's output quoted and its log path, rather than handing back a pid for a forward nothing is listening behind. The background process is not tracked after that -- nothing cancels it at session end, so stop it by pid when you are done with it.
-- On `gce_tpu_vm`: Establishes an SSH tunnel via `gcloud compute tpus tpu-vm ssh ... -N -L <local>:localhost:<remote>`.
+- On `gce_tpu_vm`: Establishes an SSH tunnel via `gcloud compute ssh ... -N -L <local>:localhost:<remote>` (honouring `tunnel_through_iap` and `internal_ip`).
 - On `gke_pod`: Establishes a port-forward to the target pod via `kubectl port-forward pod/<pod> <local>:<remote>`.
 - On `gke_job`: Automatically discovers the job's running pod (of a multi-host job, the leader's, host 0) and forwards to it, falling back to `job/<job_id>` when no pod is up yet. `--job-id` is required.
 - On `local`: A no-op -- the workload runs on this host and is already reachable, so nothing is tunnelled. A mapping to a *different* local port is refused with `UNSUPPORTED_OPERATION`, since nothing would be listening on it.

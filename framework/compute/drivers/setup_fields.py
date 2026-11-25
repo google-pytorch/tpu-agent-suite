@@ -71,9 +71,9 @@ class SetupFields:
                 | set(self.on_demand))
 
 
-# GCP zones have a trailing `-<letter>` after the region (`us-central1-a`,
-# `europe-west4-b`); a region alone (`us-central1`, `us-east5`) is missing it.
-ZONE_PATTERN = re.compile(r"^[a-z]+-[a-z]+\d+-[a-z]$")
+# GCP zones have a trailing `-<letter>` or `-ai<n><letter>` after the region
+# (`us-central1-a`, `us-central1-ai1a`); a bare region (`us-central1`) lacks it.
+ZONE_PATTERN = re.compile(r"^[a-z]+-[a-z]+\d+-(?:[a-z]|ai\d+[a-z])$")
 REGION_PATTERN = re.compile(r"^[a-z]+-[a-z]+\d+$")
 TOPOLOGY_PATTERN = re.compile(r"^[1-9]\d*x[1-9]\d*(?:x[1-9]\d*)?$")
 

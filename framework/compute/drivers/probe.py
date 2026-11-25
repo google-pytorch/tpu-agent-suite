@@ -61,10 +61,10 @@ _METADATA_ROOT = f"{METADATA_URL}/instance/attributes"
 _LIBTPU_LOCKFILE = "/tmp/libtpu_lockfile"
 
 _ALIASES: dict[str, tuple[str, ...]] = {
-    "v4": ("v4", ),
+    "v4": ("v4", "ct4p"),
     "v5e": ("v5e", "v5lite", "ct5lp", "ct5e"),
     "v5p": ("v5p", "ct5p"),
-    "v6e": ("v6e", "ct6e", "trillium"),
+    "v6e": ("v6e", "v6", "ct6e", "trillium"),
     "tpu7x": ("tpu7x", "tpu7", "v7", "7x"),
 }
 
@@ -131,6 +131,11 @@ def multihost_env(meta: dict[str, str] | None = None) -> dict[str, str]:
         "TPU_HEAD_HOST": hosts[0],
     }
     chips = product(meta.get("CHIPS_PER_HOST_BOUNDS", ""), ",")
+    if chips <= 0:
+        mtype = meta.get("MACHINE_TYPE", "")
+        if "-" in mtype and mtype.endswith("t") and mtype.rsplit(
+                "-", 1)[-1][:-1].isdigit():
+            chips = int(mtype.rsplit("-", 1)[-1][:-1])
     if chips > 0:
         env["TPU_CHIPS_PER_HOST"] = str(chips)
     return env
@@ -175,6 +180,15 @@ def read_metadata() -> dict[str, str]:
                         if "=" in pair:
                             k, v = pair.split("=", 1)
                             meta.setdefault(k.strip(), v.strip().strip("'\""))
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(f"{METADATA_URL}/instance/machine-type",
+                                     headers={"Metadata-Flavor": "Google"})
+        with urllib.request.urlopen(req, timeout=0.5) as resp:
+            mtype = resp.read().decode("utf-8", errors="replace").strip()
+            if mtype:
+                meta.setdefault("MACHINE_TYPE", mtype.rsplit("/", 1)[-1])
     except Exception:
         pass
     return meta
@@ -277,7 +291,8 @@ def probe_host() -> dict[str, Any]:
 
     meta_type = (meta.get("ACCELERATOR_TYPE") or meta.get("TYPE")
                  or meta.get("cloud.google.com/gke-tpu-accelerator")
-                 or meta.get("cloud.google.com/machine-family") or "")
+                 or meta.get("cloud.google.com/machine-family")
+                 or meta.get("MACHINE_TYPE") or "")
     generation = generation_for_name(meta_type) or pci_generation
     spec = spec_for(generation)
     per_chip = spec["devices_per_chip"]
@@ -318,6 +333,8 @@ def probe_host() -> dict[str, Any]:
         chips_per_host = chips
         chips = chips_per_host * hosts
         available = available * hosts
+        if topology == topology_for(chips_per_host, generation):
+            topology = topology_for(chips, generation)
         details["job_chips"] = chips
         details["job_hosts"] = hosts
         details["chips_per_host"] = chips_per_host

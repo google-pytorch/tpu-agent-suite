@@ -132,6 +132,7 @@ class TestSetupFieldsAndValidation(unittest.TestCase):
         v = compute.validate_field_format
         for field, good, bad in [
             ("zone", "us-central1-a", "not_a_zone"),
+            ("zone", "us-central1-ai1a", "us-central1-1a"),
             ("tpu_topology", "2x2x1", "v6e-8"),
             ("tpu_topology", "2x4", "0x4"),
             ("priority", "low", "urgent"),
@@ -465,7 +466,7 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
             "kubectl get nodes": "tpu7x 2x2x1\ntpu7x 2x2x1\ntpu-v6e-slice 2x4",
             "kubectl get localqueues": "lq other",
             "gcloud config get-value": "other-proj",
-            "gcloud compute tpus": "vm1 us-west4-a",
+            "gcloud compute instances": "vm1 us-west4-a",
             "kubectl config current-context": "gke_my-proj_us-central1_c1",
         }
         ran = []
@@ -551,7 +552,8 @@ class TestComputeSetupApplyAndConfig(unittest.TestCase):
         _, _, qs = plan("--profile", "tv", "--backend", "gce_tpu_vm")
         self.assertEqual(qs["tpu_name"]["suggested"], "vm1")
         self.assertNotIn("suggested", qs["project"])
-        outputs["gcloud compute tpus"] = "vm1 us-west4-a\nme-vm us-east5-a"
+        outputs[
+            "gcloud compute instances"] = "vm1 us-west4-a\nme-vm us-east5-a"
         with patch.dict(os.environ, {"USER": "nobody"}):
             _, res, qs = plan("--profile", "tv", "--backend", "gce_tpu_vm")
         self.assertEqual([c["tpu_name"] for c in qs["tpu_name"]["choices"]],

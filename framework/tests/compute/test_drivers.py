@@ -241,6 +241,10 @@ class TestHostProbe(unittest.TestCase):
                   available_chips=4)),
             ("gke kube-label metadata", dict(vfio=_VFIO8, meta=gke),
              dict(accelerator="v6e", chips=8, topology="2x4", hbm_gb=32.0)),
+            ("gce machine-type metadata",
+             dict(accel=[f"/dev/accel{i}" for i in range(4)],
+                  meta={"MACHINE_TYPE": "ct6e-standard-4t"}),
+             dict(accelerator="v6e", chips=4, topology="2x2", hbm_gb=32.0)),
             ("unrecognised chip count is not guessed at",
              dict(accel=[f"/dev/accel{i}" for i in range(6)],
                   meta={"ACCELERATOR_TYPE":
@@ -307,30 +311,19 @@ class TestHostProbe(unittest.TestCase):
         self.assertIn("tpu9z", details["hbm_gb_note"])
 
     def test_multihost_slice_scales_chips_and_env(self):
-        """Verify multi-host TPU VM metadata scales slice chips and builds TPU_* env."""
+        """Verify GCE multi-host metadata scales chips/topology and builds TPU_* env."""
         meta = {
-            "ACCELERATOR_TYPE": "tpu7x-16",
-            "TOPOLOGY": "2x2x2",
-            "CHIPS_PER_HOST_BOUNDS": "2,2,1",
+            "MACHINE_TYPE": "ct6e-standard-4t",
             "agent-worker-number": "1",
             "worker-network-endpoints": "n:0:10.0.0.1,n:1:10.0.0.2",
         }
-        with self._probed(vfio=[f"/dev/vfio/{i}" for i in range(8)],
+        with self._probed(vfio=[f"/dev/vfio/{i}" for i in range(4)],
                           meta=meta):
             profile = self.driver.inspect()
-        d = profile.details
         self.assertEqual(
-            (profile.chips, profile.available_chips, d["job_hosts"],
-             d["chips_per_host"], d["job_devices"]), (8, 8, 2, 4, 16))
-        self.assertEqual(
-            probe.multihost_env(meta), {
-                "TPU_NUM_HOSTS": "2",
-                "TPU_WORKER_ID": "1",
-                "TPU_NODE_ID": "1",
-                "TPU_CHIPS_PER_HOST": "4",
-                "TPU_WORKER_HOSTNAMES": "10.0.0.1,10.0.0.2",
-                "TPU_HEAD_HOST": "10.0.0.1",
-            })
+            (profile.chips, profile.topology, profile.details["job_hosts"]),
+            (8, "2x4", 2))
+        self.assertEqual(probe.multihost_env(meta)["TPU_CHIPS_PER_HOST"], "4")
 
     def test_list_devices_filters_unbacked_accel_nodes(self):
         """Verify static unbacked /dev/accel* nodes do not shadow /dev/vfio/[0-9]*."""
@@ -874,18 +867,25 @@ class TestRemoteShellDrivers(ScriptMixin, unittest.TestCase):
         _terminate_job_quietly(job_id)
 
     def test_gce_internal_ip_reaches_ssh_and_scp_only(self):
-        """Verify internal_ip adds --internal-ip to ssh and scp, not describe."""
-        driver = GceTpuVmDriver.from_params({
-            "tpu_name": "t",
-            "zone": "z",
-            "project": "p",
-            "internal_ip": "true"
-        })
-        self.assertIn("--internal-ip", driver._gcloud_base("ssh"))
-        self.assertNotIn("--internal-ip", driver._gcloud_base("describe"))
-        with patch("subprocess.run") as run:
-            driver._scp("a", "t:b")
-        self.assertIn("--internal-ip", run.call_args.args[0])
+        """Verify internal_ip/IAP reach ssh and scp, not describe, and stay disjoint."""
+        base_p = dict(tpu_name="t", zone="z", project="example.com:p")
+        for key, flag in (("internal_ip", "--internal-ip"),
+                          ("tunnel_through_iap", "--tunnel-through-iap")):
+            driver = GceTpuVmDriver.from_params({**base_p, key: "true"})
+            self.assertEqual(
+                driver._gcloud_base("ssh")[:3], ["gcloud", "compute", "ssh"])
+            self.assertIn(flag, driver._gcloud_base("ssh"))
+            self.assertNotIn(flag, driver._gcloud_base("describe"))
+            with patch("subprocess.run") as run:
+                driver._scp("a", "t:b")
+            self.assertEqual(run.call_args.args[0][:3],
+                             ["gcloud", "compute", "scp"])
+            self.assertIn(flag, run.call_args.args[0])
+        with self.assertRaises(ComputeConfigError):
+            GceTpuVmDriver.from_params({
+                **base_p, "internal_ip": "true",
+                "tunnel_through_iap": "true"
+            })
 
     def test_gke_pod_command_carries_namespace_and_container(self):
         """Verify kubectl calls are scoped to the pod's namespace and container."""
@@ -899,45 +899,65 @@ class TestRemoteShellDrivers(ScriptMixin, unittest.TestCase):
                          ["kubectl", "--context", "c", "-n", "default"])
 
     @patch("subprocess.run")
-    def test_gce_tpu_vm_multihost(self, mock_run):
-        """Verify multi-host worker targeting, status aggregation, and scp fallback."""
-        driver = GceTpuVmDriver(tpu_name="t", zone="z", project="p")
+    def test_gce_multihost_fanout_inspect_and_status(self, mock_run):
+        """Verify multi-host MIG resolution, inspect scaling, fan-out, and worker logs."""
+        prof_json = json.dumps(
+            dict(accelerator="v6e",
+                 topology="2x2",
+                 chips=4,
+                 hbm_gb=32.0,
+                 status="healthy",
+                 available_chips=4,
+                 held_by=[],
+                 details=dict(devices_per_chip=1, job_devices=4)))
+        mig_meta = json.dumps([
+            dict(name="m-a",
+                 metadata=dict(
+                     items=[dict(key="agent-worker-number", value="1")])),
+            dict(name="m-z",
+                 metadata=dict(
+                     items=[dict(key="agent-worker-number", value="0")])),
+        ])
+        drv = GceTpuVmDriver(tpu_name="my-mig", zone="z", project="p")
+        mock_run.side_effect = [
+            completed(returncode=1, stderr="was not found"),
+            completed("m-a\nm-z\n"),
+            completed(mig_meta),
+            completed(prof_json),
+        ]
+        prof = drv.inspect()
+        self.assertEqual(drv.hosts, ("m-z", "m-a"))
+        self.assertEqual(
+            (prof.chips, prof.topology, prof.details["job_hosts"]),
+            (8, "2x4", 2))
+
+        mock_run.reset_mock()
+        mock_run.side_effect = None
         mock_run.return_value = completed()
-        for call, want_all in (
-            (lambda: driver._sh("echo hi"), True),
-            (lambda: driver._sh_leader("echo leader"), False),
-            (lambda: driver._copy_in(Path("/a"), "/b"), True),
-            (lambda: driver._copy_out("/a", Path("/b")), False),
-        ):
-            mock_run.reset_mock()
-            call()
-            self.assertEqual("--worker=all" in mock_run.call_args.args[0],
-                             want_all)
-        self.assertIn("--env", driver._env_preamble())
-        for raw, expected in (
-            ("COMPLETED 0\nCOMPLETED 0\n", ("COMPLETED", 0)),
-            ("COMPLETED 0\nRUNNING\n", ("RUNNING", None)),
-            ("RUNNING\nFAILED 2\n", ("FAILED", 2)),
-        ):
-            self.assertEqual(shell._parse_status_line(raw), expected)
-        job_id = driver.submit(self._script("echo hi\n", suffix=".sh"))
-        mock_run.return_value = completed("@1 FAILED 2\n@0 COMPLETED 0\n")
-        st = driver.get_status(job_id)
+        job_id = drv.submit(self._script("echo hi\n", suffix=".sh"))
+        launches = [
+            " ".join(c.args[0]) for c in mock_run.call_args_list
+            if "nohup setsid" in " ".join(c.args[0])
+        ]
+        self.assertEqual(len(launches), 2)
+        self.assertTrue(
+            any("m-z" in c and "TPU_NUM_HOSTS=2" in c for c in launches))
+
+        mock_run.side_effect = lambda cmd, **_kw: completed(
+            returncode=255) if "m-a" in cmd else completed("@0 COMPLETED 0\n")
+        st_unk = drv.get_status(job_id)
+        self.assertEqual(st_unk.status, "UNKNOWN")
+        self.assertIn("m-a", st_unk.error or "")
+        mock_run.side_effect = lambda cmd, **_kw: completed(
+            "@1 FAILED 2\n" if "m-a" in cmd else "@0 COMPLETED 0\n")
+        st = drv.get_status(job_id)
         self.assertEqual((st.status, st.exit_code, st.error),
                          ("FAILED", 2, "worker 1 exited 2"))
-        mock_run.return_value = completed("crash on worker 1\n")
-        self.assertEqual(driver.fetch_logs(job_id),
-                         "=== worker 1 (exit 2) ===\ncrash on worker 1\n")
-        self.assertIn("--worker=1", mock_run.call_args.args[0])
-        mock_run.side_effect = [
-            completed(returncode=1,
-                      stderr="SSH Key is not present in the SSH agent."),
-            completed(returncode=0),
-        ]
-        with patch.dict(os.environ, {"SSH_AUTH_SOCK": "/tmp/agent.sock"}):
-            self.assertEqual(driver._copy_in(Path("/a"), "/b").returncode, 0)
-        self.assertEqual(
-            mock_run.call_args_list[-1].kwargs["env"]["SSH_AUTH_SOCK"], "")
+        mock_run.side_effect = None
+        mock_run.return_value = completed("crash on m-a\n")
+        self.assertEqual(drv.fetch_logs(job_id),
+                         "=== worker 1 (exit 2) ===\ncrash on m-a\n")
+        self.assertIn("m-a", mock_run.call_args.args[0])
 
 
 def _free_port() -> int:

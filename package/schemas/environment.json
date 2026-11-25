@@ -34,7 +34,7 @@
               "gke_pod",
               "gke_job"
             ],
-            "description": "Compute transport to use. 'local' runs on this machine. 'gce_tpu_vm' reaches a Cloud TPU VM via `gcloud ... tpu-vm ssh` (requires tpu_name/zone/project). 'gke_pod' execs into an already-running TPU pod via kubectl; 'gke_job' creates a TPU Job via kubectl."
+            "description": "Compute transport to use. 'local' runs on this machine. 'gce_tpu_vm' reaches a Compute Engine TPU VM via `gcloud compute ssh` (requires tpu_name/zone/project). 'gke_pod' execs into an already-running TPU pod via kubectl; 'gke_job' creates a TPU Job via kubectl."
           },
           "params": {
             "type": "object",
@@ -42,7 +42,7 @@
             "properties": {
               "tpu_name": {
                 "type": "string",
-                "description": "gce_tpu_vm backend: Cloud TPU VM resource name."
+                "description": "gce_tpu_vm backend: Compute Engine TPU VM instance name, Managed Instance Group (MIG) name, or comma-separated instance names in worker order for a multi-host slice (e.g. my-tpu-mig or my-tpu-0,my-tpu-1)."
               },
               "zone": {
                 "type": "string",
@@ -155,6 +155,10 @@
               "python_interpreter": {
                 "type": "string",
                 "description": "Path to the Python interpreter that runs the workload (e.g. /opt/conda/bin/python). This is the environment holding the model, runtime and accelerator libraries."
+              },
+              "tunnel_through_iap": {
+                "type": "boolean",
+                "description": "gce_tpu_vm backend (optional): tunnel ssh and scp through Cloud Identity-Aware Proxy (IAP), for GCE TPU VMs without an external IP reached from a laptop or workstation. Cannot be combined with internal_ip."
               },
               "internal_ip": {
                 "type": "boolean",

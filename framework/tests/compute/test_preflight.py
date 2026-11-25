@@ -103,15 +103,29 @@ class TestPreflight(unittest.TestCase):
         self.assertEqual((report.reachable, report.status), (True, "warn"))
 
     def test_gce(self):
-        report, checks, calls = self._run(self._gce(), {
-            **self.ACCOUNT, "describe": (0, "READY\tv6e-8\n")
-        })
-        self.assertEqual((report.reachable, report.status), (True, "ok"))
-        self.assertFalse(any(" ssh " in call for call in calls))
-        _, checks, _ = self._run(self._gce(), {
-            **self.ACCOUNT, "describe": (0, "STOPPED v6e-8\n")
-        })
-        self.assertIn("tpu-vm start vm --zone=us-east5-b",
+        pub, priv = [dict(accessConfigs=[dict(natIP="34.1.2.3")])
+                     ], [dict(networkIP="10.0.0.2")]
+        for drv, mtype, nics, want in (
+            (self._gce(), "ct6e-standard-4t", pub, "ok"),
+            (self._gce(), "ct6e-standard-4t", priv, "warn"),
+            (GceTpuVmDriver("vm", "us-east5-b", "p", tunnel_through_iap=True),
+             "tpu7x-standard-4t", priv, "ok"),
+        ):
+            payload = json.dumps(
+                dict(status="RUNNING",
+                     machineType=f"zones/z/machineTypes/{mtype}",
+                     networkInterfaces=nics))
+            report, _, calls = self._run(drv, {
+                **self.ACCOUNT, "instances describe": (0, payload)
+            })
+            self.assertEqual((report.reachable, report.status), (True, want))
+            self.assertFalse(any(" ssh " in call for call in calls))
+        _, checks, _ = self._run(
+            self._gce(), {
+                **self.ACCOUNT, "instances describe":
+                (0, json.dumps(dict(status="TERMINATED")))
+            })
+        self.assertIn("instances start vm --zone=us-east5-b",
                       checks["tpu_vm"].fix)
         _, checks, _ = self._run(self._gce(), {"auth list": (0, "")})
         self.assertIn("gcloud auth login", checks["gcloud:account"].fix)

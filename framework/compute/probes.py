@@ -33,8 +33,9 @@ from typing import Any, Callable
 from .drivers import base, probe, registry
 from .drivers.base import ACCELERATOR_LABEL, TOPOLOGY_LABEL, TPU_RESOURCE
 
-# Seconds each probe may take.
-PROBE_TIMEOUT_SEC = 10
+# Seconds each probe may take (global GCE `instances list` across all zones can
+# take ~20s on large shared projects).
+PROBE_TIMEOUT_SEC = 30
 
 # The probes that can tell which backend to use (see `_backend`).
 _BACKEND_PROBES = ("context", "tpu_nodes", "tpu_pods", "tpu_vms")
@@ -94,7 +95,10 @@ def _tpu_vm(out: str) -> dict[str, Any]:
     first, each naming its zone too: a name is unique only within a zone.
     The zone is suggested only if every VM listed, offered or not, is in it.
     """
-    vms = _pairs(out)
+    vms = [
+        vm for vm in _pairs(out)
+        if not vm[0].startswith(("gke-", "gk3-", "t1v-n-"))
+    ]
     user = os.environ.get("USER")
     mine = [vm for vm in vms if user and user in vm[0]]
     for pick in (vms, mine):
@@ -145,6 +149,7 @@ def _probes(
     to list TPU VMs in the chosen project or queues in the chosen namespace.
     """
     project = [f"--project={known['project']}"] if known.get("project") else []
+    zone = [f"--zones={known['zone']}"] if known.get("zone") else []
     namespace = ["-n", known["namespace"]] if known.get("namespace") else []
     # Last, so `_source` still names the subcommand.
     kube = base.kubectl_prefix(known.get("kubeconfig"),
@@ -163,9 +168,10 @@ def _probes(
                          "project": out
                      } if out not in ("", "(unset)") else {}),
         "tpu_vms": ([
-            "gcloud", "compute", "tpus", "tpu-vm", "list", "--zone=-",
-            "--format=value(name.basename(),name.segment(-3))"
-        ] + project, ("tpu_name", "zone"), _tpu_vm),
+            "gcloud", "compute", "instances", "list",
+            "--filter=status=RUNNING AND machineType ~ '/(ct[0-9]|tpu[0-9])'",
+            "--format=value(name,zone.basename())"
+        ] + project + zone, ("tpu_name", "zone"), _tpu_vm),
         "namespace": ([
             "kubectl", "config", "view", "--minify", "-o",
             "jsonpath={..namespace}"
@@ -205,7 +211,7 @@ def _backend(found: dict[str, dict[str, Any]], vms: str,
         ("gke_job", found.get("tpu_nodes"),
          "TPU nodes in the kubectl context"),
         ("gke_pod", found.get("tpu_pods"), "running pods that request TPUs"),
-        ("gce_tpu_vm", vms, "gcloud compute tpus tpu-vm list"),
+        ("gce_tpu_vm", vms, "gcloud compute instances list"),
     ):
         if hit and backend in backends:
             return backend, source

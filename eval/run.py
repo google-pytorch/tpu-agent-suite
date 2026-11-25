@@ -2232,49 +2232,54 @@ def resolve_sut_slug(config: dict[str, Any], config_path: Path) -> str:
     return f"{harness}-{arm}"
 
 
+_ACCEL_SLUG_PATTERNS = (
+    ("v7", re.compile(r"(?<![a-z0-9])(?:tpu(?:7x?|v7x?)|v7x?)(?![0-9])")),
+    ("v6e",
+     re.compile(r"(?<![a-z0-9])(?:(?:tpu)?v6e?|ct6e|trillium)(?![0-9])")),
+    ("v5p", re.compile(r"(?<![a-z0-9])(?:(?:tpu)?v5p|ct5p)(?![0-9])")),
+    ("v5e",
+     re.compile(
+         r"(?<![a-z0-9])(?:(?:tpu)?v5e|(?:tpu)?v5-?lite|ct5lp|ct5e)(?![0-9])")
+     ),
+    ("v4", re.compile(r"(?<![a-z0-9])(?:(?:tpu)?v4|ct4p)(?![0-9])")),
+)
+
+
 def _normalize_accelerator_slug(raw_accel: str) -> str:
     """Normalize raw TPU accelerator string to canonical slug (v7, v6e, v5p, v5e, v4)."""
     accel = raw_accel.strip().lower()
     if not accel:
         return ""
-    if "tpu7" in accel or "v7" in accel:
-        return "v7"
-    if "v6" in accel or "trillium" in accel:
-        return "v6e"
-    if "v5p" in accel:
-        return "v5p"
-    if "v5e" in accel or "v5-lite" in accel:
-        return "v5e"
-    if "v4" in accel:
-        return "v4"
+    for slug, pat in _ACCEL_SLUG_PATTERNS:
+        if pat.search(accel):
+            return slug
     return re.sub(r"[^a-zA-Z0-9\-]", "", accel)
 
 
 def _describe_gce_tpu_vm_accelerator(tpu_name: str, zone: str,
                                      project: str) -> str:
-    """Query gcloud compute tpus tpu-vm describe for acceleratorType if configured."""
-    if not (tpu_name and zone and project):
+    """Query gcloud compute instances (or MIG) for machineType if configured."""
+    first_host = (tpu_name or "").split(",")[0].strip()
+    if not (first_host and zone and project):
         return ""
+    scope = [f"--zone={zone}", f"--project={project}"]
+
+    def _gcloud(*args: str) -> str:
+        proc = subprocess.run(["gcloud", "compute", *args, *scope],
+                              capture_output=True,
+                              text=True,
+                              timeout=15,
+                              check=False)
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
     try:
-        proc = subprocess.run(
-            [
-                "gcloud",
-                "compute",
-                "tpus",
-                "tpu-vm",
-                "describe",
-                tpu_name,
-                f"--zone={zone}",
-                f"--project={project}",
-                "--format=value(acceleratorType)",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            return proc.stdout.strip()
+        fmt = "--format=value(machineType.basename())"
+        if mtype := _gcloud("instances", "describe", first_host, fmt):
+            return mtype
+        if inst := _gcloud("instance-groups", "managed", "list-instances",
+                           first_host, "--limit=1",
+                           "--format=value(instance.basename())"):
+            return _gcloud("instances", "describe", inst, fmt)
     except Exception:
         pass
     return ""

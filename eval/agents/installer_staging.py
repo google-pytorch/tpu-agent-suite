@@ -42,6 +42,9 @@ def collect_task_environment_answers(
             "zone": env_lookup.get("GCE_LOCATION", ""),
             "project": env_lookup.get("GCE_PROJECT", ""),
         })
+        if env_lookup.get("GCE_TUNNEL_THROUGH_IAP",
+                          "").lower() in ("1", "true", "yes"):
+            answers["tunnel_through_iap"] = True
 
     elif backend == "gke_pod":
         answers.update({

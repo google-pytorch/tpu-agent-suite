@@ -3,7 +3,7 @@
     {
       "name": "backend",
       "path": "compute.backend",
-      "prompt": "Compute backend to use: 'local' (agent runs on the TPU VM), 'gce_tpu_vm' (reach a Cloud TPU VM via gcloud), 'gke_pod' (exec into an already-running TPU pod), or 'gke_job' (dispatch a TPU Job via kubectl)",
+      "prompt": "Compute backend to use: 'local' (agent runs on the TPU VM), 'gce_tpu_vm' (reach a Compute Engine TPU VM via gcloud compute ssh), 'gke_pod' (exec into an already-running TPU pod), or 'gke_job' (dispatch a TPU Job via kubectl)",
       "type": "string",
       "choices": [
         "local",
@@ -20,7 +20,7 @@
           "gce_tpu_vm"
         ]
       },
-      "prompt": "gce_tpu_vm only: Cloud TPU VM resource name (e.g. my-tpu-vm)",
+      "prompt": "gce_tpu_vm only: Compute Engine TPU VM instance name, Managed Instance Group (MIG) name, or comma-separated instance names for a multi-host slice (e.g. my-tpu-vm, my-tpu-mig, or my-tpu-0,my-tpu-1)",
       "type": "string"
     },
     {
@@ -306,6 +306,18 @@
       "prompt": "Python that runs your workloads on the target: the one where `import torch_tpu` works. On a TPU VM this is usually a virtualenv, e.g. `~/tpu_venv/bin/python3`; in a container, e.g. `/opt/conda/bin/python`. Leave blank to use the target's default `python3`, which often doesn't have `torch_tpu` installed",
       "type": "string",
       "default": ""
+    },
+    {
+      "name": "tunnel_through_iap",
+      "path": "compute.params.tunnel_through_iap",
+      "when": {
+        "backend": [
+          "gce_tpu_vm"
+        ]
+      },
+      "prompt": "gce_tpu_vm only: tunnel SSH and SCP through Cloud Identity-Aware Proxy (IAP)? Say yes if you're connecting from a laptop or workstation to a GCE TPU VM that has no external IP (cannot be combined with internal_ip)",
+      "type": "boolean",
+      "default": false
     },
     {
       "name": "internal_ip",

@@ -174,7 +174,7 @@ keeps your profiles and settings.
 | Backend | Meaning | Backend-specific parameters |
 | :--- | :--- | :--- |
 | `local` | The harness is running on the TPU VM; workloads run in-process. | *(none)* |
-| `gce_tpu_vm` | Reach a Cloud TPU VM over `gcloud ... ssh`. | `tpu_name`, `zone`, `project` |
+| `gce_tpu_vm` | Reach a Compute Engine TPU VM over `gcloud compute ssh`. | `tpu_name`, `zone`, `project`, optional `tunnel_through_iap`, `internal_ip` |
 | `gke_pod` | `kubectl exec` into an already-running TPU pod. | `namespace`, `pod`, optional `container`, `kube_context` |
 | `gke_job` | Dispatch a TPU Job via `kubectl`, optionally through Kueue; a multi-host slice runs as one pod per node, host 0 the leader. | `image`, `tpu_accelerator`, `tpu_topology`, optional `namespace`, `queue`, `priority`, `declared_duration_minutes`, `kubeconfig`, `kube_context`, `hf_cache_pvc`, `compile_cache_url`, `staging_bucket`, `pod_service_account`, `staging_service_account`, `staging_service_account_key` |
 
@@ -335,7 +335,7 @@ block out of `~/AGENTS.md` and leaves the rest of that file alone. Pass
 
 ## 5. Set up the compute target
 
-### Cloud TPU VM (`local` and `gce_tpu_vm`)
+### Compute Engine TPU VM (`local` and `gce_tpu_vm`)
 
 For `local` and `gce_tpu_vm`, the TPU VM needs a Python 3.12 environment with `torch_tpu`
 and the TPU workload dependencies.
@@ -346,8 +346,8 @@ and the TPU workload dependencies.
 
 ```bash
 # For gce_tpu_vm (from your workstation first): copy requirements-tpu.txt to the VM, then SSH in
-gcloud compute tpus tpu-vm scp "$DIST_DIR/requirements-tpu.txt" <TPU_NAME>:~/requirements-tpu.txt --zone=<ZONE>
-gcloud compute tpus tpu-vm ssh <TPU_NAME> --zone=<ZONE>
+gcloud compute scp "$DIST_DIR/requirements-tpu.txt" <TPU_NAME>:~/requirements-tpu.txt --zone=<ZONE>
+gcloud compute ssh <TPU_NAME> --zone=<ZONE>
 # (For `local`, you are already on the TPU VM — copy "$DIST_DIR/requirements-tpu.txt" to ~/requirements-tpu.txt)
 
 # On the TPU VM:
