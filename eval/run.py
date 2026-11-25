@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -68,6 +69,8 @@ CONFIGS_DIR = REPO_ROOT / "eval" / "configs"
 DATASETS_DIR = REPO_ROOT / "eval" / "datasets"
 SUITES_DIR = REPO_ROOT / "eval" / "suites"
 DOT_DATASETS_DIR = REPO_ROOT / "eval" / ".datasets"
+# --dataset gs://... downloads here, one fresh directory per run (gitignored).
+GCS_DATASETS_DIR = DOT_DATASETS_DIR / "gcs"
 
 
 def check_dependencies() -> None:
@@ -640,6 +643,7 @@ def require_dataset(config: dict[str, Any], config_path: Path) -> None:
         "  ./eval/run.py --config <name> --suite <name>\n"
         "  ./eval/run.py --config <name> --dataset <name>\n"
         "  ./eval/run.py --config <name> --task <name>\n"
+        "  ./eval/run.py --config <name> --dataset gs://<bucket>/<path>\n"
         f"Available suites: {available_suites()}\n"
         f"Available datasets: {available_datasets()}")
 
@@ -1943,7 +1947,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-d",
         "--dataset",
         help=
-        ("Dataset to run, by name under eval/datasets/ or by path. "
+        ("Dataset to run, by name under eval/datasets/, by path, or as a "
+         "gs://<bucket>/<path> URI to a dataset directory (downloaded with "
+         "`gcloud storage` before the run; its last path segment names the "
+         "dataset). "
          "Configs name the system under test only, so --suite or --dataset is required."
          ),
     )
@@ -1963,6 +1970,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--job-name",
                         help="Custom job name (overrides job_name in YAML).")
+    parser.add_argument(
+        "--run-label",
+        default=None,
+        help=(
+            "Label for the {env} slot of the generated Harbor job name "
+            "(e.g. a release tag like v0.8.0-rc1). Ignored with --job-name."),
+    )
+    parser.add_argument(
+        "--summary-json",
+        type=Path,
+        default=None,
+        help=("Write a JSON run summary (per config: config, job_name, "
+              "hub_url, upload_succeeded, finished, trials, gcs_uri) to this "
+              "path on every exit."),
+    )
+    parser.add_argument(
+        "--stage-gcs",
+        default=None,
+        metavar="GS_URI",
+        help=("After each job finishes, copy its local job directory to "
+              "<GS_URI>/<job_name>/ with `gcloud storage cp -r` (e.g. "
+              "gs://csat-datasets/releases/v0.8.0). Off by default. A failed "
+              "copy warns and is recorded in --summary-json; it does not fail "
+              "the run."),
+    )
     parser.add_argument(
         "--upload",
         action=argparse.BooleanOptionalAction,
@@ -2372,11 +2404,21 @@ def resolve_accelerator_slug(config: dict[str, Any]) -> str:
     return ""
 
 
-def resolve_env_slug() -> str:
-    """Resolve environment slug: gh-<run_id> or local."""
+def resolve_env_slug(run_label: str | None = None) -> str:
+    """Resolve environment slug: run label, gh-<run_id>, cb-<build_id>, or local.
+
+    An explicit label wins so a release run is named for its tag. Cloud Build
+    does not export BUILD_ID on its own; it is only seen where a build step
+    passes it in.
+    """
+    if run_label and run_label.strip():
+        return run_label.strip()
     run_id = os.environ.get("GITHUB_RUN_ID")
     if run_id:
         return f"gh-{run_id}"
+    build_id = os.environ.get("BUILD_ID")
+    if build_id:
+        return f"cb-{build_id[:8]}"
     return "local"
 
 
@@ -2407,7 +2449,11 @@ def generate_job_name(
     accel = resolve_accelerator_slug(config)
     if accel and not sut.endswith(f"-{accel}"):
         sut += f"-{accel}"
-    env = resolve_env_slug()
+    # Sanitized here, not only below: the truncation fallback reassembles the
+    # name from its parts, and a --run-label may hold a slash. An underscore
+    # would split the env slot in two, so it goes too.
+    env = re.sub(r"[^a-zA-Z0-9\-\.]", "-",
+                 resolve_env_slug(getattr(args, "run_label", None)))
 
     raw_name = f"{target}_{sut}_{env}_{ts}"
     # Sanitize invalid characters
@@ -2527,11 +2573,173 @@ class HarborJobMonitor:
             time.sleep(1.0)
 
 
+def is_gcs_uri(spec: str | None) -> bool:
+    """Whether a --dataset value names a GCS location rather than a local one.
+
+    No local dataset name or path starts with gs://, so this cannot turn a
+    mistyped local name into a download.
+    """
+    return bool(spec) and spec.strip().startswith("gs://")
+
+
+def parse_gcs_prefix(spec: str, flag: str = "--stage-gcs") -> str:
+    """Validate a gs:// flag value and return it without a trailing slash.
+
+    Whitespace is rejected anywhere: the last segment of a --dataset URI
+    names the job, and the job name becomes a directory and a GCS path.
+    """
+    prefix = spec.strip().rstrip("/")
+    if not re.fullmatch(r"gs://[a-z0-9][a-z0-9._-]{1,221}[a-z0-9](/\S*)?",
+                        prefix):
+        raise RuntimeError(f"{flag} '{spec}' is not a GCS location; "
+                           "expected gs://<bucket>[/<prefix>]")
+    return prefix
+
+
+def fetch_gcs_dataset(spec: str) -> tuple[str, Path]:
+    """Download a gs:// dataset directory; return its URI and local copy.
+
+    Harbor only runs datasets from local paths, so the dataset is copied
+    first and then handled exactly like a local --dataset: --task scoping,
+    the required_env preflight, base-image digests and verifier provenance
+    all work unchanged.
+
+    Every run downloads into a fresh directory rather than a shared cache.
+    The release build runs several configs against the same URI at once,
+    and each one writes per-run files (.nexus-tpu-digest) into its dataset;
+    a shared mirror would let one run's re-sync delete another's files, or
+    keep tasks that were removed from the bucket. The copy keeps the URI's
+    last segment as its directory name, which names the dataset in job names.
+
+    The URI must name a folder (gs://<bucket>/<dataset>), not a bare bucket:
+    copying a bucket does not leave a directory named for it to run.
+    """
+    uri = parse_gcs_prefix(spec, flag="--dataset")
+    if "/" not in uri.removeprefix("gs://"):
+        raise RuntimeError(f"--dataset '{spec}' is a bare bucket; "
+                           "expected gs://<bucket>/<dataset>")
+    if not shutil.which("gcloud"):
+        raise RuntimeError("--dataset gs://... needs the gcloud CLI on PATH")
+    GCS_DATASETS_DIR.mkdir(parents=True, exist_ok=True)
+    dest_root = Path(tempfile.mkdtemp(prefix="run-", dir=GCS_DATASETS_DIR))
+    cmd = ["gcloud", "storage", "cp", "-r", uri, str(dest_root)]
+    print(f"==> downloading dataset {uri}/ -> {_display_path(dest_root)}/")
+    if subprocess.run(cmd).returncode != 0:
+        shutil.rmtree(dest_root, ignore_errors=True)
+        raise RuntimeError(f"Failed to download dataset {uri}/: "
+                           f"`{' '.join(cmd)}` failed")
+    local = dest_root / uri.rsplit("/", 1)[-1]
+    if not local.is_dir() or not any(local.rglob("task.toml")):
+        shutil.rmtree(dest_root, ignore_errors=True)
+        raise RuntimeError(
+            f"{uri}/ is not a Harbor dataset: no <task>/task.toml under it")
+    return uri, local
+
+
+def dataset_digest(root: Path) -> str:
+    """A sha256 over a dataset's file paths and contents.
+
+    Recorded in --summary-json so a release can name the exact dataset
+    snapshot it was rated on, even if the bucket is later overwritten. Taken
+    right after download, before the run writes anything into the dataset.
+    """
+    h = hashlib.sha256()
+    for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        h.update(f.relative_to(root).as_posix().encode() + b"\0")
+        with f.open("rb") as fh:
+            h.update(hashlib.file_digest(fh, "sha256").digest())
+    return f"sha256:{h.hexdigest()}"
+
+
+def stage_job_to_gcs(job_dir: Path, prefix: str) -> str | None:
+    """Copy a finished job directory to <prefix>/<job_name>/ in GCS.
+
+    The local job directory is the copy staged: it is what `harbor run`
+    wrote and what `harbor upload` sent, so it exists even when the Hub upload
+    is off or failed. A failure only warns, as a failed Hub upload does; the
+    caller records it so a pipeline can tell staged from not.
+
+    Returns the staged URI, or None if the copy failed.
+    """
+    dest = f"{prefix}/{job_dir.name}"
+    cmd = ["gcloud", "storage", "cp", "-r", str(job_dir), f"{prefix}/"]
+    print(f"==> staging {job_dir} to {dest}/")
+    try:
+        res = subprocess.run(cmd)
+    except KeyboardInterrupt:
+        res = subprocess.CompletedProcess(cmd, returncode=130)
+    if res.returncode != 0:
+        print(f"Warning: Failed to stage {job_dir} to {dest}/.",
+              file=sys.stderr)
+        print(f"  To retry, run:\n    {' '.join(cmd)}", file=sys.stderr)
+        return None
+    print(f"✓ Staged evaluation results to {dest}/")
+    return dest
+
+
+def write_run_summary(path: Path,
+                      results_summary: list[dict[str, Any]],
+                      error: str | None,
+                      dataset: dict[str, str] | None = None) -> None:
+    """Write the --summary-json file a pipeline reads after the run.
+
+    Written on every exit, failures included, so a caller can tell "the run
+    failed" from "the run never reported". The write is atomic so a reader
+    never sees half a file, and a failure here only warns: it must not mask
+    the run's own exit code.
+    """
+    jobs = []
+    for item in results_summary:
+        cfg_p = Path(item["config_path"])
+        try:
+            config = str(
+                cfg_p.resolve().relative_to(CONFIGS_DIR).with_suffix(""))
+        except ValueError:
+            config = str(cfg_p)
+        job_dir = Path(item["job_dir"])
+        # get_harbor_hub_url() derives a link from the local job id even
+        # when nothing was uploaded; a pipeline must not publish that.
+        uploaded = bool(item.get("upload_succeeded"))
+        hub_url = (item.get("hub_url") or "") if uploaded else ""
+        jobs.append({
+            "config": config,
+            "job_name": item["job_name"],
+            "hub_url": hub_url,
+            "upload_succeeded": uploaded,
+            "eval_passed": bool(item.get("eval_passed")),
+            "finished": (job_dir / "result.json").is_file(),
+            "trials": len(item.get("trial_summaries") or []),
+            "gcs_uri": item.get("gcs_uri") or "",
+            "stage_succeeded": bool(item.get("gcs_uri")),
+        })
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(
+            {
+                "error": error,
+                "dataset": dataset,
+                "jobs": jobs
+            }, indent=2) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"Warning: Failed to write run summary {path}: {exc}",
+              file=sys.stderr)
+
+
 def _handle_sigterm(_signum: int, _frame: Any) -> None:
     raise KeyboardInterrupt
 
 
 def main() -> None:
+    # --summary-json state lives outside the try so the finally below can
+    # write it however the run ends.
+    summary_path: Path | None = None
+    summary_jobs: list[dict[str, Any]] = []
+    summary_error: str | None = None
+    summary_dataset: dict[str, str] | None = None
+    gcs_dataset_root: Path | None = None
     try:
         signal.signal(signal.SIGTERM, _handle_sigterm)
         if hasattr(sys.stdout, "reconfigure"):
@@ -2545,6 +2753,11 @@ def main() -> None:
         parser = build_parser()
         args, harbor_args = parser.parse_known_args()
         harbor_args = list(harbor_args)
+        # Previews render configs but run, upload, stage and record nothing.
+        is_preview = ("--print-config" in harbor_args
+                      or "--dry-run" in harbor_args)
+        if args.summary_json and not is_preview:
+            summary_path = args.summary_json
         config_paths = resolve_config_files(args, harbor_args)
         # One credential per run: metadata auth refuses a host ADC that ADC
         # configs in the same run would need.
@@ -2573,9 +2786,29 @@ def main() -> None:
         loaded_configs = []
         target_suite_dir: Path | None = None
         tasks = task_specs(args.task)
+        # Checked before any eval runs: finding out after hours of trials
+        # that the results cannot be staged is too late.
+        stage_prefix = None
+        if args.stage_gcs and not is_preview:
+            stage_prefix = parse_gcs_prefix(args.stage_gcs)
+            if not shutil.which("gcloud"):
+                raise RuntimeError("--stage-gcs needs the gcloud CLI on PATH")
         if args.suite:
             target_suite_dir = compile_suite_if_needed(
                 suite_index.resolve_suite(args.suite, SUITES_DIR, REPO_ROOT))
+        elif is_gcs_uri(args.dataset):
+            # From here on the download is an ordinary local --dataset; only
+            # the summary remembers where it came from. Previews download it
+            # too: the rendered config, --task scoping and the preflights all
+            # read the local copy, so a preview shows what would really run.
+            dataset_uri, local_dataset = fetch_gcs_dataset(args.dataset)
+            gcs_dataset_root = local_dataset.parent
+            summary_dataset = {
+                "uri": dataset_uri,
+                "digest": dataset_digest(local_dataset),
+            }
+            print(f"==> dataset {dataset_uri} = {summary_dataset['digest']}")
+            args.dataset = str(local_dataset)
 
         if args.skills and os.environ.get("GITHUB_RUN_ID"):
             raise RuntimeError(
@@ -2632,6 +2865,7 @@ def main() -> None:
             loaded_configs.append((config_path, config, job_name, subset))
 
         results_summary: list[dict[str, Any]] = []
+        summary_jobs = results_summary
         overall_success = True
 
         for idx, (config_path, config, job_name,
@@ -2684,8 +2918,7 @@ def main() -> None:
                     "--job-name",
                     job_name,
                 ]
-                if (args.upload and "--print-config" not in harbor_args
-                        and "--dry-run" not in harbor_args):
+                if args.upload and not is_preview:
                     cmd.extend(["--upload", "--private", "--yes"])
                     if args.share_org:
                         cmd.extend(["--share-org", args.share_org])
@@ -2942,9 +3175,7 @@ def main() -> None:
                                     file=sys.stderr,
                                 )
                                 eval_passed = False
-                elif (
-                        args.upload or args.report
-                ) and "--print-config" not in harbor_args and "--dry-run" not in harbor_args:
+                elif (args.upload or args.report) and not is_preview:
                     print(
                         f"Warning: Expected job directory '{job_dir}' not found, skipping upload and report generation.",
                         file=sys.stderr)
@@ -2954,6 +3185,10 @@ def main() -> None:
 
             if res.returncode != 0 or not eval_passed:
                 overall_success = False
+
+            gcs_uri = None
+            if stage_prefix and job_dir.is_dir():
+                gcs_uri = stage_job_to_gcs(job_dir, stage_prefix)
 
             hub_url = get_harbor_hub_url(job_dir)
             results_summary.append({
@@ -2970,6 +3205,8 @@ def main() -> None:
                 "eval_passed": (res.returncode == 0 and eval_passed),
                 "trial_summaries":
                 trial_summaries,
+                "gcs_uri":
+                gcs_uri,
             })
             if interrupted:
                 break
@@ -3009,6 +3246,7 @@ def main() -> None:
         publish_github_step_summary(
             results_summary, upload_enabled=args.upload
         ) if "results_summary" in locals() else None
+        summary_error = str(e)
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except subprocess.CalledProcessError as e:
@@ -3019,10 +3257,21 @@ def main() -> None:
         # non-zero with nothing on screen to say why.
         cmd = " ".join(map(str, e.cmd)) if isinstance(e.cmd, list) else str(
             e.cmd)
+        summary_error = f"`{cmd}` exited {e.returncode}"
         print(f"Error: `{cmd}` exited {e.returncode}", file=sys.stderr)
         if e.stderr:
             print(str(e.stderr).strip(), file=sys.stderr)
         sys.exit(e.returncode)
+    finally:
+        if summary_path is not None:
+            in_flight = sys.exc_info()[1]
+            if summary_error is None and in_flight is not None and not (
+                    isinstance(in_flight, SystemExit)):
+                summary_error = f"{type(in_flight).__name__}: {in_flight}"
+            write_run_summary(summary_path, summary_jobs, summary_error,
+                              summary_dataset)
+        if gcs_dataset_root is not None:
+            shutil.rmtree(gcs_dataset_root, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -4379,3 +4379,351 @@ class TestRunVerifierFailSoftSafeguards(unittest.TestCase):
         )
         self.assertIsNotNone(info)
         self.assertEqual(info["verifier_family"], "cset")
+
+
+class TestGcsDataset(unittest.TestCase):
+    """--dataset gs://... downloads a dataset, then runs it as a local one.
+
+    Also covers the release-gating flags that go with it: --run-label,
+    --summary-json and --stage-gcs.
+    """
+
+    URI = "gs://csat-datasets/datasets/v1/csat"
+
+    def setUp(self) -> None:
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_gcs_ds_"))
+        git_ref = patch.object(_RUN_MOD, "export_git_ref")
+        git_ref.start()
+        self.addCleanup(git_ref.stop)
+        self.cache = self.temp_dir / "gcs-cache"
+        cache = patch.object(_RUN_MOD, "GCS_DATASETS_DIR", self.cache)
+        cache.start()
+        self.addCleanup(cache.stop)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _write_dataset(root: Path, tasks: tuple[str, ...] = ("t1", "t2")):
+        for task in tasks:
+            (root / task).mkdir(parents=True)
+            (root / task / "task.toml").write_text(
+                f'[task]\nname = "csat-eval/{task}"\n', encoding="utf-8")
+            (root / task / "instruction.md").write_text(f"do {task}\n",
+                                                        encoding="utf-8")
+
+    @staticmethod
+    def _which(name: str) -> str:
+        return f"/usr/bin/{name}"
+
+    def _fake_subprocess(self,
+                         jobs_dir: Path | None = None,
+                         gcloud_rc: int = 0,
+                         tasks: tuple[str, ...] = ("t1", "t2")):
+        """subprocess.run stand-in for gcloud and harbor.
+
+        Every gcloud call returns gcloud_rc; a successful `gcloud storage cp`
+        from gs:// also writes `tasks` as the dataset. `harbor run` records
+        its config and writes a finished job under jobs_dir. Returns
+        (fake_run, calls, rendered configs, and whether each harbor run could
+        see its dataset on disk).
+        """
+        calls: list[list[str]] = []
+        rendered: list[dict[str, Any]] = []
+        seen_dataset: list[bool] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            res = MagicMock()
+            res.returncode = 0
+            if not isinstance(cmd, list):
+                return res
+            calls.append([str(c) for c in cmd])
+            tool = Path(cmd[0]).name
+            if tool == "gcloud":
+                res.returncode = gcloud_rc
+                src = str(cmd[-2])
+                if gcloud_rc == 0 and tasks and src.startswith("gs://"):
+                    self._write_dataset(
+                        Path(cmd[-1]) / src.rstrip("/").rsplit("/", 1)[-1],
+                        tasks)
+            elif tool == "harbor" and cmd[1] == "run":
+                cfg = yaml.safe_load(
+                    Path(cmd[cmd.index("-c") + 1]).read_text(encoding="utf-8"))
+                rendered.append(cfg)
+                seen_dataset.append(
+                    all((_RUN_MOD.REPO_ROOT / e["path"]).is_dir()
+                        for e in cfg.get("tasks", []) +
+                        cfg.get("datasets", [])))
+                job_dir = jobs_dir / cmd[cmd.index("--job-name") + 1]
+                trial = job_dir / "t1"
+                trial.mkdir(parents=True)
+                (job_dir / "result.json").write_text("{}", encoding="utf-8")
+                trial_result = ('{"trial_name": "t1", "verifier_result":'
+                                ' {"rewards": {"reward": 1.0}}}')
+                (trial / "result.json").write_text(trial_result,
+                                                   encoding="utf-8")
+            return res
+
+        return fake_run, calls, rendered, seen_dataset
+
+    def test_gcs_uri_detection_and_validation(self) -> None:
+        for spec in (self.URI, " gs://b/x "):
+            with self.subTest(is_gcs=spec):
+                self.assertTrue(_RUN_MOD.is_gcs_uri(spec))
+        for spec in (None, "", "smoke-check", "eval/datasets/gs:/x",
+                     "/abs/path"):
+            with self.subTest(is_gcs=spec):
+                self.assertFalse(_RUN_MOD.is_gcs_uri(spec))
+        for spec, want in (("gs://csat-datasets", "gs://csat-datasets"),
+                           (" gs://csat-datasets/releases/v1/ ",
+                            "gs://csat-datasets/releases/v1")):
+            with self.subTest(valid=spec):
+                self.assertEqual(_RUN_MOD.parse_gcs_prefix(spec), want)
+        for spec in ("csat-datasets/x", "gs://", "gs:///x", "s3://b/x",
+                     "gs://UPPER/x", "", "gs://b/my dataset", "gs://b/x\ty"):
+            with self.subTest(invalid=spec):
+                with self.assertRaises(RuntimeError) as ctx:
+                    _RUN_MOD.parse_gcs_prefix(spec)
+                self.assertIn("not a GCS location", str(ctx.exception))
+
+    def test_fetch_downloads_into_a_fresh_dir_named_for_the_dataset(
+            self) -> None:
+        fake_run, calls, _, _ = self._fake_subprocess()
+        with patch.object(_RUN_MOD.shutil, "which", side_effect=self._which), \
+             patch("subprocess.run", side_effect=fake_run):
+            uri, first = _RUN_MOD.fetch_gcs_dataset(self.URI + "/")
+            _, second = _RUN_MOD.fetch_gcs_dataset(self.URI)
+        self.assertEqual(uri, self.URI)
+        self.assertEqual(first.name, "csat")
+        self.assertEqual(first.parent.parent, self.cache)
+        # Concurrent runs of one URI must not share a copy.
+        self.assertNotEqual(first, second)
+        self.assertTrue((first / "t1" / "task.toml").is_file())
+        self.assertEqual(
+            calls[0],
+            ["gcloud", "storage", "cp", "-r", self.URI,
+             str(first.parent)])
+
+    def test_fetch_errors_leave_no_download(self) -> None:
+        cases = (
+            # (spec, gcloud on PATH, gcloud rc, downloaded tasks, error)
+            (self.URI, True, 1, ("t1", ), "Failed to download dataset"),
+            (self.URI, True, 0, (), "is not a Harbor dataset"),
+            (self.URI, False, 0, ("t1", ), "needs the gcloud CLI"),
+            ("gs://", True, 0, ("t1", ), "--dataset 'gs://' is not a GCS"),
+            ("gs://csat-datasets", True, 0, ("t1", ), "is a bare bucket"),
+            ("gs://csat-datasets/", True, 0, ("t1", ), "is a bare bucket"),
+        )
+        for spec, has_gcloud, rc, tasks, error in cases:
+            with self.subTest(error=error, spec=spec):
+                fake_run, *_ = self._fake_subprocess(gcloud_rc=rc, tasks=tasks)
+                which = self._which if has_gcloud else lambda _: None
+                with patch.object(_RUN_MOD.shutil, "which",
+                                  side_effect=which), \
+                     patch("subprocess.run", side_effect=fake_run):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        _RUN_MOD.fetch_gcs_dataset(spec)
+                self.assertIn(error, str(ctx.exception))
+                self.assertEqual(list(self.cache.glob("*")), [])
+
+    def test_dataset_digest_tracks_paths_and_contents(self) -> None:
+        a, b = self.temp_dir / "a", self.temp_dir / "b"
+        self._write_dataset(a)
+        self._write_dataset(b)
+        digest = _RUN_MOD.dataset_digest(a)
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(digest, _RUN_MOD.dataset_digest(b))
+        (b / "t1" / "instruction.md").write_text("changed\n", encoding="utf-8")
+        self.assertNotEqual(digest, _RUN_MOD.dataset_digest(b))
+        (b / "t1" / "instruction.md").rename(b / "t1" / "renamed.md")
+        self.assertNotEqual(digest, _RUN_MOD.dataset_digest(b))
+
+    def test_env_slug_precedence_and_sanitizing(self) -> None:
+        both = {"GITHUB_RUN_ID": "42", "BUILD_ID": "0123456789abcdef"}
+        with patch.dict(os.environ, both, clear=True):
+            self.assertEqual(resolve_env_slug(" v1.0.0 "), "v1.0.0")
+            self.assertEqual(resolve_env_slug("  "), "gh-42")
+            self.assertEqual(resolve_env_slug(), "gh-42")
+        with patch.dict(os.environ, {"BUILD_ID": "0123456789abcdef"},
+                        clear=True):
+            self.assertEqual(resolve_env_slug(), "cb-01234567")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_env_slug(), "local")
+        # A run label stays one `_`-separated segment of the job name.
+        args = argparse.Namespace(task=None,
+                                  suite=None,
+                                  dataset="nightly",
+                                  run_label="release/2026_11",
+                                  job_name=None)
+        name = generate_job_name(
+            {"agents": [{
+                "name": "claude-code"
+            }]},
+            Path("eval/configs/claude-code/agent-suite.yaml"),
+            args,
+            timestamp="ts")
+        self.assertEqual(name, "nightly_cc-agent-suite_release-2026-11_ts")
+
+    def test_write_run_summary_hub_url_and_unwritable_path(self) -> None:
+        out = self.temp_dir / "summary.json"
+        item = {
+            "config_path":
+            CONFIGS_DIR / "claude-code" / "agent-suite-remote.yaml",
+            "job_name": "j1",
+            "job_dir": self.temp_dir / "j1",
+            "hub_url": "https://hub.example/jobs/abc",
+            "trial_summaries": [],
+        }
+        # A Hub URL is only recorded once the upload succeeded.
+        for uploaded, want in ((False, ""), (True, item["hub_url"])):
+            _RUN_MOD.write_run_summary(out,
+                                       [{
+                                           **item, "upload_succeeded": uploaded
+                                       }], None)
+            job = json.loads(out.read_text(encoding="utf-8"))["jobs"][0]
+            self.assertEqual(job["hub_url"], want)
+        self.assertEqual(job["config"], "claude-code/agent-suite-remote")
+        blocker = self.temp_dir / "file"
+        blocker.write_text("", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _RUN_MOD.write_run_summary(blocker / "summary.json", [], "x")
+        self.assertIn("Failed to write run summary", err.getvalue())
+
+    def _run_main(self, argv: list[str], fake_run: Any) -> int | None:
+        cfg_file = self.temp_dir / "cfg.yaml"
+        cfg_file.write_text("agents:\n  - name: claude-code\n",
+                            encoding="utf-8")
+        with patch("sys.argv", ["run.py", "-c", str(cfg_file), *argv]), \
+             patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), \
+             patch.object(_RUN_MOD, "check_dependencies"), \
+             patch.object(_RUN_MOD, "setup_host_auth"), \
+             patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(SystemExit) as ctx:
+                _RUN_MOD.main()
+        return ctx.exception.code
+
+    def _main_gcs_dataset(self, *argv: str):
+        """main() on self.URI; returns (exit code, rendered configs, calls)."""
+        jobs_dir = self.temp_dir / "jobs"
+        fake_run, calls, rendered, seen_dataset = self._fake_subprocess(
+            jobs_dir)
+        # Under the repo: rendered configs hold repo-relative dataset paths.
+        cache = _RUN_MOD.DOT_DATASETS_DIR / "gcs-test"
+        self.addCleanup(shutil.rmtree, cache, True)
+        with patch.object(_RUN_MOD, "GCS_DATASETS_DIR", cache), \
+             patch.object(_RUN_MOD.shutil, "which", side_effect=self._which):
+            code = self._run_main([
+                "--dataset", self.URI, *argv, "--no-upload", "--no-report",
+                "-o",
+                str(jobs_dir)
+            ], fake_run)
+        self.assertEqual(seen_dataset, [True])
+        # The per-run download is removed once the run is over.
+        self.assertEqual(list(cache.iterdir()), [])
+        return code, rendered, calls
+
+    def test_main_runs_gcs_dataset_and_writes_summary(self) -> None:
+        summary = self.temp_dir / "summary.json"
+        code, rendered, calls = self._main_gcs_dataset("--run-label",
+                                                       "v0.8.0-rc1",
+                                                       "--summary-json",
+                                                       str(summary))
+        self.assertEqual(code, 0)
+        self.assertRegex(rendered[0]["datasets"][0]["path"],
+                         r"^eval/\.datasets/gcs-test/run-[^/]+/csat$")
+        # Without --stage-gcs the only gcloud call is the download.
+        self.assertEqual([c[-2] for c in calls if Path(c[0]).name == "gcloud"],
+                         [self.URI])
+        data = json.loads(summary.read_text(encoding="utf-8"))
+        self.assertIsNone(data["error"])
+        self.assertEqual(data["dataset"]["uri"], self.URI)
+        self.assertRegex(data["dataset"]["digest"], r"^sha256:[0-9a-f]{64}$")
+        job = data["jobs"][0]
+        self.assertRegex(job.pop("job_name"),
+                         r"^csat_cc-agent-suite_v0\.8\.0-rc1_\d{8}-\d{6}$")
+        self.assertEqual(
+            job, {
+                "config": str(self.temp_dir / "cfg.yaml"),
+                "hub_url": "",
+                "upload_succeeded": False,
+                "eval_passed": True,
+                "finished": True,
+                "trials": 1,
+                "gcs_uri": "",
+                "stage_succeeded": False,
+            })
+
+    def test_main_scopes_tasks_to_the_gcs_dataset(self) -> None:
+        code, rendered, _ = self._main_gcs_dataset("--task", "t2")
+        self.assertEqual(code, 0)
+        self.assertNotIn("datasets", rendered[0])
+        self.assertEqual(len(rendered[0]["tasks"]), 1)
+        self.assertRegex(rendered[0]["tasks"][0]["path"], r"/csat/t2$")
+
+    def test_main_stages_job_dir_and_only_warns_on_failure(self) -> None:
+        prefix = "gs://csat-datasets/releases/v1/"
+        for rc in (0, 1):
+            with self.subTest(gcloud_rc=rc):
+                jobs_dir = self.temp_dir / f"jobs-{rc}"
+                summary = self.temp_dir / f"summary-{rc}.json"
+                fake_run, calls, _, _ = self._fake_subprocess(jobs_dir,
+                                                              gcloud_rc=rc)
+                err = io.StringIO()
+                with patch.object(_RUN_MOD.shutil, "which",
+                                  side_effect=self._which), \
+                     contextlib.redirect_stderr(err):
+                    code = self._run_main([
+                        "--dataset", "smoke-check", "--min-score", "0",
+                        "--summary-json",
+                        str(summary), "--no-upload", "--no-report", "-o",
+                        str(jobs_dir), "--stage-gcs", prefix
+                    ], fake_run)
+                self.assertEqual(code, 0)
+                job = json.loads(
+                    summary.read_text(encoding="utf-8"))["jobs"][0]
+                self.assertEqual(
+                    [c for c in calls if Path(c[0]).name == "gcloud"], [[
+                        "gcloud", "storage", "cp", "-r",
+                        str((jobs_dir / job["job_name"]).resolve()), prefix
+                    ]])
+                self.assertEqual(job["stage_succeeded"], rc == 0)
+                self.assertEqual(
+                    job["gcs_uri"],
+                    f"{prefix}{job['job_name']}" if rc == 0 else "")
+                self.assertEqual("Failed to stage" in err.getvalue(), rc != 0)
+
+    def test_main_early_failure_writes_summary_and_runs_nothing(self) -> None:
+        cases = (
+            (["--dataset", "gs://"], True, "not a GCS location"),
+            (["--stage-gcs", "csat-datasets/x"], True, "not a GCS location"),
+            (["--stage-gcs", "gs://csat-datasets/x"], False,
+             "--stage-gcs needs the gcloud CLI"),
+        )
+        for argv, has_gcloud, error in cases:
+            with self.subTest(argv=argv):
+                summary = self.temp_dir / "summary.json"
+                fake_run, calls, _, _ = self._fake_subprocess()
+                with patch.object(_RUN_MOD.shutil,
+                                  "which",
+                                  side_effect=lambda n: None if n == "gcloud"
+                                  and not has_gcloud else self._which(n)):
+                    code = self._run_main([
+                        "--dataset", "smoke-check", *argv, "--summary-json",
+                        str(summary)
+                    ], fake_run)
+                self.assertEqual(code, 1)
+                self.assertFalse(
+                    [c for c in calls if Path(c[0]).name == "harbor"])
+                data = json.loads(summary.read_text(encoding="utf-8"))
+                self.assertEqual(data["jobs"], [])
+                self.assertIsNone(data["dataset"])
+                self.assertIn(error, data["error"])
+
+    def test_main_skips_summary_on_dry_run(self) -> None:
+        summary = self.temp_dir / "summary.json"
+        self._run_main([
+            "--dataset", "smoke-check", "--summary-json",
+            str(summary), "--no-upload", "--no-report", "--dry-run"
+        ], lambda *a, **k: MagicMock(returncode=0))
+        self.assertFalse(summary.exists())
