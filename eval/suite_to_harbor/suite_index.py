@@ -70,6 +70,7 @@ def _scan_suites(suites_dir: Path) -> list[tuple[Path, str, str | None]]:
         return []
     parsed: list[tuple[Path, dict[str, Any], int]] = []
     cases_by_dir: dict[Path, list[int]] = {}
+    names_by_dir: dict[Path, list[str | None]] = {}
     for path in sorted(suites_dir.rglob("*")):
         if not _is_suite_file(path):
             continue
@@ -79,6 +80,8 @@ def _scan_suites(suites_dir: Path) -> list[tuple[Path, str, str | None]]:
             n = len(ev["cases"])
             parsed.append((path, data, n))
             cases_by_dir.setdefault(path.parent, []).append(n)
+            names_by_dir.setdefault(path.parent,
+                                    []).append(_declared_name(data))
 
     # A directory of >=2 single-case files is one suite known by its dir path.
     task_dirs = {
@@ -86,8 +89,17 @@ def _scan_suites(suites_dir: Path) -> list[tuple[Path, str, str | None]]:
         for d, counts in cases_by_dir.items()
         if d != suites_dir and len(counts) >= 2 and max(counts) == 1
     }
+    # A directory of >=2 multi-case files that all declare the directory's name
+    # (e.g. nightly-onboard-optimize/{onboard,onboard_hillclimb}.yaml) is also
+    # exposed by its directory name alongside the individual YAML paths.
+    split_dirs = {
+        d
+        for d, names in names_by_dir.items()
+        if d != suites_dir and d not in task_dirs and len(names) >= 2 and all(
+            n == d.relative_to(suites_dir).as_posix() for n in names)
+    }
     entries = [(d, d.relative_to(suites_dir).as_posix(), None)
-               for d in task_dirs]
+               for d in task_dirs | split_dirs]
     entries.extend((p, p.relative_to(suites_dir).with_suffix("").as_posix(),
                     _declared_name(data)) for p, data, _ in parsed
                    if p.parent not in task_dirs)

@@ -1208,6 +1208,338 @@ class CalculateSpeedupTest(unittest.TestCase):
             )
             self.assertAlmostEqual(speedup_mod.tpu_speedup(trial_dir), 1.5)
 
+    def test_per_chip_verifier_params_and_chip_scaling_guard(self) -> None:
+        """Per-chip 8k/1k verifier_params enforce num_chips, accept 1k/1k rows, and disable fallback."""
+        params = {
+            "speedup": {
+                "target_speedup": 1.0,
+                "primary_regime": "8k/1k",
+                "per_chip": True,
+                "require_manifest": True,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            (tests_dir / "verifier_params.json").write_text(json.dumps(params),
+                                                            encoding="utf-8")
+
+            # 1. Same chip count (4 -> 4) with mixed Phase 1 1k/1k + 8k/1k rows.
+            ws1 = root / "ws1"
+            self._write_raw_json(
+                ws1 / "onboarding" / "base_1k1k_c16.json",
+                output_tps=1600.0,
+                concurrency=16,
+                isl=1024,
+                osl=1024,
+            )
+            self._write_raw_json(
+                ws1 / "onboarding" / "base_8k1k_c16.json",
+                output_tps=1200.0,
+                concurrency=16,
+                isl=8192,
+                osl=1024,
+            )
+            self._write_raw_json(
+                ws1 / "hillclimb" / "opt_8k1k_c16.json",
+                output_tps=1800.0,
+                concurrency=16,
+                isl=8192,
+                osl=1024,
+            )
+            (ws1 / "benchmark_results.json").write_text(
+                json.dumps({
+                    "baseline": [
+                        {
+                            "regime": "1k/1k",
+                            "concurrency": 16,
+                            "num_chips": 4,
+                            "output_tps": 1600.0,
+                            "output_tps_per_chip": 400.0,
+                            "raw_output_path": "onboarding/base_1k1k_c16.json",
+                        },
+                        {
+                            "regime": "8k/1k",
+                            "concurrency": 16,
+                            "num_chips": 4,
+                            "output_tps": 1200.0,
+                            "output_tps_per_chip": 300.0,
+                            "raw_output_path": "onboarding/base_8k1k_c16.json",
+                        },
+                    ],
+                    "optimized": [{
+                        "regime":
+                        "8k/1k",
+                        "concurrency":
+                        16,
+                        "num_chips":
+                        4,
+                        "output_tps":
+                        1800.0,
+                        "output_tps_per_chip":
+                        450.0,
+                        "raw_output_path":
+                        "hillclimb/opt_8k1k_c16.json",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            disc1 = speedup_mod.discover_or_verify_runs(ws1,
+                                                        per_chip=True,
+                                                        require_manifest=True)
+            self.assertFalse(disc1.inferred)
+            self.assertEqual(disc1.verification_errors, [])
+            self.assertEqual(len(disc1.baseline_runs), 2)
+            self.assertIn("num_chips=4", disc1.baseline_runs[1].source)
+            ev1 = speedup_mod.DeterministicSpeedupEvaluator(
+                disc1.baseline_runs,
+                disc1.optimized_runs,
+                per_chip=True,
+            )
+            res1 = ev1.evaluate(target_regimes=["8k/1k"])
+            self.assertIn("output_tps_per_chip", res1["metric_rule"])
+            self.assertAlmostEqual(res1["final_speedup"], 1.5, places=4)
+            with patch.dict("os.environ", {"TESTS_DIR": str(tests_dir)}):
+                self.assertAlmostEqual(speedup_mod.tpu_speedup(ws1),
+                                       1.5,
+                                       places=4)
+
+            # 2. Doubling chips (4 -> 8) with linear total TPS (1200 -> 2400) => 1.0x.
+            ws2 = root / "ws2"
+            self._write_raw_json(ws2 / "onboarding" / "base_c16.json",
+                                 output_tps=1200.0,
+                                 concurrency=16,
+                                 isl=8192,
+                                 osl=1024)
+            self._write_raw_json(ws2 / "hillclimb" / "opt_c16.json",
+                                 output_tps=2400.0,
+                                 concurrency=16,
+                                 isl=8192,
+                                 osl=1024)
+            (ws2 / "benchmark_results.json").write_text(
+                json.dumps({
+                    "baseline": [{
+                        "regime": "8k/1k",
+                        "concurrency": 16,
+                        "num_chips": 4,
+                        "output_tps": 1200.0,
+                        "output_tps_per_chip": 300.0,
+                        "raw_output_path": "onboarding/base_c16.json",
+                    }],
+                    "optimized": [{
+                        "regime": "8k/1k",
+                        "concurrency": 16,
+                        "num_chips": 8,
+                        "output_tps": 2400.0,
+                        "output_tps_per_chip": 300.0,
+                        "raw_output_path": "hillclimb/opt_c16.json",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"TESTS_DIR": str(tests_dir)}):
+                self.assertAlmostEqual(speedup_mod.tpu_speedup(ws2),
+                                       1.0,
+                                       places=4)
+
+            # 3. Missing, zero, fractional, bool num_chips and mismatched per-chip TPS are rejected.
+            ws3 = root / "ws3"
+            self._write_raw_json(ws3 / "onboarding" / "base_c16.json",
+                                 output_tps=1200.0,
+                                 concurrency=16,
+                                 isl=8192,
+                                 osl=1024)
+            self._write_raw_json(ws3 / "hillclimb" / "opt_c16.json",
+                                 output_tps=2400.0,
+                                 concurrency=16,
+                                 isl=8192,
+                                 osl=1024)
+            (ws3 / "benchmark_results.json").write_text(
+                json.dumps({
+                    "baseline": [
+                        {
+                            "regime": "8k/1k",
+                            "concurrency": 16,
+                            "output_tps": 1200.0,
+                            "raw_output_path": "onboarding/base_c16.json",
+                        },
+                        {
+                            "regime": "8k/1k",
+                            "concurrency": 16,
+                            "num_chips": 4,
+                            "output_tps": 1200.0,
+                            "output_tps_per_chip": 600.0,
+                            "raw_output_path": "onboarding/base_c16.json",
+                        },
+                    ],
+                    "optimized": [
+                        {
+                            "regime": "8k/1k",
+                            "concurrency": 16,
+                            "num_chips": 0,
+                            "output_tps": 2400.0,
+                            "raw_output_path": "hillclimb/opt_c16.json",
+                        },
+                        {
+                            "regime": "8k/1k",
+                            "concurrency": 16,
+                            "num_chips": 0.5,
+                            "output_tps": 2400.0,
+                            "raw_output_path": "hillclimb/opt_c16.json",
+                        },
+                        {
+                            "regime": "8k/1k",
+                            "concurrency": 16,
+                            "num_chips": True,
+                            "output_tps": 2400.0,
+                            "raw_output_path": "hillclimb/opt_c16.json",
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            disc3 = speedup_mod.discover_or_verify_runs(ws3,
+                                                        per_chip=True,
+                                                        require_manifest=True)
+            self.assertEqual(disc3.baseline_runs, [])
+            self.assertEqual(disc3.optimized_runs, [])
+            self.assertEqual(len(disc3.verification_errors), 5)
+            with patch.dict("os.environ", {"TESTS_DIR": str(tests_dir)}):
+                self.assertEqual(speedup_mod.tpu_speedup(ws3), 0.0)
+
+            # 3b. String "false" for per_chip is NOT treated as True.
+            str_false_tests = root / "str_false_tests"
+            str_false_tests.mkdir()
+            (str_false_tests / "verifier_params.json").write_text(
+                json.dumps({
+                    "speedup": {
+                        "primary_regime": "1k/1k",
+                        "per_chip": "false",
+                        "require_manifest": "false",
+                    }
+                }),
+                encoding="utf-8",
+            )
+
+            # 4. require_manifest=True disables auto_discover_runs fallback.
+            ws4 = root / "ws4"
+            self._write_raw_json(
+                ws4 / "raw_benchmarks" / "baseline" / "bench_8k1k_c16.json",
+                output_tps=1000.0,
+                concurrency=16,
+                isl=8192,
+                osl=1024,
+            )
+            self._write_raw_json(
+                ws4 / "raw_benchmarks" / "optimized" / "bench_8k1k_c16.json",
+                output_tps=1500.0,
+                concurrency=16,
+                isl=8192,
+                osl=1024,
+            )
+            with patch.dict("os.environ", {"TESTS_DIR": str(tests_dir)}):
+                self.assertEqual(speedup_mod.tpu_speedup(ws4), 0.0)
+
+            # 5. Without verifier_params.json (or string "false"), default 1k/1k non-per-chip works.
+            ws5 = root / "ws5"
+            empty_tests = root / "empty_tests"
+            empty_tests.mkdir()
+            self._write_raw_json(ws5 / "raw" / "base_1k1k_c4.json",
+                                 output_tps=200.0,
+                                 concurrency=4,
+                                 isl=1024,
+                                 osl=1024)
+            self._write_raw_json(ws5 / "raw" / "opt_1k1k_c4.json",
+                                 output_tps=300.0,
+                                 concurrency=4,
+                                 isl=1024,
+                                 osl=1024)
+            (ws5 / "benchmark_results.json").write_text(
+                json.dumps({
+                    "baseline": [{
+                        "regime": "1k/1k",
+                        "concurrency": 4,
+                        "output_tps": 200.0,
+                        "raw_output_path": "raw/base_1k1k_c4.json",
+                    }],
+                    "optimized": [{
+                        "regime": "1k/1k",
+                        "concurrency": 4,
+                        "output_tps": 300.0,
+                        "raw_output_path": "raw/opt_1k1k_c4.json",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            for tdir in (empty_tests, str_false_tests):
+                with patch.dict("os.environ", {"TESTS_DIR": str(tdir)}):
+                    self.assertAlmostEqual(speedup_mod.tpu_speedup(ws5),
+                                           1.5,
+                                           places=4)
+
+            # 6. Persists speedup_summary.json and mirrors nested manifest to LOGS_DIR/artifacts/.
+            ws6 = root / "ws6"
+            nested = ws6 / "sub"
+            self._write_raw_json(nested / "base.json",
+                                 output_tps=1200.0,
+                                 concurrency=16,
+                                 isl=8192,
+                                 osl=1024)
+            self._write_raw_json(nested / "opt.json",
+                                 output_tps=1800.0,
+                                 concurrency=16,
+                                 isl=8192,
+                                 osl=1024)
+            manifest_payload = {
+                "baseline": [{
+                    "regime": "8k/1k",
+                    "concurrency": 16,
+                    "num_chips": 4,
+                    "output_tps": 1200.0,
+                    "output_tps_per_chip": 300.0,
+                    "raw_output_path": "base.json",
+                }],
+                "optimized": [{
+                    "regime": "8k/1k",
+                    "concurrency": 16,
+                    "num_chips": 4,
+                    "output_tps": 1800.0,
+                    "output_tps_per_chip": 450.0,
+                    "raw_output_path": "opt.json",
+                }],
+            }
+            (nested / "benchmark_results.json").write_text(
+                json.dumps(manifest_payload), encoding="utf-8")
+            logs6 = root / "logs6"
+            (logs6 / "verifier").mkdir(parents=True)
+            with patch.dict("os.environ", {
+                    "TESTS_DIR": str(tests_dir),
+                    "LOGS_DIR": str(logs6),
+            }):
+                self.assertAlmostEqual(speedup_mod.tpu_speedup(ws6),
+                                       1.5,
+                                       places=4)
+            summary6 = json.loads(
+                (logs6 / "verifier" /
+                 "speedup_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary6["primary_regime"], "8k/1k")
+            self.assertTrue(summary6["per_chip"])
+            self.assertEqual(summary6["baseline_num_chips"], 4)
+            self.assertEqual(summary6["optimized_num_chips"], 4)
+            self.assertAlmostEqual(summary6["baseline_peak_tps_per_chip"],
+                                   300.0)
+            self.assertAlmostEqual(summary6["optimized_peak_tps_per_chip"],
+                                   450.0)
+            self.assertAlmostEqual(summary6["verified_speedup"], 1.5)
+            self.assertEqual(summary6["verified_manifest_path"],
+                             str(nested / "benchmark_results.json"))
+            canonical6 = logs6 / "artifacts" / "benchmark_results.json"
+            self.assertTrue(canonical6.is_file())
+            self.assertEqual(
+                json.loads(canonical6.read_text(encoding="utf-8")),
+                manifest_payload)
+
 
 if __name__ == "__main__":
     unittest.main()

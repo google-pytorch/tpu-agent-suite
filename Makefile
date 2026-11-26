@@ -136,6 +136,8 @@ test-eval:
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_moe_dcp_guardrails_verifier.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_serving_hillclimb_disagg_gates_verifier.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_onboard_hillclimb_tasks.py" -v
+	$(PYTHON) -m unittest discover -s eval/tests -p "test_onboard_hillclimb_suite.py" -v
+	$(PYTHON) -m unittest discover -s eval/verifiers/onboard_hillclimb -p "*_test.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests -p "test_job_naming.py" -v
 	$(PYTHON) -m unittest discover -s eval/tests/suite_to_harbor -t . -v
 

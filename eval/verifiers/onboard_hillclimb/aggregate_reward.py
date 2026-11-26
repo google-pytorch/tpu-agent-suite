@@ -77,6 +77,68 @@ def _tests_dir() -> Path:
     return Path(os.environ.get("TESTS_DIR") or "/tests")
 
 
+def _workspace_dir() -> Path:
+    """The run's workspace directory: $WORKSPACE_DIR, else /workspace."""
+    return Path(os.environ.get("WORKSPACE_DIR") or "/workspace")
+
+
+_XPROF_SKIP_DIRS = frozenset(
+    {".git", "venv", ".venv", "__pycache__", "node_modules"})
+_XPROF_EXCLUDED_SEGMENTS = frozenset({"onboarding", "tpu-diagnostics"})
+
+
+def _is_post_hillclimb_xplane(rel_parts: tuple[str, ...]) -> bool:
+    """True when an `.xplane.pb` sits under `hillclimb/` and is not a baseline trace."""
+    lower_parts = tuple(p.lower() for p in rel_parts)
+    if "hillclimb" not in lower_parts:
+        return False
+    if any(seg in _XPROF_EXCLUDED_SEGMENTS for seg in lower_parts[:-1]):
+        return False
+    return "baseline" not in lower_parts[-1]
+
+
+def _collect_post_hillclimb_xprof(
+    logs_dir: Path,
+    workspace_dir: Path,
+) -> dict[str, Any]:
+    """Counts non-empty post-hill-climb XProf traces and bottleneck reports."""
+    search_roots = [
+        p for p in (logs_dir / "artifacts", workspace_dir) if p.is_dir()
+    ]
+    xplanes: set[Path] = set()
+    gap_docs: set[Path] = set()
+    for root in search_roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _XPROF_SKIP_DIRS]
+            cur_dir = Path(dirpath)
+            for fname in filenames:
+                if not (fname.endswith(".xplane.pb")
+                        or fname == "xprof_bottlenecks_and_gaps.md"):
+                    continue
+                fpath = cur_dir / fname
+                try:
+                    if not fpath.is_file():
+                        continue
+                    size = fpath.stat().st_size
+                    resolved = fpath.resolve()
+                except OSError:
+                    continue
+                if fname.endswith(".xplane.pb") and size > 0:
+                    try:
+                        rel_parts = fpath.relative_to(root).parts
+                    except ValueError:
+                        continue
+                    if _is_post_hillclimb_xplane(rel_parts):
+                        xplanes.add(resolved)
+                elif fname == "xprof_bottlenecks_and_gaps.md" and size >= 100:
+                    gap_docs.add(resolved)
+    return {
+        "xplane_trace_count": len(xplanes),
+        "gaps_report_count": len(gap_docs),
+        "passed": bool(xplanes and gap_docs),
+    }
+
+
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return min(high, max(low, value))
 
@@ -236,17 +298,26 @@ def withhold_reward(logs_dir: Path) -> str:
     return held.strip()
 
 
+def _try_read_details(details_path: Path) -> dict[str, Any] | None:
+    """Parses `reward-details.json`, or returns None if missing/malformed."""
+    try:
+        details = json.loads(details_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return details if isinstance(details, dict) else None
+
+
 def _read_details(verifier_dir: Path) -> dict[str, Any]:
     """RewardKit's reward-details.json, or {} when missing or malformed."""
-    try:
-        details = json.loads(
-            (verifier_dir / "reward-details.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return details if isinstance(details, dict) else {}
+    parsed = _try_read_details(verifier_dir / "reward-details.json")
+    return parsed if parsed is not None else {}
 
 
-def run_aggregation(logs_dir: Path, tests_dir: Path) -> dict[str, Any]:
+def run_aggregation(
+    logs_dir: Path,
+    tests_dir: Path,
+    workspace_dir: Path | None = None,
+) -> dict[str, Any]:
     """Reads RewardKit outputs, computes gated scores, and writes final files."""
     verifier_dir = logs_dir / "verifier"
     reward_path = verifier_dir / "reward.json"
@@ -258,7 +329,31 @@ def run_aggregation(logs_dir: Path, tests_dir: Path) -> dict[str, Any]:
     if not isinstance(scores, dict):
         raise ValueError(f"Expected JSON object in {reward_path}")
 
-    details = _read_details(verifier_dir)
+    details_path = verifier_dir / "reward-details.json"
+    parsed_details = _try_read_details(details_path)
+    details = parsed_details if parsed_details is not None else {}
+
+    if parsed_details is not None:
+        try:
+            eff_workspace = (workspace_dir if workspace_dir is not None else
+                             _workspace_dir())
+            details["post_hillclimb_xprof"] = _collect_post_hillclimb_xprof(
+                logs_dir=logs_dir,
+                workspace_dir=eff_workspace,
+            )
+            summary_path = verifier_dir / "speedup_summary.json"
+            if summary_path.is_file():
+                try:
+                    summary_data = json.loads(
+                        summary_path.read_text(encoding="utf-8"))
+                    if isinstance(summary_data, dict):
+                        details["speedup_summary"] = summary_data
+                except (OSError, ValueError):
+                    pass
+            details_path.write_text(json.dumps(details, indent=2),
+                                    encoding="utf-8")
+        except OSError:
+            pass
 
     final_scores = aggregate_hillclimb_scores(
         scores=scores,
@@ -274,8 +369,13 @@ def run_aggregation(logs_dir: Path, tests_dir: Path) -> dict[str, Any]:
 def main() -> int:
     logs_dir = _logs_dir()
     tests_dir = _tests_dir()
+    workspace_dir = _workspace_dir()
     try:
-        final_scores = run_aggregation(logs_dir=logs_dir, tests_dir=tests_dir)
+        final_scores = run_aggregation(
+            logs_dir=logs_dir,
+            tests_dir=tests_dir,
+            workspace_dir=workspace_dir,
+        )
     except Exception as exc:
         held = withhold_reward(logs_dir)
         print(

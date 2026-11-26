@@ -59,13 +59,18 @@ class SuiteIndexTest(unittest.TestCase):
         self._write("g/f.yaml", _suite("a", "b", name="sec", suite_name="pri"))
         self._write("dup/a.yaml", _suite("a", "b", name="shared"))
         self._write("dup/b.yaml", _suite("c", "d", name="shared"))
+        self._write("split/one.yaml", _suite("a", "b", name="split"))
+        self._write("split/two.yaml", _suite("c", "d", name="split"))
         self._write("qa/one.yaml", _suite("a", name="task-dir"))
         self._write("qa/two.yaml", _suite("b", name="task-dir"))
         self._write("assets/settings.yaml", "key: value\n")
         self._write("assets/broken.yaml", "evaluation: [unclosed\n")
         self.assertEqual(
             suite_index.suite_names(self.suites),
-            {"g/f", "pri", "dup/a", "dup/b", "qa"},
+            {
+                "g/f", "pri", "dup/a", "dup/b", "split", "split/one",
+                "split/two", "qa"
+            },
         )
 
     def test_resolve_suite_paths_declared_names_and_precedence(self) -> None:

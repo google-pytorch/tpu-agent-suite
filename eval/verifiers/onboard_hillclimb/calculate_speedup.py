@@ -25,6 +25,7 @@ import math
 import os
 import pathlib
 import re
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,7 +37,51 @@ Path = pathlib.Path
 BENCHMARK_MANIFEST_FILENAME = "benchmark_results.json"
 _CONTAINER_ARTIFACTS_DIR = Path("/logs/artifacts")
 PRIMARY_REGIME = "1k/1k"
-VALID_REGIMES = {PRIMARY_REGIME, "8k/1k", "1k/8k"}
+VALID_REGIMES = {"1k/1k", "8k/1k", "1k/8k"}
+
+
+def _load_speedup_params() -> dict[str, Any]:
+    """Reads optional `speedup` parameters from `${TESTS_DIR}/verifier_params.json`."""
+    tests_dir = Path(os.environ.get("TESTS_DIR") or "/tests")
+    params_path = tests_dir / "verifier_params.json"
+    try:
+        data = json.loads(params_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    speedup = data.get(Path(__file__).parent.name)
+    if not isinstance(speedup, dict):
+        speedup = data.get("speedup")
+    return speedup if isinstance(speedup, dict) else {}
+
+
+def _parse_strict_bool(value: Any, default: bool = False) -> bool:
+    """Returns `value` only when it is a real JSON boolean, else `default`."""
+    return value if isinstance(value, bool) else default
+
+
+def _parse_positive_int_chips(value: Any) -> int | None:
+    """Parses `num_chips` as a whole integer >= 1 (rejecting bools and fractions)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if value >= 1 else None
+    if isinstance(value, float):
+        return int(value) if (math.isfinite(value) and value >= 1.0
+                              and value.is_integer()) else None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = float(raw)
+        except ValueError:
+            return None
+        return int(parsed) if (math.isfinite(parsed) and parsed >= 1.0
+                               and parsed.is_integer()) else None
+    return None
+
 
 _DEFAULT_SKIP_DIRS: frozenset[str] = frozenset(
     {"tests", "agent", "verifier", "skills", "venv", "__pycache__"})
@@ -250,6 +295,7 @@ class BenchmarkRunMetrics:
     source: str = ""
     is_queued: bool = False
     notes: str = ""
+    num_chips: int | None = None
 
     def __post_init__(self) -> None:
         self.regime = normalize_regime_name(self.regime)
@@ -265,6 +311,8 @@ class BenchmarkRunMetrics:
         self.source = str(self.source)
         self.is_queued = bool(self.is_queued)
         self.notes = str(self.notes)
+        self.num_chips = int(
+            self.num_chips) if self.num_chips is not None else None
 
     @classmethod
     def from_dict(
@@ -386,6 +434,7 @@ class RunDiscoveryResult:
     inferred: bool = False
     verification_errors: list[str] = field(default_factory=list)
     claimed_optimized: int = 0
+    manifest_path: Path | None = None
 
 
 def parse_markdown_tables(
@@ -1264,6 +1313,8 @@ def parse_raw_benchmark_file(
 def verify_and_load_manifest(
     manifest_path: Path,
     workspace: Path,
+    *,
+    per_chip: bool = False,
 ) -> RunDiscoveryResult:
     """Loads benchmark_results.json and cross-checks each entry against its raw output file."""
     baseline_runs: list[BenchmarkRunMetrics] = []
@@ -1390,16 +1441,48 @@ def verify_and_load_manifest(
 
         raw_metrics = parsed.metrics
         measured_tps = raw_metrics.output_tps
-        if abs(claimed_tps - measured_tps) > max(0.1, 1e-3 * measured_tps):
+        tps_tol = (max(0.2, 2e-3 * measured_tps) if per_chip else max(
+            0.1, 1e-3 * measured_tps))
+        if abs(claimed_tps - measured_tps) > tps_tol:
             errors.append(
                 f"Rejected {stage} {regime} c={concurrency}: manifest TPS ({claimed_tps}) "
                 f"does not match raw output TPS ({measured_tps}) in '{raw_file.name}'"
             )
             continue
 
+        if per_chip:
+            num_chips = _parse_positive_int_chips(entry.get("num_chips"))
+            if num_chips is None:
+                errors.append(
+                    f"Rejected {stage} {regime} c={concurrency}: missing or invalid whole-integer 'num_chips' ({entry.get('num_chips')})"
+                )
+                continue
+
+            measured_per_chip = round(measured_tps / num_chips, 4)
+            if entry.get("output_tps_per_chip") is not None:
+                claimed_per_chip = _to_float(entry.get("output_tps_per_chip"))
+                if (claimed_per_chip is None
+                        or not math.isfinite(claimed_per_chip)
+                        or abs(claimed_per_chip - measured_per_chip) > max(
+                            0.2, 5e-3 * measured_per_chip)):
+                    errors.append(
+                        f"Rejected {stage} {regime} c={concurrency}: manifest output_tps_per_chip "
+                        f"({entry.get('output_tps_per_chip')}) does not match measured_tps / num_chips "
+                        f"({measured_per_chip}) for '{raw_file.name}'")
+                    continue
+
+            raw_metrics.num_chips = num_chips
+            raw_metrics.output_tps = measured_per_chip
+            raw_metrics.source = (
+                f"{manifest_path.name} -> {raw_file.name} (num_chips={num_chips})"
+            )
+        else:
+            raw_metrics.num_chips = _parse_positive_int_chips(
+                entry.get("num_chips"))
+            raw_metrics.source = f"{manifest_path.name} -> {raw_file.name}"
+
         raw_metrics.regime = regime
         raw_metrics.concurrency = concurrency
-        raw_metrics.source = f"{manifest_path.name} -> {raw_file.name}"
         if stage == "baseline":
             baseline_runs.append(raw_metrics)
         else:
@@ -1417,10 +1500,16 @@ def verify_and_load_manifest(
         inferred=False,
         verification_errors=errors,
         claimed_optimized=claimed_optimized,
+        manifest_path=manifest_path,
     )
 
 
-def discover_or_verify_runs(root: Path) -> RunDiscoveryResult:
+def discover_or_verify_runs(
+    root: Path,
+    *,
+    per_chip: bool = False,
+    require_manifest: bool = False,
+) -> RunDiscoveryResult:
     """Loads verified runs from benchmark_results.json if present, else falls back to legacy discovery (marked as inferred)."""
     candidates = find_manifest_candidates(root)
     best_manifest_result: RunDiscoveryResult | None = None
@@ -1428,7 +1517,9 @@ def discover_or_verify_runs(root: Path) -> RunDiscoveryResult:
     all_verification_errors: list[str] = []
 
     for manifest_path in candidates:
-        manifest_result = verify_and_load_manifest(manifest_path, root)
+        manifest_result = verify_and_load_manifest(manifest_path,
+                                                   root,
+                                                   per_chip=per_chip)
         if first_manifest_result is None:
             first_manifest_result = manifest_result
         if manifest_result.verification_errors:
@@ -1447,6 +1538,19 @@ def discover_or_verify_runs(root: Path) -> RunDiscoveryResult:
             and best_manifest_result.claimed_optimized > 0
             and best_manifest_result.baseline_runs):
         return best_manifest_result
+
+    if require_manifest:
+        # Per-chip hill-climb tasks require benchmark_results.json with explicit
+        # num_chips on every row so multi-chip scaling cannot bypass per-chip normalization.
+        if best_manifest_result is not None:
+            return best_manifest_result
+        if first_manifest_result is not None:
+            return first_manifest_result
+        return RunDiscoveryResult(
+            summary="No valid benchmark_results.json manifest found",
+            inferred=False,
+            verification_errors=all_verification_errors,
+        )
 
     # Otherwise (e.g. onboarding-only manifest with no optimized runs claimed,
     # or zero verified runs across all manifests), fall back or supplement via auto_discover_runs.
@@ -1490,12 +1594,14 @@ class DeterministicSpeedupEvaluator:
         inferred: bool = False,
         verification_errors: list[str] | None = None,
         prefer_matched_concurrency: bool = True,
+        per_chip: bool = False,
     ):
         self.baseline_runs = baseline_runs
         self.optimized_runs = optimized_runs
         self.inferred = bool(inferred)
         self.verification_errors = list(verification_errors or [])
         self.prefer_matched_concurrency = prefer_matched_concurrency
+        self.per_chip = bool(per_chip)
         self.failed_runs: list[BenchmarkRunMetrics] = []
         self.baseline_by_regime: dict[str, list[BenchmarkRunMetrics]] = {}
         self.optimized_by_regime: dict[str, list[BenchmarkRunMetrics]] = {}
@@ -1641,12 +1747,16 @@ class DeterministicSpeedupEvaluator:
                     peak_base.output_tps,
                     "baseline_concurrency":
                     peak_base.concurrency,
+                    "baseline_num_chips":
+                    peak_base.num_chips,
                     "baseline_source":
                     peak_base.source,
                     "optimized_peak_tps":
                     (selected_opt.output_tps if selected_opt else None),
                     "optimized_concurrency":
                     (selected_opt.concurrency if selected_opt else None),
+                    "optimized_num_chips":
+                    (selected_opt.num_chips if selected_opt else None),
                     "optimized_source":
                     (selected_opt.source
                      if selected_opt else "No optimized benchmark measured"),
@@ -1690,14 +1800,24 @@ class DeterministicSpeedupEvaluator:
                      if len(target_ratios) > 1 else None)
 
         return {
-            "final_speedup": final_speedup,
-            "speedup_inferred": self.inferred,
-            "verification_errors": list(self.verification_errors),
-            "failed_runs_excluded": len(self.failed_runs),
-            "metric_rule": "Solely Throughput TPS (Output Tokens / Second)",
-            "primary_regime": primary_regime,
-            "multi_regime_geometric_mean": geom_mean,
-            "regimes": regime_results,
+            "final_speedup":
+            final_speedup,
+            "speedup_inferred":
+            self.inferred,
+            "verification_errors":
+            list(self.verification_errors),
+            "failed_runs_excluded":
+            len(self.failed_runs),
+            "metric_rule":
+            ("Per-Chip Output Throughput (output_tps_per_chip = output_tps / num_chips)"
+             if self.per_chip else
+             "Solely Throughput TPS (Output Tokens / Second)"),
+            "primary_regime":
+            primary_regime,
+            "multi_regime_geometric_mean":
+            geom_mean,
+            "regimes":
+            regime_results,
         }
 
 
@@ -1803,11 +1923,54 @@ def format_debug_trace(results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _persist_speedup_artifacts(
+    *,
+    primary_regime: str,
+    per_chip: bool,
+    used: dict[str, Any],
+    speedup: float,
+    manifest_path: Path | None,
+) -> None:
+    """Writes verifier speedup_summary.json and mirrors verified manifest."""
+    logs_dir = Path(os.environ.get("LOGS_DIR") or "/logs")
+    verifier_dir = logs_dir / "verifier"
+    if not verifier_dir.is_dir():
+        return
+
+    base_tps = used.get("baseline_peak_tps")
+    opt_tps = used.get("optimized_peak_tps")
+    summary = {
+        "primary_regime": primary_regime,
+        "per_chip": per_chip,
+        "baseline_num_chips": used.get("baseline_num_chips"),
+        "optimized_num_chips": used.get("optimized_num_chips"),
+        "baseline_peak_tps_per_chip": base_tps if per_chip else None,
+        "optimized_peak_tps_per_chip": opt_tps if per_chip else None,
+        "baseline_peak_tps": base_tps if not per_chip else None,
+        "optimized_peak_tps": opt_tps if not per_chip else None,
+        "verified_speedup": speedup,
+        "verified_manifest_path":
+        str(manifest_path) if manifest_path else None,
+    }
+    try:
+        (verifier_dir / "speedup_summary.json").write_text(
+            json.dumps(summary, indent=2),
+            encoding="utf-8",
+        )
+        if manifest_path is not None and manifest_path.is_file():
+            canonical = logs_dir / "artifacts" / BENCHMARK_MANIFEST_FILENAME
+            if manifest_path.resolve() != canonical.resolve():
+                canonical.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(manifest_path, canonical)
+    except OSError:
+        pass
+
+
 @criterion(description=(
     "The speedup of the optimized model over the baseline model, both served with vLLM on TPU "
     "and benchmarked with the same serving benchmark suite on the bottleneck regime: output "
-    "tokens per second of the optimized server divided by peak output tokens per second of baseline."
-))
+    "tokens per second (or per-chip output tokens per second when configured via verifier_params) "
+    "of the optimized server divided by peak baseline."))
 def tpu_speedup(workspace: Path) -> float:
     """Calculates deterministic throughput speedup from verified manifest or legacy fallback."""
     try:
@@ -1815,7 +1978,27 @@ def tpu_speedup(workspace: Path) -> float:
             print(f"[!] tpu_speedup: Workspace does not exist: {workspace}")
             return 0.0
 
-        discovery = discover_or_verify_runs(workspace)
+        params = _load_speedup_params()
+        raw_primary_regime = params.get("primary_regime")
+        if raw_primary_regime:
+            primary_regime = normalize_regime_name(str(raw_primary_regime))
+            if primary_regime not in VALID_REGIMES:
+                print(
+                    f"[!] tpu_speedup: Invalid primary_regime '{raw_primary_regime}' "
+                    f"in verifier_params.json; falling back to {PRIMARY_REGIME}"
+                )
+                primary_regime = PRIMARY_REGIME
+        else:
+            primary_regime = PRIMARY_REGIME
+        per_chip = _parse_strict_bool(params.get("per_chip"), False)
+        require_manifest = _parse_strict_bool(params.get("require_manifest"),
+                                              False)
+
+        discovery = discover_or_verify_runs(
+            workspace,
+            per_chip=per_chip,
+            require_manifest=require_manifest,
+        )
         if not discovery.baseline_runs:
             print(
                 f"[!] tpu_speedup: No valid baseline benchmark runs found in workspace: "
@@ -1829,23 +2012,33 @@ def tpu_speedup(workspace: Path) -> float:
             discovery.optimized_runs,
             inferred=discovery.inferred,
             verification_errors=discovery.verification_errors,
+            per_chip=per_chip,
         )
-        res = evaluator.evaluate(target_regimes=[PRIMARY_REGIME])
+        res = evaluator.evaluate(target_regimes=[primary_regime])
         res["discovery_source"] = discovery.summary
         if trace := format_debug_trace(res):
             print(trace)
 
         speedup = round(float(res.get("final_speedup", 1.0)), 4)
-        reg_data = res.get("regimes", {}).get(PRIMARY_REGIME, {})
+        reg_data = res.get("regimes", {}).get(primary_regime, {})
         used = reg_data.get("values_used", {})
         base_tps = used.get("baseline_peak_tps") or 0.0
         opt_tps = used.get("optimized_peak_tps")
-        opt_str = (f"{opt_tps:,.2f} tok/s"
+        unit = "tok/s/chip" if per_chip else "tok/s"
+        opt_str = (f"{opt_tps:,.2f} {unit}"
                    if opt_tps is not None else "(no opt runs)")
+
+        _persist_speedup_artifacts(
+            primary_regime=primary_regime,
+            per_chip=per_chip,
+            used=used,
+            speedup=speedup,
+            manifest_path=discovery.manifest_path,
+        )
 
         print(
             f"tpu_speedup: calculated raw ratio = {speedup:.4f}x "
-            f"(base={base_tps:,.2f} tok/s, opt={opt_str}, inferred={discovery.inferred})"
+            f"(base={base_tps:,.2f} {unit}, opt={opt_str}, inferred={discovery.inferred})"
         )
         return speedup
     except Exception as exc:

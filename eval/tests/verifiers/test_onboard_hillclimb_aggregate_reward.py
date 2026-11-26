@@ -157,6 +157,105 @@ class HillclimbAggregateRewardTest(unittest.TestCase):
                     self.assertIn(f"reward.json held: {json.dumps(ungated)}",
                                   stderr)
 
+    def test_post_hillclimb_xprof_recorded_in_reward_details(self) -> None:
+        details_path = self.verifier_dir / "reward-details.json"
+        details_path.write_text(json.dumps({}), encoding="utf-8")
+        self._write_scores(_SCORES)
+
+        # Without XProf artifacts -> passed=False, reward unchanged.
+        result = aggregate_reward.run_aggregation(
+            logs_dir=self.logs_dir,
+            tests_dir=self.tests_dir,
+            workspace_dir=self.harness.workspace,
+        )
+        self.assertEqual(result["reward"], _REWARD)
+        details = json.loads(details_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            details["post_hillclimb_xprof"],
+            {
+                "xplane_trace_count": 0,
+                "gaps_report_count": 0,
+                "passed": False,
+            },
+        )
+
+        # Baseline/onboarding/tpu-diagnostics traces and tiny/empty files do NOT pass.
+        for ignored_rel in (
+                "onboarding/xprof/base.xplane.pb",
+                "tpu-diagnostics/base.xplane.pb",
+                "hillclimb/xprof/baseline.xplane.pb",
+                "hillclimb/xprof/empty.xplane.pb",
+        ):
+            p = self.logs_dir / "artifacts" / ignored_rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(
+                b"" if ignored_rel.endswith("empty.xplane.pb") else b"xplane")
+        (self.harness.workspace / "xprof_bottlenecks_and_gaps.md").write_text(
+            "too short", encoding="utf-8")
+        self._write_scores(_SCORES)
+        aggregate_reward.run_aggregation(
+            logs_dir=self.logs_dir,
+            tests_dir=self.tests_dir,
+            workspace_dir=self.harness.workspace,
+        )
+        details = json.loads(details_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            details["post_hillclimb_xprof"],
+            {
+                "xplane_trace_count": 0,
+                "gaps_report_count": 0,
+                "passed": False,
+            },
+        )
+
+        # With non-empty post-hill-climb .xplane.pb under hillclimb/ and >=100B
+        # gaps report + speedup_summary.json -> both recorded in reward-details.json.
+        xprof_dir = self.logs_dir / "artifacts" / "hillclimb" / "xprof"
+        xprof_dir.mkdir(parents=True, exist_ok=True)
+        (xprof_dir / "final.xplane.pb").write_bytes(b"xplane")
+        (self.harness.workspace / "xprof_bottlenecks_and_gaps.md").write_text(
+            "x" * 150, encoding="utf-8")
+        summary_payload = {
+            "primary_regime": "8k/1k",
+            "per_chip": True,
+            "baseline_num_chips": 4,
+            "optimized_num_chips": 4,
+            "baseline_peak_tps_per_chip": 300.0,
+            "optimized_peak_tps_per_chip": 450.0,
+            "verified_speedup": 1.5,
+            "verified_manifest_path": "/logs/artifacts/benchmark_results.json",
+        }
+        (self.verifier_dir / "speedup_summary.json").write_text(
+            json.dumps(summary_payload), encoding="utf-8")
+        self._write_scores(_SCORES)
+        result = aggregate_reward.run_aggregation(
+            logs_dir=self.logs_dir,
+            tests_dir=self.tests_dir,
+            workspace_dir=self.harness.workspace,
+        )
+        self.assertEqual(result["reward"], _REWARD)
+        details = json.loads(details_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            details["post_hillclimb_xprof"],
+            {
+                "xplane_trace_count": 1,
+                "gaps_report_count": 1,
+                "passed": True,
+            },
+        )
+        self.assertEqual(details["speedup_summary"], summary_payload)
+
+        # Malformed reward-details.json is preserved without overwriting.
+        raw_corrupt = "{broken json"
+        details_path.write_text(raw_corrupt, encoding="utf-8")
+        self._write_scores(_SCORES)
+        aggregate_reward.run_aggregation(
+            logs_dir=self.logs_dir,
+            tests_dir=self.tests_dir,
+            workspace_dir=self.harness.workspace,
+        )
+        self.assertEqual(details_path.read_text(encoding="utf-8"), raw_corrupt)
+
 
 if __name__ == "__main__":
     unittest.main()

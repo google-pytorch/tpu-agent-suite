@@ -1,0 +1,142 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+# Nightly Serving Onboarding + Per-Chip Throughput Hill-Climbing Suite
+# ==============================================================================
+name: nightly-onboard-optimize
+
+environment:
+  base_image: "us-docker.pkg.dev/tpu-nexus-767207/nexus-dev/nexus-host@sha256:7ff58a98ae2655dbcf25fa0aeb3e8081281bfb3061f97581a98951e98371fff4"
+  memory_mb: 65536
+  storage_mb: 102400
+  apt_packages:
+    - openssh-client
+  pip_packages:
+    - transformers
+    - absl-py
+    - pytest
+
+evaluation:
+  # 6h base timeout (x2.0 timeout_multiplier = 12h so two back-to-back nightly
+  # runs fit on a shared 2x2 slice inside Cloud Build's 24h cap; x3.0 = 18h on GKE).
+  timeout_sec: 21600.0
+  verifier_timeout_sec: 1800.0
+  verifiers:
+    - name: onboarding_success
+      files: //eval/verifiers/onboard_hillclimb/onboarding_success.toml
+    - name: speedup
+      files: //eval/verifiers/onboard_hillclimb/calculate_speedup.py
+      verifier_params:
+        target_speedup: 1.0
+        primary_regime: "8k/1k"
+        per_chip: true
+        require_manifest: true
+    - name: efficiency
+      files:
+        - //eval/verifiers/efficiency_metrics/valid_tool_calls.py
+        - //eval/verifiers/efficiency_metrics/trajectory_score.py
+        - //eval/verifiers/efficiency_metrics/framework_directed_penalty.py
+      verifier_params:
+        agent_runtime_median: 250.0
+        agent_runtime_ceiling: 1200.0
+        total_tokens_median: 45.0
+        total_tokens_ceiling: 500.0
+        agent_turns_median: 310.0
+        agent_turns_ceiling: 3900.0
+    - name: cheating
+      files: //eval/verifiers/onboard_hillclimb/cheating_judge.toml
+    - name: execution_report
+      files: //eval/verifiers/onboard_hillclimb/execution_report_two_phase.toml
+    - name: invoked_subagent
+      files: //eval/verifiers/common/invoked_subagent.py
+    - name: schema_compliance
+      files: //eval/verifiers/common/schema_compliance.py
+  post_verify:
+    - //eval/verifiers/onboard_hillclimb/aggregate_reward.py
+
+  cases:
+    - name: onboard-hillclimb-gemma-4-26b-a4b-it
+      description: "Onboard google/gemma-4-26B-A4B-it onto Cloud TPU with torch_tpu and vLLM, then hill-climb per-chip output throughput on 8k/1k."
+      prompt_file: assets/prompts/onboard_hillclimb_template.md
+      prompt_vars:
+        model_name: "google/gemma-4-26B-A4B-it"
+        topology_target: "26B (4B active) MoE model"
+        model_notes: "None — follow the standard workflow above."
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/google/gemma-4-26B-A4B-it"
+      verifier_env:
+        HF_MODEL_URL: "https://huggingface.co/google/gemma-4-26B-A4B-it"
+
+    - name: onboard-hillclimb-qwen3-5-27b
+      description: "Onboard Qwen/Qwen3.5-27B onto Cloud TPU with torch_tpu and vLLM, then hill-climb per-chip output throughput on 8k/1k."
+      prompt_file: assets/prompts/onboard_hillclimb_template.md
+      prompt_vars:
+        model_name: "Qwen/Qwen3.5-27B"
+        topology_target: "27B model"
+        model_notes: "None — follow the standard workflow above."
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/Qwen/Qwen3.5-27B"
+      verifier_env:
+        HF_MODEL_URL: "https://huggingface.co/Qwen/Qwen3.5-27B"
+
+    - name: onboard-hillclimb-qwen3-6-27b
+      description: "Onboard Qwen/Qwen3.6-27B onto Cloud TPU with torch_tpu and vLLM, then hill-climb per-chip output throughput on 8k/1k."
+      prompt_file: assets/prompts/onboard_hillclimb_template.md
+      prompt_vars:
+        model_name: "Qwen/Qwen3.6-27B"
+        topology_target: "27B model"
+        model_notes: "None — follow the standard workflow above."
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/Qwen/Qwen3.6-27B"
+      verifier_env:
+        HF_MODEL_URL: "https://huggingface.co/Qwen/Qwen3.6-27B"
+
+    - name: onboard-hillclimb-glm-5-2-fp8
+      description: "Onboard zai-org/GLM-5.2-FP8 onto Cloud TPU with torch_tpu and vLLM, then hill-climb per-chip output throughput on 8k/1k."
+      # 10h base timeout (x2.0 timeout_multiplier = 20h, leaving 4h inside
+      # Cloud Build's 24h cap for setup, verifier, and Harbor upload).
+      timeout_sec: 36000.0
+      prompt_file: assets/prompts/onboard_hillclimb_template.md
+      prompt_vars:
+        model_name: "zai-org/GLM-5.2-FP8"
+        topology_target: "753B total / ~40B active FP8 MoE model"
+        model_notes: |-
+          - **Pre-staged checkpoint & multi-host staging:** Because this 753B FP8 MoE model's checkpoint is ~756 GB across 141 shards (`glm_moe_dsa`, 78 layers + MTP, 256 routed experts with 8 active per token and 1 shared expert, IndexShare sparse MLA), it exceeds single-host 4-chip `tpu7x` HBM once KV cache and runtime workspaces are included: size a multi-host topology (for example `>= 8` physical `tpu7x` chips such as `2x2x2` across 2 hosts, or the multi-host slice your environment provides), stage weights via shared cache or `/dev/shm` (`>= 500 GB` shared memory per host pod or `GCS_MOUNT_ROOT`) rather than small node ephemeral disks, preload `tcmalloc` (`LD_PRELOAD`) on host workers to prevent host-memory fragmentation/eviction during weight loading, and keep concurrency sweep warmups and prompt counts compact (`>= 4x` concurrency prompts per point) so full sweeps finish within cluster pod time caps. Reuse the pre-staged checkpoint at `gs://tpu-agent-eval/checkpoints/zai-org/GLM-5.2-FP8/f33c6dc501ee/`, Hugging Face revision `f33c6dc501ee5a2c7e35155653b1b1abbc320951`, rather than re-downloading all 141 shards from Hugging Face if reachable.
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/zai-org/GLM-5.2-FP8"
+      verifier_env:
+        HF_MODEL_URL: "https://huggingface.co/zai-org/GLM-5.2-FP8"
+
+    - name: onboard-hillclimb-glm-5-3-flash
+      description: "Onboard zai-org/GLM-5.3-Flash onto Cloud TPU with torch_tpu and vLLM, then hill-climb per-chip output throughput on 8k/1k."
+      # 10h base timeout (x2.0 timeout_multiplier = 20h, leaving 4h inside
+      # Cloud Build's 24h cap for setup, verifier, and Harbor upload).
+      timeout_sec: 36000.0
+      prompt_file: assets/prompts/onboard_hillclimb_template.md
+      prompt_vars:
+        model_name: "zai-org/GLM-5.3-Flash"
+        topology_target: "321B total / 18B active FP8 MoE model"
+        model_notes: |-
+          - **Pre-staged checkpoint & `/dev/shm` staging:** Because this 321B model's FP8 checkpoint exceeds 300 GB, stage weights into shared memory (`/dev/shm`, sizing container shared memory to `>= 450 GB` so pods do not fail on smaller defaults) rather than small node ephemeral disks, and keep concurrency sweep warmups and prompt counts compact (`>= 4x` concurrency prompts per point) so full sweeps finish within cluster pod time caps. Reuse the pre-staged checkpoint at `gs://agent-suite-models/ckpt/hf/zai-org/GLM-5.3-Flash/` (or `gs://tpu-agent-eval/checkpoints/zai-org/GLM-5.3-Flash/`), Hugging Face revision `46a050bec13002ad29ee795c16e61cf4fa3c4a9c`, rather than re-downloading all 62 shards from Hugging Face if reachable.
+          - **Hybrid-architecture `vllm_torchtpu` gaps:** If `vllm serve` hits GPU-only dependencies or custom hybrid-architecture gaps at worker import, KV-cache layout/group planning, or `EngineCore` `profile_run` / `_dummy_run` (for example `ImportError: tilelang is required for mhc`, Sparse MLA / indexer KV layout & page-size grouping, or KDA linear-attention `GDNAttentionMetadata` assertions), do **not** stop early: inspect the `vllm_torchtpu` source inside `$TASK_DOCKER` (e.g. `/workspace/vllm-torchtpu/src/vllm_torchtpu/`, including `models/vllm/` such as `kimi_k3/` and `deepseek_v4/`, `layers/adapter/custom_ops/` such as `kda_attention_op.py` and `mla_attention_op.py`, and `patch_registry.py`), author a `vllm_torchtpu` adapter patch wiring the model's KDA, Sparse MLA/indexer, and norm layers to TPU custom ops (validated rapidly with `--load-format dummy` before loading 328 GB weights, and verified with CPU-vs-TPU numerical parity) to serve via `vLLM` in Phase 1.
+      environment:
+        env_vars:
+          HF_MODEL_URL: "https://huggingface.co/zai-org/GLM-5.3-Flash"
+      verifier_env:
+        HF_MODEL_URL: "https://huggingface.co/zai-org/GLM-5.3-Flash"
